@@ -1241,6 +1241,96 @@ class DirectoryValidationPagingTests(unittest.TestCase):
 
 
 class FinalStateAcceptanceTests(unittest.TestCase):
+    def test_concurrent_sqlite_audit_and_drain_preserve_newer_positive_and_pending_work(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        from leakguard_core import models as m, backends, scan_policy
+        from leakguard_core.scan_store import SQLiteScanStore
+        for older_mode in ('audit', 'drain'):
+            with self.subTest(older=older_mode), tempfile.TemporaryDirectory(prefix='leakguard-service-concurrency-') as folder:
+                root = Path(folder)
+                corpus = root / 'corpus'; corpus.mkdir()
+                candidate = corpus / 'a-candidate.txt'; candidate.write_text('synthetic concurrent target')
+                pending = corpus / 'z-pending.txt'; pending.write_text('synthetic pending target')
+                config = {'audit_scopes': {'synthetic': str(corpus)}, 'gitleaks_executable': str(engine.EXE)}
+                state = root / 'state'
+                store = SQLiteScanStore(state, config=config)
+                lease = store.acquire_cycle('watch', None, lease_seconds=60)
+                store.enqueue_work(lease, ((str(candidate), 'file', 100), (str(pending), 'file', 100)))
+                store.release_cycle(lease, allow_complete=False)
+                store.close()
+                older_entered = threading.Event()
+                release_older = threading.Event()
+                detectors = threading.Barrier(2)
+                context = threading.local()
+
+                def detect(text, **kwargs):
+                    self.assertEqual(text, 'synthetic concurrent target')
+                    if context.older:
+                        older_entered.set()
+                    detectors.wait(timeout=10)
+                    if context.older:
+                        self.assertTrue(release_older.wait(timeout=10))
+                        return ()
+                    return (backends.BackendFinding('literal-password', 1, 1),)
+
+                def scan(mode, older):
+                    context.older = older
+                    store = SQLiteScanStore(state, config=config)
+                    service = engine.ScanService(config, store=store)
+                    try:
+                        options = {'limits': m.ScanLimits(30, 1), 'use_cache': False}
+                        report = service.audit('synthetic', **options) if mode == 'audit' else service.drain(**options)
+                        return report
+                    finally:
+                        service.close(); store.close()
+
+                newer_mode = 'drain' if older_mode == 'audit' else 'audit'
+                with patch.object(scan_policy, 'runtime_identity', return_value=('synthetic-concurrent-runtime', False)), patch.object(backends, 'detect', side_effect=detect), ThreadPoolExecutor(max_workers=2) as pool:
+                    older = pool.submit(scan, older_mode, True)
+                    try:
+                        self.assertTrue(older_entered.wait(timeout=10))
+                        newer = pool.submit(scan, newer_mode, False)
+                        newer_report = newer.result(timeout=15)
+                        self.assertEqual(newer_report.counts.findings, 1)
+                        store = SQLiteScanStore(state, config=config)
+                        try:
+                            self.assertEqual([(row['state'], row['id']) for row in store.query_findings()], [('active', newer_report.results[0].findings[0].id)])
+                        finally:
+                            store.close()
+                    finally:
+                        release_older.set()
+                    older_report = older.result(timeout=15)
+                self.assertEqual(older_report.counts.findings, 0)
+                self.assertEqual(older_report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                self.assertGreater(older_report.coverage.pending_files, 0)
+                self.assertGreater(newer_report.coverage.pending_files, 0)
+                store = SQLiteScanStore(state, config=config)
+                try:
+                    self.assertEqual([(row['state'], row['id']) for row in store.query_findings()], [('active', newer_report.results[0].findings[0].id)])
+                    scopes = {'audit': 'audit:synthetic', 'drain': 'watch'}
+                    work = {(scope, path): (done, claimed) for scope, path, done, claimed in store.conn.execute('SELECT scope,path,done,claimed FROM audit_work WHERE kind=\'file\'')}
+                    self.assertEqual(work[(scopes[older_mode], str(candidate))], (0, None))
+                    self.assertEqual(work[(scopes[newer_mode], str(candidate))], (1, None))
+                    for scope in scopes.values():
+                        self.assertEqual(work[(scope, str(pending))], (0, None))
+                        self.assertEqual(store.conn.execute('SELECT completed,owner FROM audit_cycles WHERE scope=?', (scope,)).fetchone(), (None, None))
+                    service = engine.ScanService(config, store=store)
+                    try:
+                        def retry_detect(text, **kwargs):
+                            return (backends.BackendFinding('literal-password', 1, 1),) if text == 'synthetic concurrent target' else ()
+                        with patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, False)), patch.object(backends, 'detect', side_effect=retry_detect):
+                            options = {'limits': m.ScanLimits(30, 10), 'use_cache': False}
+                            retried = service.audit('synthetic', **options) if older_mode == 'audit' else service.drain(**options)
+                        self.assertTrue(retried.coverage.enumeration_complete)
+                        self.assertEqual(retried.coverage.pending_files, 0)
+                        self.assertEqual(store.query_findings()[0]['state'], 'active')
+                        self.assertEqual(store.conn.execute('SELECT done FROM audit_work WHERE scope=? AND path=? AND kind=\'file\'', (scopes[newer_mode], str(pending))).fetchone()[0], 0)
+                    finally:
+                        service.close()
+                finally:
+                    store.close()
+
     def test_two_sqlite_connections_publish_only_newest_reserved_generation(self):
         from concurrent.futures import ThreadPoolExecutor
         from dataclasses import replace

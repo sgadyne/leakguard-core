@@ -452,3 +452,28 @@ class FinalGitAcceptanceTests(unittest.TestCase):
             self.assertEqual(report.results, ())
         finally:
             service.close()
+
+    def test_actual_production_document_blob_bound_is_explicit_incomplete(self):
+        import zipfile
+        from leakguard_core import models as m, scan_policy
+        from leakguard_core.git_scanning import GitInputs, MAX_DOCUMENT_BLOBS
+        self.assertEqual(MAX_DOCUMENT_BLOBS, 100)
+        for number in range(MAX_DOCUMENT_BLOBS + 1):
+            with zipfile.ZipFile(self.repo / ('document-' + str(number).zfill(3) + '.docx'), 'w') as archive:
+                archive.writestr('word/document.xml', '<document><p><t>synthetic document ' + str(number) + '</t></p></document>')
+        self.git('add', '.')
+        self.git('commit', '--no-verify', '-qm', 'synthetic bounded document history')
+        head = self.git('rev-parse', 'HEAD').decode().strip()
+        # Inspect real immutable Git acquisition and final policy directly; this
+        # boundary test does not claim to execute 100 separate parser workers.
+        session = GitInputs(self.repo, m.GitRequest(m.GitRequestKind.PUSH, (m.RefUpdate('refs/heads/main', head, 'refs/heads/main', '0' * len(head)),)), limits=m.ScanLimits(120, 200))
+        acquired = {(snapshot.source.blob_oid, snapshot.content.digest) for snapshot in session}
+        self.assertEqual(len(acquired), MAX_DOCUMENT_BLOBS)
+        self.assertEqual(session.documents, MAX_DOCUMENT_BLOBS + 1)
+        status = session.status()
+        self.assertFalse(status['complete'])
+        self.assertEqual([(issue.code, issue.required) for issue in status['issues']], [(m.ErrorCode.GIT_RANGE_INCOMPLETE, True)])
+        coverage, decision = scan_policy.evaluate((), policy=m.ScanPolicy.git(), policy_id='synthetic-document-bound', enumeration_complete=status['complete'], issues=status['issues'])
+        self.assertFalse(coverage.enumeration_complete)
+        self.assertFalse(coverage.required_complete)
+        self.assertEqual(decision.verdict, m.DecisionVerdict.INCOMPLETE)
