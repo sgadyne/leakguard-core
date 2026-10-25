@@ -329,7 +329,8 @@ class FindingRecord:
     proof_id: str | None = None
 
     def __post_init__(self) -> None:
-        _require_nonempty("id", self.id)
+        if not re.fullmatch(r"[0-9a-f]{64}", self.id):
+            raise ValueError("id must be an opaque lowercase SHA-256 identifier")
         if type(self.source) is not SourceRef:
             raise TypeError("source must be a SourceRef")
         if not re.fullmatch(r"[a-z][a-z0-9-]*(?:-[1-9][0-9]*)?", self.part_id):
@@ -495,6 +496,8 @@ class ScanReport:
             raise TypeError("decision must be a PolicyDecision")
         if self.decision.policy_id != self.policy_id:
             raise ValueError("decision policy_id must match the report")
+        if (not self.coverage.enumeration_complete or not self.coverage.required_complete) and self.decision.verdict is not DecisionVerdict.INCOMPLETE:
+            raise ValueError("incomplete coverage requires an incomplete decision")
         if type(self.issues) is not tuple or any(type(item) is not CoverageIssue for item in self.issues):
             raise TypeError("issues must be a tuple of CoverageIssue values")
 

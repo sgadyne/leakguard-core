@@ -41,7 +41,7 @@ def _report(*, verdict=DecisionVerdict.ALLOW, severity=FindingSeverity.REVIEW):
     now = dt.datetime.now(dt.timezone.utc)
     source = SourceRef(SourceKind.FILESYSTEM, "sample.txt")
     finding = FindingRecord(
-        id="finding-1",
+        id="f" * 64,
         source=source,
         part_id="text",
         start_line=2,
@@ -136,6 +136,12 @@ class PublicApiTests(unittest.TestCase):
     def test_result_invariants_prevent_bad_reuse_and_coverage_claims(self):
         report = _report()
         result = report.results[0]
+        with self.assertRaises(ValueError):
+            replace(
+                report,
+                coverage=CoverageSummary(False, False, 0),
+                decision=PolicyDecision(DecisionVerdict.ALLOW, (), report.policy_id),
+            )
         wrong_source = SourceRef(SourceKind.FILESYSTEM, "other.txt")
         bad_finding = replace(result.findings[0], source=wrong_source)
         with self.assertRaises(ValueError):
