@@ -821,6 +821,15 @@ class ReconciliationFailureTests(unittest.TestCase):
 
 
 class HookReplacementTests(unittest.TestCase):
+    def test_excessive_import_path_capture_fails_before_hook_changes(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-hook-paths-') as folder:
+            directory = Path(folder)
+            target = directory / 'pre-commit'; target.write_bytes(b'#!/bin/sh\nexit 7\n')
+            with patch('sys.path', [''] * 257), self.assertRaises(RuntimeError):
+                hooks.install_at(directory)
+            self.assertEqual(target.read_bytes(), b'#!/bin/sh\nexit 7\n')
+            self.assertFalse((directory / 'pre-commit.before-leakguard').exists())
+
     @unittest.skipIf(os.name == 'nt', 'POSIX link and mode semantics')
     def test_symlink_target_is_rejected_and_original_is_unchanged(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-hook-link-') as folder:

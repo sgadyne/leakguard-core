@@ -306,6 +306,65 @@ class FinalGitAcceptanceTests(unittest.TestCase):
     tearDown = GitSnapshotTests.tearDown
     git = GitSnapshotTests.git
 
+    def test_installed_pre_commit_ignores_repository_core_package_spoof(self):
+        from leakguard_core import hooks
+        marker = 'SyntheticOnlySpoofedHookM7kQ2vR9xL4nD8'
+        (self.repo / 'candidate.txt').write_text('client_secret = "' + marker + '"\n')
+        spoof = self.repo / 'leakguard_core'; spoof.mkdir()
+        (spoof / '__init__.py').write_text('')
+        (spoof / '__main__.py').write_text("from pathlib import Path\nPath('.spoofed-scanner-ran').write_text('executed')\nraise SystemExit(0)\n")
+        self.git('add', 'candidate.txt')
+        self.git('config', 'core.hooksPath', '.git/hooks')
+        hooks.install_at(self.repo / '.git' / 'hooks')
+        committed = subprocess.run(['git', 'commit', '-qm', 'synthetic spoofed scanner'], cwd=self.repo, capture_output=True)
+        self.assertFalse((self.repo / '.spoofed-scanner-ran').exists())
+        self.assertNotEqual(committed.returncode, 0)
+        self.assertIn(b'LeakGuard blocked', committed.stderr)
+        self.assertNotIn(marker.encode(), committed.stdout + committed.stderr)
+
+    def test_installed_pre_commit_ignores_future_pythonpath_spoof(self):
+        import os
+        from leakguard_core import hooks
+        marker = 'SyntheticOnlyInjectedHookM7kQ2vR9xL4nD8'
+        (self.repo / 'candidate.txt').write_text('client_secret = "' + marker + '"\n')
+        self.git('add', 'candidate.txt')
+        self.git('config', 'core.hooksPath', '.git/hooks')
+        hooks.install_at(self.repo / '.git' / 'hooks')
+        injected = self.repo / 'future-pythonpath'; injected.mkdir()
+        spoof = injected / 'leakguard_core'; spoof.mkdir()
+        (spoof / '__init__.py').write_text('')
+        sentinel = self.repo / '.pythonpath-spoof-ran'
+        (spoof / '__main__.py').write_text('from pathlib import Path\nPath(' + repr(str(sentinel)) + ").write_text('executed')\nraise SystemExit(0)\n")
+        committed = subprocess.run(['git', 'commit', '-qm', 'synthetic injected scanner'], cwd=self.repo, capture_output=True, env={**os.environ, 'PYTHONPATH': str(injected)})
+        self.assertFalse(sentinel.exists())
+        self.assertNotEqual(committed.returncode, 0)
+        self.assertIn(b'LeakGuard blocked', committed.stderr)
+        self.assertNotIn(marker.encode(), committed.stdout + committed.stderr)
+
+    def test_installed_hook_preserves_fixed_unicode_extension_path(self):
+        import json
+        import os
+        import sys
+        from leakguard_core import hooks
+        with tempfile.TemporaryDirectory(prefix="leakguard-trusted-'é'-") as folder:
+            extension = Path(folder)
+            (extension / 'trusted_hook_fixture.py').write_text("API_VERSION=1\nfrom leakguard_core.plugins import Finding\nclass Detector:\n def detect(self,text,path,part): return [Finding('synthetic-hook-plugin',1,'block')]\ndef create_plugin(options): return Detector()\n")
+            config = extension / 'config.json'
+            config.write_text(json.dumps({'plugins': [{'module': 'trusted_hook_fixture'}]}))
+            (self.repo / 'candidate.txt').write_text('ordinary clean content\n')
+            self.git('add', 'candidate.txt')
+            self.git('config', 'core.hooksPath', '.git/hooks')
+            with patch.object(sys, 'path', [*sys.path, str(self.repo), '', str(extension)]):
+                captured = hooks._trusted_paths(self.repo / '.git' / 'hooks')
+                self.assertNotIn(str(self.repo.resolve()), captured)
+                self.assertNotIn(str(Path.cwd().resolve()), captured)
+                self.assertIn(str(extension.resolve()), captured)
+                hooks.install_at(self.repo / '.git' / 'hooks')
+            committed = subprocess.run(['git', 'commit', '-qm', 'synthetic trusted extension'], cwd=self.repo, capture_output=True, env={**os.environ, 'LEAKGUARD_CONFIG': str(config)})
+            self.assertNotEqual(committed.returncode, 0)
+            self.assertIn(b'synthetic-hook-plugin', committed.stderr)
+            self.assertIn(b'LeakGuard blocked', committed.stderr)
+
     def test_installed_pre_push_rejects_secret_in_actual_orphan_root(self):
         from leakguard_core import hooks
         marker = 'SyntheticOnlyOrphanRootM7kQ2vR9xL4nD8'

@@ -1,11 +1,14 @@
 """Install local guards without changing tracked project files or discarding hooks."""
 import json
+from itertools import islice
 import os
 import pathlib
 import stat
 import tempfile
 import subprocess
 import sys
+
+from ._python import core_command
 
 ROOT = pathlib.Path(__file__).resolve().parent
 PYTHON = pathlib.Path(sys.executable)
@@ -16,7 +19,27 @@ def run(*args, cwd=None, check=True):
 
 
 def quote(value):
-    return "'" + str(value).replace('\\', '/').replace("'", "'\"'\"'") + "'"
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
+def _trusted_paths(hooks):
+    """Freeze installer-selected extension paths without ambient directory lookup."""
+    excluded = {pathlib.Path.cwd().resolve()}
+    if hooks.parent.name == '.git':
+        excluded.add(hooks.parent.parent.resolve())
+    existing = tuple(islice(iter(sys.path), 257))
+    if len(existing) > 256:
+        raise RuntimeError('hook-import-path-limit')
+    paths = []
+    for value in existing:
+        if type(value) is not str or not value or not pathlib.Path(value).is_absolute():
+            continue
+        if len(value) > 4096 or '\x00' in value:
+            raise RuntimeError('hook-import-path-limit')
+        path = pathlib.Path(value).resolve()
+        if path not in excluded and str(path) not in paths:
+            paths.append(str(path))
+    return tuple(paths)
 
 
 def _read_hook(path, maximum=1_000_000):
@@ -60,6 +83,9 @@ def _write_descriptor(descriptor, content):
 
 def install_at(hooks):
     hooks = pathlib.Path(hooks)
+    trusted_paths = _trusted_paths(hooks)
+    commands = {kind: core_command('leakguard_core', 'hook', kind, executable=PYTHON.as_posix(), search_paths=trusted_paths)
+                for kind in ('pre-commit', 'pre-push')}
     hooks.mkdir(parents=True, exist_ok=True)
     changes = []
     for kind in ['pre-commit', 'pre-push']:
@@ -78,7 +104,7 @@ def install_at(hooks):
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-        text = '#!/bin/sh\n' + marker.decode('ascii') + '\nexec ' + quote(PYTHON) + ' -X utf8 -m leakguard_core hook ' + kind + ' "$@"\n'
+        text = '#!/bin/sh\n' + marker.decode('ascii') + '\nexec ' + ' '.join(quote(value) for value in commands[kind]) + ' "$@"\n'
         descriptor, temporary = tempfile.mkstemp(prefix='.' + kind + '.leakguard-', dir=hooks)
         try:
             _write_descriptor(descriptor, text.encode('utf-8'))
