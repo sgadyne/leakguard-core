@@ -354,6 +354,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
                  installed_tools / "_safe_inputs.py")
     shutil.copy2(ROOT / "tools" / "benchmark_scan.py",
                  installed_tools / "benchmark_scan.py")
+    shutil.copy2(ROOT / "tools" / "run_corpus.py",
+                 installed_tools / "run_corpus.py")
     shutil.copy2(ROOT / "tools" / "run_acceptance.py",
                  installed_tools / "run_acceptance.py")
     (installed_tests / "state").mkdir(mode=0o700)

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -29,6 +30,11 @@ benchmark_spec = importlib.util.spec_from_file_location("evidence_benchmark_scan
 benchmark_scan = importlib.util.module_from_spec(benchmark_spec)
 assert benchmark_spec and benchmark_spec.loader
 benchmark_spec.loader.exec_module(benchmark_scan)
+CORPUS_TOOL = ROOT / "tools" / "run_corpus.py"
+corpus_spec = importlib.util.spec_from_file_location("evidence_run_corpus", CORPUS_TOOL)
+run_corpus = importlib.util.module_from_spec(corpus_spec)
+assert corpus_spec and corpus_spec.loader
+corpus_spec.loader.exec_module(run_corpus)
 ACCEPTANCE = ROOT / "tools" / "run_acceptance.py"
 acceptance_spec = importlib.util.spec_from_file_location("evidence_run_acceptance", ACCEPTANCE)
 run_acceptance = importlib.util.module_from_spec(acceptance_spec)
@@ -105,6 +111,27 @@ class BenchmarkAggregationTests(unittest.TestCase):
         self.assertEqual(Path(benchmark_scan.__file__).resolve(), BENCHMARK.resolve())
         self.assertEqual(benchmark_scan.ROOT.resolve(), ROOT.resolve())
         self.assertIn(str(benchmark_scan.ROOT / "src"), sys.path)
+
+    def test_corpus_tool_validates_catalog_from_copied_test_tree(self):
+        self.assertEqual(Path(run_corpus.__file__).resolve(), CORPUS_TOOL.resolve())
+        self.assertEqual(run_corpus.ROOT.resolve(), ROOT.resolve())
+        self.assertEqual(run_corpus.CATALOG.resolve(),
+                         (ROOT / "tests" / "fixtures" / "corpus_catalog.json").resolve())
+        catalog = json.loads(run_corpus.CATALOG.read_text(encoding="utf-8"))
+        self.assertEqual(catalog["schema_version"], 3)
+        self.assertEqual(len(catalog["cases"]), 48)
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "config.json"
+            config.write_text("{}\n", encoding="utf-8")
+            backend = root / "synthetic-backend"
+            backend.write_text("private validation placeholder\n", encoding="ascii")
+            backend.chmod(0o700)
+            args = SimpleNamespace(config=config, gitleaks=backend,
+                                   state=root / "state", output=root / "receipt.json")
+            resolved = run_corpus._validate(args)
+            self.assertEqual(resolved[-1], args.output.with_suffix(".json.manifest.json"))
 
     def test_report_aggregation_uses_backend_metric_and_case_local_identities(self):
         def case(files, policy_id):
