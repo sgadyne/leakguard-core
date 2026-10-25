@@ -61,7 +61,7 @@ class StoreLifecycleTests(unittest.TestCase):
         from leakguard_core import models as m
         source = m.SourceRef(m.SourceKind.FILESYSTEM, '/synthetic/candidate.txt')
         when = datetime.now(timezone.utc)
-        finding = m.FindingRecord('finding-1', source, 'text', 1, 1, 'literal-password', 'gitleaks', m.DetectorSeverity.BLOCK, m.FindingSeverity.BLOCK, m.FindingClassification.CREDENTIAL_CANDIDATE)
+        finding = m.FindingRecord('1' * 64, source, 'text', 1, 1, 'literal-password', 'gitleaks', m.DetectorSeverity.BLOCK, m.FindingSeverity.BLOCK, m.FindingClassification.CREDENTIAL_CANDIDATE)
         return m.ScanResult(source, m.ContentIdentity('sha256', '0' * 64, 1), m.RuntimeIdentity(policy, runtime, 'context', True), m.ScanOutcome.SCANNED, m.CoverageState.COMPLETE if complete else m.CoverageState.INCOMPLETE, (finding,) if findings else (), (), when, when, when if complete else None)
 
     def test_store_lifecycle_fencing_replay_and_no_mirror(self):
@@ -135,3 +135,79 @@ class StoreLifecycleTests(unittest.TestCase):
                 SQLiteScanStore(folder)
             self.assertEqual(hashlib.sha256(path.read_bytes()).digest(), original)
             self.assertFalse(list(Path(folder).glob('*.bak')))
+
+
+class ServiceTests(unittest.TestCase):
+    def config(self):
+        return {'gitleaks_executable': str(engine.EXE)}
+
+    def test_injected_store_receives_all_observations_without_plaintext_mirror(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore
+        with tempfile.TemporaryDirectory(prefix='leakguard-service-') as folder:
+            root = Path(folder)
+            source = root / 'candidate.txt'
+            source.write_text('synthetic only\n')
+            store = MemoryScanStore()
+            service = engine.ScanService(self.config(), state_dir=root / 'no-mirror', store=store)
+            try:
+                with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                    cold = service.scan([m.FileInput(source)], policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                    warm = service.scan([m.FileInput(source)], policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                    fresh = service.scan([m.FileInput(source)], policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10), use_cache=False)
+                self.assertEqual(cold.results[0].findings, warm.results[0].findings)
+                self.assertEqual(cold.results[0].findings, fresh.results[0].findings)
+                self.assertEqual(warm.results[0].outcome, m.ScanOutcome.REUSED)
+                self.assertEqual(warm.results[0].last_executed_at, cold.results[0].last_executed_at)
+                self.assertGreaterEqual(warm.results[0].last_verified_at, cold.results[0].last_verified_at)
+                self.assertEqual(len(store.results), 3)
+                self.assertEqual(len(store.reports), 3)
+                self.assertFalse((root / 'no-mirror').exists())
+                self.assertEqual([path.name for path in root.iterdir()], ['candidate.txt'])
+            finally:
+                service.close()
+
+    def test_dependency_change_invalidates_verified_metadata_cache(self):
+        import hashlib
+        import json
+        from leakguard_core import models as m, backends
+        with tempfile.TemporaryDirectory(prefix='leakguard-context-') as folder:
+            root = Path(folder)
+            dependency = root / 'module.py'
+            dependency.write_bytes(b'print(1)\n')
+            manifest = root / 'metadata.json'
+            manifest.write_text(json.dumps({'source_fingerprints': {'module.py': hashlib.sha256(dependency.read_bytes()).hexdigest()}}, indent=2))
+            service = engine.ScanService(self.config())
+            calls = []
+            def detect(*args, **kwargs):
+                calls.append(1)
+                return (backends.BackendFinding('generic-api-key', 3, 3),)
+            try:
+                with patch.object(backends, 'detect', side_effect=detect):
+                    first = service.scan([m.FileInput(manifest)], policy=m.ScanPolicy.git(), limits=m.ScanLimits(30, 10))
+                    dependency.write_bytes(b'print(2)\n')
+                    second = service.scan([m.FileInput(manifest)], policy=m.ScanPolicy.git(), limits=m.ScanLimits(30, 10))
+                self.assertEqual(first.results[0].findings[0].severity, m.FindingSeverity.INFO)
+                self.assertEqual(second.results[0].findings[0].severity, m.FindingSeverity.BLOCK)
+                self.assertEqual(second.results[0].outcome, m.ScanOutcome.SCANNED)
+                self.assertEqual(len(calls), 2)
+            finally:
+                service.close()
+
+    def test_source_changes_during_detection_retains_positive_with_incomplete_coverage(self):
+        from leakguard_core import models as m, backends
+        with tempfile.TemporaryDirectory(prefix='leakguard-change-') as folder:
+            source = Path(folder) / 'candidate.txt'
+            source.write_bytes(b'first')
+            service = engine.ScanService(self.config())
+            def detect(*args, **kwargs):
+                source.write_bytes(b'other')
+                return (backends.BackendFinding('literal-password', 1, 1),)
+            try:
+                with patch.object(backends, 'detect', side_effect=detect):
+                    report = service.scan([m.FileInput(source)], policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                self.assertEqual(report.counts.findings, 1)
+                self.assertEqual(service.store.query_findings()[0]['state'], 'unknown')
+            finally:
+                service.close()

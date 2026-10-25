@@ -191,7 +191,7 @@ def _report_from(value):
 def _result_json(result):
     # Reuse the single public allowlist, including nested source/identity fields.
     policy_id = result.identity.policy_id
-    report = m.ScanReport(1, 'store-result', result.observed_at, result.observed_at, policy_id, (result,), m.CoverageSummary(True, result.coverage is not m.CoverageState.INCOMPLETE, 0), m.PolicyDecision(m.DecisionVerdict.ALLOW, (), policy_id))
+    report = m.ScanReport(1, 'store-result', result.observed_at, result.observed_at, policy_id, (result,), m.CoverageSummary(True, result.coverage is not m.CoverageState.INCOMPLETE, 0), m.PolicyDecision(m.DecisionVerdict.INCOMPLETE if result.coverage is m.CoverageState.INCOMPLETE else m.DecisionVerdict.ALLOW, (), policy_id))
     return json.dumps(report.to_dict()['results'][0], separators=(',', ':'), ensure_ascii=True)
 
 
