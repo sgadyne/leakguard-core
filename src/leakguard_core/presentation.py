@@ -10,6 +10,10 @@ import subprocess
 from .models import DecisionVerdict, ErrorCode, ScanReport
 
 
+MAX_FINDINGS_PAGE_SIZE = 10_000
+MAX_FINDINGS_CURSOR_LENGTH = 1_024
+
+
 def sanitized_report(report):
     if type(report) is ScanReport:
         return report.to_dict()
@@ -187,10 +191,12 @@ def findings_page_report_to_dict(state, profile, rows, *, has_more, next_cursor)
         raise ValueError("invalid finding profile")
     if type(rows) not in {tuple, list}:
         raise TypeError("finding rows must be a tuple or list")
+    if len(rows) > MAX_FINDINGS_PAGE_SIZE:
+        raise ValueError("findings page exceeds the public bound")
     if type(has_more) is not bool:
         raise TypeError("has_more must be a boolean")
     if has_more:
-        if not isinstance(next_cursor, str) or re.fullmatch(r"[A-Za-z0-9._~-]{1,4096}", next_cursor) is None:
+        if not isinstance(next_cursor, str) or re.fullmatch(r"[A-Za-z0-9._~-]{1,1024}", next_cursor) is None:
             raise ValueError("invalid continuation cursor")
     elif next_cursor is not None:
         raise ValueError("cursor must be absent at the end of a page")
@@ -228,11 +234,13 @@ def render_findings_report(report, limit=50):
     if type(findings) is not list or type(report[count_key]) is not int or report[count_key] != len(findings):
         raise ValueError("invalid findings report")
     if is_page:
+        if report["page_count"] > MAX_FINDINGS_PAGE_SIZE:
+            raise ValueError("invalid findings report")
         cursor = report["next_cursor"]
         if type(report["has_more"]) is not bool:
             raise ValueError("invalid findings report")
         if report["has_more"]:
-            if not isinstance(cursor, str) or re.fullmatch(r"[A-Za-z0-9._~-]{1,4096}", cursor) is None:
+            if not isinstance(cursor, str) or re.fullmatch(r"[A-Za-z0-9._~-]{1,1024}", cursor) is None:
                 raise ValueError("invalid findings report")
         elif cursor is not None:
             raise ValueError("invalid findings report")
