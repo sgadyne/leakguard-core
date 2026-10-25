@@ -20,19 +20,34 @@ import zipfile
 
 def probe(root, benchmark):
     from leakguard_core import engine as guard, hooks
+    from leakguard_core import models
 
     synthetic = 'SyntheticOnly~M7kQ2vR9xL4nD8pS6aH3zB5cF1eG'
     target = root / 'sample.txt'
     target.write_text('client_secret = "' + synthetic + '"\n', encoding='utf-8')
-    conn = guard.db()
+    service = guard.ScanService({
+        'gitleaks_executable': str(guard.EXE),
+        'gitleaks_config': str(guard.RULES),
+    }, state_dir=root / 'typed-state')
     try:
-        first = guard.scan_file(target, conn)
-        second = guard.scan_file(target, conn)
+        limits = models.ScanLimits(45, 100)
+        first_report = service.scan(
+            [models.FileInput(target)], policy=models.ScanPolicy.inventory(),
+            limits=limits, use_cache=True,
+        )
+        second_report = service.scan(
+            [models.FileInput(target)], policy=models.ScanPolicy.inventory(),
+            limits=limits, use_cache=True,
+        )
+        first = first_report.results[0]
+        second = second_report.results[0]
     finally:
-        conn.close()
+        service.close()
     result = {'cache': {
-        'first_status': first['status'], 'first_findings': len(first['findings']),
-        'second_status': second['status'], 'second_findings': len(second['findings']),
+        'first_status': first.outcome.value, 'first_findings': len(first.findings),
+        'second_status': second.outcome.value, 'second_findings': len(second.findings),
+        'same_finding_ids': sorted(item.id for item in first.findings)
+                             == sorted(item.id for item in second.findings),
     }}
 
     repo = root / 'repo'
@@ -66,15 +81,24 @@ def probe(root, benchmark):
     with zipfile.ZipFile(document, 'w') as archive:
         archive.writestr('[Content_Types].xml', '<Types/>')
     git('add', 'no-text.docx')
-    conn = guard.db()
+    document_report = guard.ScanService({
+        'gitleaks_executable': str(guard.EXE),
+        'gitleaks_config': str(guard.RULES),
+    }, state_dir=root / 'document-state')
     try:
-        _, status = guard.scan_blob(document.read_bytes(), str(document), conn)
+        typed = document_report.scan_git(
+            repo, request=models.GitRequest(models.GitRequestKind.INDEX),
+            limits=models.ScanLimits(45, 100),
+        )
     finally:
-        conn.close()
+        document_report.close()
     process = subprocess.run([sys.executable, '-m', 'leakguard_core', 'hook', 'pre-commit'],
                              cwd=repo, capture_output=True, timeout=90)
+    issues = sorted({issue.code.value for scan in typed.results for issue in scan.issues})
     result['git_no_text_document'] = {
-        'extraction_status': status, 'hook_exit_code': process.returncode,
+        'outcome': typed.results[0].outcome.value if typed.results else 'missing-result',
+        'issues': issues, 'decision': typed.decision.verdict.value,
+        'hook_exit_code': process.returncode,
         'blocks_incomplete_scan': process.returncode != 0,
     }
 
@@ -107,9 +131,11 @@ def main():
         print(json.dumps(result, indent=2))
         fixed = (result['cache']['first_findings'] > 0
                  and result['cache']['second_findings'] > 0
+                 and result['cache']['same_finding_ids']
                  and result['installed_hook']['executable']
                  and result['installed_hook']['blocks_staged_synthetic']
                  and result['installed_hook']['output_redacted']
+                 and result['git_no_text_document']['decision'] in {'block', 'incomplete'}
                  and result['git_no_text_document']['blocks_incomplete_scan'])
         return 1 if args.assert_fixed and not fixed else 0
 
