@@ -492,6 +492,31 @@ class SupervisionConformanceTests(unittest.TestCase):
             time.sleep(0.8)
             self.assertFalse(marker.exists(), 'worker descendant outlived the completed worker')
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows Job Objects are exercised on native Windows CI')
+    def test_windows_job_enforces_a_hard_memory_limit(self):
+        code = "chunks=[]\nwhile True: chunks.append(bytearray(4 * 1024 * 1024))"
+        result = _supervision.run_worker(
+            [sys.executable, '-c', code], b'', timeout=15,
+            max_output_bytes=1024, memory_bytes=64 * 1024 * 1024,
+        )
+        self.assertNotEqual(result.returncode, 0,
+                            'the worker exceeded its Job Object memory limit without termination')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows Job Objects are exercised on native Windows CI')
+    def test_windows_job_kills_descendant_after_parent_success(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-worker-') as temporary:
+            marker = pathlib.Path(temporary) / 'child-survived'
+            child = "import pathlib,time; time.sleep(1.2); pathlib.Path(%r).write_text('alive')" % str(marker)
+            parent = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r]); print('done')" % child
+            result = _supervision.run_worker(
+                [sys.executable, '-c', parent], b'', timeout=5,
+                max_output_bytes=1024, memory_bytes=256 * 1024 * 1024,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b'done\n')
+            time.sleep(1.5)
+            self.assertFalse(marker.exists(), 'worker descendant outlived the completed worker')
+
 
 class ExtractionConformanceTests(unittest.TestCase):
     def make_docx(self, members):

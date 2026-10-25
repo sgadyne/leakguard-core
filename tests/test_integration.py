@@ -53,7 +53,7 @@ class IntegrationTests(unittest.TestCase):
         (self.repo / 'app.py').write_text('print("clean working tree content")\n')
         result = command(self.repo, 'commit', '-m', 'test: reject staged secret')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'LeakGuard blocked', result.stderr)
+        self.assertIn(b'BLOCKING FINDINGS', result.stderr)
         self.assertNotIn(SYNTHETIC.encode(), result.stdout + result.stderr)
         self.assertEqual(command(self.repo, 'rev-parse', 'HEAD').stdout.decode().strip(), self.base)
 
@@ -104,7 +104,7 @@ class IntegrationTests(unittest.TestCase):
         command(self.repo, 'add', manifest.name).check_returncode()
         result = command(self.repo, 'commit', '-m', 'test: reject hex credential')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'LeakGuard blocked', result.stderr)
+        self.assertIn(b'BLOCKING FINDINGS', result.stderr)
 
     def test_pre_push_finds_secret_in_intermediate_commit(self):
         (self.repo / 'app.py').write_text('client_secret = "' + SYNTHETIC + '"\n')
@@ -117,7 +117,7 @@ class IntegrationTests(unittest.TestCase):
         payload = f'refs/heads/main {head} refs/heads/main {self.base}\n'.encode()
         result = subprocess.run([sys.executable, str(guard.ROOT / 'leakguard.py'), 'hook', 'pre-push', 'origin', 'local-fixture'], input=payload, cwd=self.repo, capture_output=True)
         self.assertEqual(result.returncode, 1)
-        self.assertIn(b'LeakGuard blocked', result.stderr)
+        self.assertIn(b'BLOCKING FINDINGS', result.stderr)
         self.assertNotIn(SYNTHETIC.encode(), result.stdout + result.stderr)
 
     def test_actual_local_bare_push_hook_blocks_root_and_intermediate_secrets(self):
@@ -135,7 +135,7 @@ class IntegrationTests(unittest.TestCase):
         command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: synthetic branch root secret').check_returncode()
         root_push = command(self.repo, 'push', 'origin', 'HEAD:refs/heads/synthetic-root')
         self.assertNotEqual(root_push.returncode, 0)
-        self.assertIn(b'LeakGuard blocked', root_push.stderr)
+        self.assertIn(b'BLOCKING FINDINGS', root_push.stderr)
         self.assertNotIn(SYNTHETIC.encode(), root_push.stdout + root_push.stderr)
 
         command(self.repo, 'checkout', base_branch).check_returncode()
@@ -149,7 +149,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC, (self.repo / 'history.txt').read_text())
         intermediate_push = command(self.repo, 'push', 'origin', 'HEAD:refs/heads/synthetic-intermediate')
         self.assertNotEqual(intermediate_push.returncode, 0)
-        self.assertIn(b'LeakGuard blocked', intermediate_push.stderr)
+        self.assertIn(b'BLOCKING FINDINGS', intermediate_push.stderr)
         self.assertNotIn(SYNTHETIC.encode(), intermediate_push.stdout + intermediate_push.stderr)
 
     @unittest.skipIf(os.name == 'nt', 'invalid UTF-8 filename bytes are POSIX-specific')
@@ -298,7 +298,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'numerical/origins.json', result.stderr)
         self.assertIn(b'generic-api-key', result.stderr)
-        self.assertIn(b'values are redacted', result.stderr)
+        self.assertIn(b'finding values remain redacted', result.stderr)
         self.assertNotIn(manifest['api_key'].encode(), result.stderr + result.stdout)
 
     def test_pre_push_verifies_metadata_against_historical_source(self):
@@ -351,10 +351,10 @@ class IntegrationTests(unittest.TestCase):
 
         result = command(self.repo, 'commit', '-m', 'test: reject unverified AST-shaped token')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'LeakGuard blocked', result.stderr)
+        self.assertIn(b'BLOCKING FINDINGS', result.stderr)
         self.assertIn(b'numerical/origins.json:4', result.stderr)
         self.assertIn(b'generic-api-key', result.stderr)
-        self.assertIn(b'values are redacted', result.stderr)
+        self.assertIn(b'finding values remain redacted', result.stderr)
 
     def test_plugin_mode_preserves_metadata_proof_and_real_key_blocking(self):
         module = self.repo / 'noop_fixture.py'

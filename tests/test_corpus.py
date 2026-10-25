@@ -175,15 +175,28 @@ class DeterministicCorpusTests(unittest.TestCase):
 
     def test_actual_labeled_cases_emit_case_level_counts_without_fixture_text(self):
         summary = run_labeled_corpus(SEED, engine.EXE)
+        expected_uncovered = {"office-sheet-uncovered", "office-slides-uncovered"}
+        expected_metric_eligible = 32
+        expected_metric_not_scored = 13
+        if importlib.util.find_spec("pypdf") is None:
+            expected_uncovered.update({"pdf-text-positive", "pdf-image-only"})
+            expected_metric_eligible -= 1
+            expected_metric_not_scored -= 1
+        if importlib.util.find_spec("olefile") is None:
+            expected_uncovered.update({"msg-subject-positive", "msg-body-positive", "unsupported-compound"})
+            expected_metric_eligible -= 2
+            expected_metric_not_scored -= 1
         self.assertEqual(summary["counts"]["labeled_cases"], len(CASE_CATALOG))
-        self.assertEqual(summary["counts"]["uncovered"], 2)
+        self.assertEqual({item["case_id"] for item in summary["cases"]
+                          if item["status"] == "uncovered"}, expected_uncovered)
+        self.assertEqual(summary["counts"]["uncovered"], len(expected_uncovered))
         self.assertEqual(summary["counts"]["failed"], 0, summary)
         self.assertEqual(set(summary["by_category"]), {item["category"] for item in CASE_CATALOG})
         encoded = json.dumps(summary, sort_keys=True)
         self.assertNotIn("SyntheticOnly~", encoded)
         self.assertIn("true_positive", summary["detector_metrics"])
-        self.assertEqual(summary["counts"]["metric_eligible_cases"], 32)
-        self.assertEqual(summary["counts"]["metric_not_scored_cases"], 13)
+        self.assertEqual(summary["counts"]["metric_eligible_cases"], expected_metric_eligible)
+        self.assertEqual(summary["counts"]["metric_not_scored_cases"], expected_metric_not_scored)
 
     def test_same_seed_artifact_manifest_is_stable_across_wall_clock_ticks(self):
         import time
