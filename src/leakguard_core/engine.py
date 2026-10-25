@@ -716,7 +716,7 @@ class ScanService:
                 return replace(cached, source=source, outcome=m.ScanOutcome.REUSED, observed_at=when, last_verified_at=when, reused_from=cached.reused_from or hashlib.sha256(_legacy_origin(cached).encode()).hexdigest()), cache_key
         when = dt.datetime.now(dt.timezone.utc)
         remaining = max(0.001, deadline - time.monotonic())
-        extracted = extraction.extract(snapshot.data, source.path, limits=limits, timeout=min(limits.extract_timeout_seconds, remaining), plugins=self._plugins, cancel=cancel)
+        extracted = extraction.extract(snapshot.data, source.path, limits=limits, timeout=min(limits.extract_timeout_seconds, remaining), plugins=self._plugins, cancel=cancel, extractor_overrides=self.config.get('extractor_overrides'))
         issues = []
         findings = []
         omitted = self._omission(policy, source.path, extracted.format_id)
@@ -765,7 +765,8 @@ class ScanService:
         coverage = m.CoverageState.INCOMPLETE if any(issue.required for issue in issues) else m.CoverageState.OMITTED if issues else m.CoverageState.COMPLETE
         outcome = m.ScanOutcome.SCANNED if extracted.parts else m.ScanOutcome.SKIPPED
         # A document's declared nontext omissions are not eligible negatives.
-        result = m.ScanResult(source, snapshot.content, identity, outcome, coverage, tuple(merged.values()), tuple(issues), when, when if extracted.parts else None, dt.datetime.now(dt.timezone.utc) if coverage is m.CoverageState.COMPLETE else None)
+        finished = dt.datetime.now(dt.timezone.utc)
+        result = m.ScanResult(source, snapshot.content, identity, outcome, coverage, tuple(merged.values()), tuple(issues), finished, when if extracted.parts else None, finished if coverage is m.CoverageState.COMPLETE else None)
         return result, cache_key
 
     def _omission(self, policy, path, format_id):
