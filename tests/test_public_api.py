@@ -348,6 +348,69 @@ class PublicApiTests(unittest.TestCase):
                 **page, "schema_version": True,
             })
 
+    def test_manage_pages_sqlite_current_history_cursor_and_empty(self):
+        from leakguard_core.scan_store import SQLiteScanStore
+
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-manage-pages-") as directory:
+            root = Path(directory)
+            state_dir = root / "state"
+            store = SQLiteScanStore(state_dir, config={})
+            try:
+                for number in range(5):
+                    result = _report().results[0]
+                    source = replace(result.source, path=str(root / f"candidate-{number}.txt"))
+                    finding = replace(
+                        result.findings[0], source=source,
+                        id=format(number + 1, "064x"),
+                    )
+                    result = replace(result, source=source, findings=(finding,))
+                    store.record_result(result, generation=store.reserve(source))
+            finally:
+                store.close()
+
+            environment = {"LEAKGUARD_CONFIG": "", "LEAKGUARD_STATE_DIR": str(state_dir)}
+            for state in ("current", "history"):
+                cursor = None
+                observed = []
+                page_counts = []
+                while True:
+                    stdout = __import__("io").StringIO()
+                    stderr = __import__("io").StringIO()
+                    arguments = ["report", "all", "--state", state, "--limit", "2", "--format", "json"]
+                    if cursor is not None:
+                        arguments.extend(["--cursor", cursor])
+                    with patch.dict(os.environ, environment), \
+                         contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        code = manage.main(arguments)
+                    self.assertEqual(code, 0)
+                    self.assertEqual(stderr.getvalue(), "")
+                    payload = json.loads(stdout.getvalue())
+                    self.assertEqual(payload["schema_version"], 2)
+                    self.assertEqual(payload["state"], state)
+                    self.assertLessEqual(payload["page_count"], 2)
+                    self.assertNotIn("count", payload)
+                    page_counts.append(payload["page_count"])
+                    observed.extend(row["id"] for row in payload["findings"])
+                    self.assertEqual(payload["has_more"], payload["next_cursor"] is not None)
+                    if not payload["has_more"]:
+                        break
+                    cursor = payload["next_cursor"]
+                self.assertEqual(page_counts, [2, 2, 1])
+                self.assertEqual(len(observed), 5)
+                self.assertEqual(len(set(observed)), 5)
+
+            empty_state = root / "empty-state"
+            stdout = __import__("io").StringIO()
+            stderr = __import__("io").StringIO()
+            with patch.dict(os.environ, {"LEAKGUARD_CONFIG": "", "LEAKGUARD_STATE_DIR": str(empty_state)}), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manage.main(["report", "all", "--format", "json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            empty = json.loads(stdout.getvalue())
+            self.assertEqual((empty["page_count"], empty["has_more"], empty["next_cursor"]), (0, False, None))
+            self.assertEqual(empty["findings"], [])
+
     def test_manage_explain_reads_indexed_typed_report(self):
         report = _report()
 
