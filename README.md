@@ -57,6 +57,26 @@ documented in [compatibility notes](COMPATIBILITY.md).
 
 `leakguard-install-hooks /path/to/checkouts` installs pre-commit and pre-push hooks and preserves/chains existing hooks. It also sets up the Git template for future repositories. Installation is explicit and opt-in. Git guards scan staged content and outgoing history, including bounded document blobs. They block on credentials and incomplete required scans. They never push or authenticate discovered credentials.
 
+Managed hook launchers pin the installed core and use isolated Python startup so
+the repository working directory and later `PYTHONPATH` values cannot replace
+the scanner. Hook installation records bounded absolute Python search paths for
+explicitly configured extensions, excluding the target repository and installer
+working directory. Reinstall managed hooks after upgrading to refresh existing
+launchers. Built-in parser and extension workers also pin their core imports;
+ordinary console commands and Python API callers still use their selected
+interpreter environment. Plugins remain explicitly configured trusted code with
+the scanner account's permissions; worker isolation is not an OS sandbox.
+
+Managed hook launchers pin the installed core and use isolated Python startup so
+the repository working directory and later `PYTHONPATH` values cannot replace
+the scanner. Hook installation records bounded absolute Python search paths for
+explicitly configured extensions, excluding the target repository and installer
+working directory. Reinstall managed hooks after upgrading to refresh existing
+launchers. Built-in parser and extension workers also pin their core imports;
+ordinary console commands and Python API callers still use their selected
+interpreter environment. Plugins remain explicitly configured trusted code with
+the scanner account's permissions; worker isolation is not an OS sandbox.
+
 `leakguard-manage explain` prints the current repository's latest redacted typed report; `--format json` supplies its schema object to CLI consumers. To read an archived schema-0 report or a saved schema-1 report explicitly, use `explain --report PATH`. Explicit report input is capped at 64 MB and rejects malformed or unsupported schemas with a fixed redacted error. Findings retain commit and line so historical Git content is not confused with the working tree.
 
 `leakguard-manage report general` and `report companion` show current active and unknown findings with first/last-seen and verification times. Add `--state history` to inspect prior observations, or `--format json` for the closed redacted findings-page envelope (schema version 2, independent of ScanReport schema 1). Pages default to 1,000 findings and accept `--limit` from 1 to 10,000. When `has_more` is true, pass the returned opaque `next_cursor` to `--cursor` to continue; the envelope includes `page_count`, `has_more` and `next_cursor`, never a total count. A cursor continues the indexed order and is not a snapshot across concurrent scans. `report all` includes both profiles. These commands query the indexed store directly and do not initialize detectors. Other commands include `locate`, `history`, `copies`, `where`, `register-material` and `plan-location`. Existing companion findings are inventory; Git guards remain blocking. Suggested locations never trigger moves.
