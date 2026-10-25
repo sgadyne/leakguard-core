@@ -1,0 +1,75 @@
+"""Gitleaks adapter: bounded execution and narrow redacted observations only."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+
+from ._supervision import WorkerError, run_worker, worker_environment
+
+
+class BackendError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+@dataclass(frozen=True)
+class BackendFinding:
+    rule: str
+    start_line: int
+    end_line: int
+    severity: str = 'block'
+
+
+def detect(text: str, *, binary=None, rules=None, timeout=45,
+           max_findings=100_000, cancel=None) -> tuple[BackendFinding, ...]:
+    if type(text) is not str or type(max_findings) is not int or max_findings <= 0:
+        raise BackendError('detector-output-invalid')
+    executable = str(binary or os.environ.get('LEAKGUARD_GITLEAKS') or shutil.which('gitleaks') or 'gitleaks')
+    rule_path = str(rules or Path(__file__).with_name('rules.toml'))
+    command = [executable, 'stdin', '--config', rule_path, '--redact=100',
+               '--ignore-gitleaks-allow', '--no-banner', '--no-color', '--log-level', 'fatal',
+               '--report-format', 'json', '--report-path', '-', '--timeout', str(max(1, math.ceil(timeout)))]
+    try:
+        process = run_worker(command, text.encode('utf-8'), timeout=timeout,
+                             max_input_bytes=80_000_000,
+                             max_output_bytes=min(64_000_000, max(1_048_576, max_findings * 4096)),
+                             # Go reserves a large virtual arena; applying RLIMIT_AS
+                             # would prevent startup. ILMR bounds test-job memory.
+                             memory_bytes=None, env=worker_environment(), cancel=cancel)
+    except WorkerError as error:
+        code = {'worker-timeout': 'detector-timeout', 'worker-output-limit': 'detector-output-limit',
+                'cancelled': 'cancelled'}.get(error.code, 'detector-failed')
+        raise BackendError(code) from None
+    if process.returncode not in (0, 1):
+        raise BackendError('detector-failed')
+    try:
+        raw = json.loads(process.stdout)
+        # Some Gitleaks versions write JSON null when there are no detections.
+        if raw is None:
+            raw = []
+        if type(raw) is not list:
+            raise ValueError
+        if len(raw) > max_findings:
+            raise BackendError('detector-output-limit')
+        line_count = text.count('\n') + 1
+        findings = []
+        for item in raw:
+            if type(item) is not dict:
+                raise ValueError
+            rule, first, last = item.get('RuleID'), item.get('StartLine'), item.get('EndLine')
+            if (type(rule) is not str or not re.fullmatch('[a-z][a-z0-9-]{0,79}', rule)
+                    or type(first) is not int or type(last) is not int
+                    or not 1 <= first <= last <= line_count):
+                raise ValueError
+            findings.append(BackendFinding(rule, first, last))
+        return tuple(findings)
+    except BackendError:
+        raise
+    except (ValueError, TypeError, UnicodeError):
+        raise BackendError('detector-output-invalid') from None
