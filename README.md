@@ -57,15 +57,6 @@ documented in [compatibility notes](COMPATIBILITY.md).
 
 `leakguard-install-hooks /path/to/checkouts` installs pre-commit and pre-push hooks and preserves/chains existing hooks. It also sets up the Git template for future repositories. Installation is explicit and opt-in. Git guards scan staged content and outgoing history, including bounded document blobs. They block on credentials and incomplete required scans. They never push or authenticate discovered credentials.
 
-Managed hook launchers pin the installed core and use isolated Python startup so
-the repository working directory and later `PYTHONPATH` values cannot replace
-the scanner. Hook installation records bounded absolute Python search paths for
-explicitly configured extensions, excluding the target repository and installer
-working directory. Reinstall managed hooks after upgrading to refresh existing
-launchers. Built-in parser and extension workers also pin their core imports;
-ordinary console commands and Python API callers still use their selected
-interpreter environment. Plugins remain explicitly configured trusted code with
-the scanner account's permissions; worker isolation is not an OS sandbox.
 
 Managed hook launchers pin the installed core and use isolated Python startup so
 the repository working directory and later `PYTHONPATH` values cannot replace

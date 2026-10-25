@@ -180,21 +180,6 @@ selected interpreter environment. Configured plugins remain explicitly chosen
 trusted code and retain the scanner account's permissions. Pinning a worker's
 core import does not make extension code safe or remove its trust.
 
-Managed hook launchers use isolated Python startup and pin the trusted core
-installation before importing the hook entry point. Built-in parser and
-configured extension workers likewise pin core imports, so the input
-repository's working directory or a later `PYTHONPATH` cannot replace LeakGuard
-inside those workers. At hook installation, LeakGuard captures a bounded set of
-absolute Python search paths for explicitly configured extensions, excluding
-the target repository and installer working directory. Reinstall managed hooks
-after upgrading LeakGuard to refresh an existing launcher; this preserves the
-normal hook backup/chaining behavior.
-
-This worker/launcher import isolation does not sandbox Python API callers or
-ordinary `leakguard` and `leakguard-manage` console entry points; those use the
-selected interpreter environment. Configured plugins remain explicitly chosen
-trusted code and retain the scanner account's permissions. Pinning the worker's
-core import does not make extension code safe or remove its trust.
 `manage report PROFILE` defaults to indexed current active and unknown findings,
 with `--state history` for prior observations. Both current/history views include
 timestamps. The indexed query is bounded and paginated: `--limit` accepts 1 to
