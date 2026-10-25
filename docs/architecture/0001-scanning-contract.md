@@ -1,6 +1,6 @@
 # ADR 0001: one scanning contract, explicit coverage, reusable extensions
 
-Status: proposed for the next implementation phase; not implemented by this document.
+Status: implementation in progress for 0.2.0. The requirements below remain the acceptance contract; implementation and platform execution are recorded separately in the validation ledger.
 Date: 2026-10-25. Reviewed source: `7600d922be176cb0c07c91ac47da363a6e51ed62` (0.1.0).
 Execution sequence and ownership: [dispatch plan](../handoff/dispatch-plan.md).
 
@@ -451,8 +451,8 @@ run incomplete; never silently truncate a report and declare success. CLI defaul
 deadline_seconds/max_files remain 120/1,000 for scan and 600/3,000 for audit.
 
 Core enforces byte/part/finding/IPC limits while streaming, before collecting
-unbounded lists. Worker parser memory is bounded on Linux/macOS with an exercised
-OS mechanism, Windows with an exercised Job Object mechanism. If a required hard
+unbounded lists. Acceptance requires worker parser memory bounds to be exercised on Linux/macOS
+with an OS mechanism, and on Windows with a Job Object mechanism. If a required hard
 bound cannot be established, report resource-bound-unavailable; do not claim an
 ordinary wall timeout is a memory cap. Treat platform implementation trouble as a
 release limitation, not a reason to silently remove the bound. Kill/reap the owned
@@ -706,3 +706,26 @@ RSS, subprocess count, SQLite writes/lock time and exact runtime identity. Warm
 runs still read/hash bytes; compare on equivalent correctness, not the broken
 stat-only hit. Label synthetic precision/recall by rule/case category and report
 coverage failures separately; do not infer real-world rates.
+
+
+## Implementation checkpoint (2026-10-25)
+
+The 0.2 candidate uses one per-part service for filesystem, caller bytes, immutable
+Git inputs, audit/drain and deprecated result adapters. There is no accepted
+batching optimization. Unknown extension closure disables reuse; available module,
+script, backend and dependency artifact bytes still participate in runtime identity.
+
+`ScanStore.query_findings_page` provides bounded indexed pages; the compatibility
+`query_findings` wrapper returns only its first bounded page. The separate findings
+query envelope is schema 2 with `page_count`, `has_more` and `next_cursor`; the scan
+report remains schema 1. Catalog/material/work state stays behind the injected
+store. No encrypted credential vault is implemented or implied by this seam.
+
+The Windows Job Object candidate starts workers suspended, assigns memory and
+kill-on-close ownership, then resumes the owned thread. Assignment failure is
+`resource-bound-unavailable`. Native Windows and macOS execution must have their
+own receipts before either platform is marked accepted. Linux checks do not stand
+in for them. The Go backend has output/time bounds and a managed heap target; the
+parser's address-space hard limit cannot be applied to Go's virtual arena. This
+limitation remains explicit in validation rather than being reported as a hard
+backend memory cap.
