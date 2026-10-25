@@ -21,10 +21,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(arguments)
     try:
         config = _load_config(args.config)
+        config_values = config.to_mapping()
         from . import settings
 
         state_dir = Path(args.state_dir).expanduser() if args.state_dir else settings.state_directory()
-        limits = ScanLimits(deadline_seconds=args.budget_seconds, max_files=args.max_files)
+        limits = ScanLimits(
+            deadline_seconds=args.budget_seconds,
+            max_files=args.max_files,
+            max_file_bytes=config_values["max_file_bytes"],
+            detector_timeout_seconds=config_values["scan_timeout_seconds"],
+        )
         with Scanner.open(config=config, state_dir=state_dir) as scanner:
             if args.command == "scan":
                 report = scanner.scan_paths(

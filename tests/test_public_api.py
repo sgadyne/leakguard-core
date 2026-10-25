@@ -372,6 +372,59 @@ class PublicApiTests(unittest.TestCase):
                     code = main(["scan", "sample.txt", "--fail-on", "block", "--state-dir", directory])
             self.assertEqual(code, 1)
 
+    def test_cli_passes_validated_config_limits_to_shared_service(self):
+        report = _report()
+
+        class FakeScanner:
+            limits = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def scan_paths(self, paths, *, policy, limits, use_cache, cancel=None):
+                self.limits = limits
+                return report
+
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-cli-config-") as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps({"max_file_bytes": 1234, "scan_timeout_seconds": 7}),
+                encoding="utf-8",
+            )
+            state = root / "state"
+            scanner = FakeScanner()
+            stdout = __import__("io").StringIO()
+            stderr = __import__("io").StringIO()
+            with patch.dict(os.environ, {"LEAKGUARD_CONFIG": "", "LEAKGUARD_GITLEAKS": ""}), \
+                 patch("leakguard_core.cli.Scanner.open", return_value=scanner), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main(["scan", "sample.txt", "--config", str(config_path), "--format", "json", "--state-dir", str(state)])
+            self.assertEqual(code, 0)
+            self.assertEqual(scanner.limits.max_file_bytes, 1234)
+            self.assertEqual(scanner.limits.detector_timeout_seconds, 7)
+            self.assertEqual(stdout.getvalue().count("\n"), 1)
+            self.assertEqual(stderr.getvalue(), "")
+
+    def test_cli_malformed_or_missing_config_fails_closed_to_stderr(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-cli-config-") as directory:
+            root = Path(directory)
+            malformed = root / "malformed.json"
+            malformed.write_text('{"max_file_bytes":', encoding="utf-8")
+            missing = root / "missing.json"
+            for config_path in (malformed, missing):
+                stdout = __import__("io").StringIO()
+                stderr = __import__("io").StringIO()
+                with patch.dict(os.environ, {"LEAKGUARD_CONFIG": "", "LEAKGUARD_GITLEAKS": ""}), \
+                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = main(["scan", "sample.txt", "--format", "json", "--config", str(config_path)])
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("LeakGuard: configuration-invalid", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
