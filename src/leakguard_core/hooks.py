@@ -31,6 +31,8 @@ def install_at(hooks):
             shutil.copy2(target, backup)
         text = '#!/bin/sh\n' + marker + '\nexec ' + quote(PYTHON) + ' ' + '-X utf8 -m leakguard_core' + ' hook ' + kind + ' "$@"\n'
         target.write_text(text, encoding='utf-8', newline='\n')
+        if os.name != 'nt':
+            target.chmod(target.stat().st_mode | 0o111)
         changes.append(kind)
     return changes
 

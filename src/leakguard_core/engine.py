@@ -54,6 +54,9 @@ def db():
             conn.execute('ALTER TABLE ' + table + ' ADD COLUMN priority INTEGER NOT NULL DEFAULT 100')
     if 'policy' not in {row[1] for row in conn.execute('PRAGMA table_info(cache)')}:
         conn.execute('ALTER TABLE cache ADD COLUMN policy TEXT')
+    for column, declaration in [('digest', 'TEXT'), ('payload', 'TEXT'), ('executed_at', 'TEXT')]:
+        if column not in {row[1] for row in conn.execute('PRAGMA table_info(cache)')}:
+            conn.execute('ALTER TABLE cache ADD COLUMN ' + column + ' ' + declaration)
     catalog.initialize(conn)
     conn.execute('CREATE TABLE IF NOT EXISTS priority_seeds(scope TEXT,path TEXT,cycle TEXT,PRIMARY KEY(scope,path,cycle))')
     conn.commit()
@@ -170,12 +173,19 @@ def scan_file(path, conn, use_cache=True):
             catalog.metadata_only(conn, str(path), stat.st_size, CONFIG)
             result['status'] = 'skipped-size'
             return result
-        old = conn.execute('SELECT size,mtime,status,policy FROM cache WHERE path=?', (str(path),)).fetchone()
-        canonical = policies.canonical(path, CONFIG)
-        if use_cache and old and old[:2] == (stat.st_size, stat.st_mtime_ns) and old[2] == 'scanned' and old[3] == SCAN_POLICY and catalog.observed(conn, canonical):
-            result['status'] = 'unchanged'
-            return result
+        # Stat metadata is admission information, never content identity.
         data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        old = conn.execute('SELECT digest,status,policy,payload,executed_at FROM cache WHERE path=?', (str(path),)).fetchone()
+        # Until the service has a full dependency closure, contextual/plugin/material
+        # scans deliberately run again. Their unchanged primary bytes prove too little.
+        eligible = path.suffix.lower() != '.json' and not PLUGINS and not conn.execute('SELECT 1 FROM material_sources LIMIT 1').fetchone()
+        if use_cache and eligible and old and old[:3] == (digest, 'scanned', SCAN_POLICY) and old[3]:
+            after = path.stat()
+            if (after.st_size, after.st_mtime_ns) == (stat.st_size, stat.st_mtime_ns):
+                result.update(status='unchanged', findings=json.loads(old[3]), last_executed_at=old[4], last_verified_at=now())
+                catalog.observe(conn, str(path), data, CONFIG)
+                return result
         digest = catalog.observe(conn, str(path), data, CONFIG)
         result['findings'], result['status'] = scan_blob(data, str(path), conn)
         def sibling(module):
@@ -189,7 +199,9 @@ def scan_file(path, conn, use_cache=True):
         after = path.stat()
         if (after.st_size, after.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
             result['status'] = 'changed-during-scan'
-        conn.execute('INSERT OR REPLACE INTO cache(path,size,mtime,status,policy) VALUES(?,?,?,?,?)', (str(path), stat.st_size, stat.st_mtime_ns, result['status'], SCAN_POLICY))
+        result['last_executed_at'] = now()
+        result['last_verified_at'] = result['last_executed_at'] if result['status'] == 'scanned' else None
+        conn.execute('INSERT OR REPLACE INTO cache(path,size,mtime,status,policy,digest,payload,executed_at) VALUES(?,?,?,?,?,?,?,?)', (str(path), stat.st_size, stat.st_mtime_ns, result['status'], SCAN_POLICY, digest, json.dumps(result['findings']), result['last_executed_at']))
         conn.commit()  # Release SQLite's writer lock before the next potentially slow document.
     except Exception as error:
         result['status'] = 'error'
@@ -440,6 +452,8 @@ def git_hook(kind, args):
                     issues.append({'path': path, 'status': 'skipped-size'}); continue
                 blob = git('show', ':' + path, cwd=repo).stdout
                 extra, status = scan_blob(blob, str(repo / path))
+                if status != 'scanned':
+                    issues.append({'path': path, 'status': status})
                 for item in extra:
                     if pathlib.Path(path).suffix.lower() == '.json' and item['rule'] == 'generic-api-key':
                         findings.extend(git_findings([{'File': str(repo / path), 'RuleID': item['rule'], 'StartLine': item['line']}], repo))
@@ -484,6 +498,8 @@ def git_hook(kind, args):
                         if size > CONFIG['max_file_bytes']:
                             issues.append({'path': path, 'status': 'skipped-size'}); continue
                         extra, status = scan_blob(git('cat-file', 'blob', oid, cwd=repo).stdout, str(repo / path))
+                        if status != 'scanned':
+                            issues.append({'path': path, 'status': status})
                         for item in extra:
                             item['commit'] = revision
                             item['id'] = hashlib.sha256((item['id'] + '|' + revision).encode()).hexdigest()
@@ -501,7 +517,9 @@ def git_hook(kind, args):
         report = save_report('git-' + kind, [{'status': 'scanned', 'findings': list(unique.values())}, *issues], conn, {'repo': str(repo)})
         blocked = [f for f in report['findings'] if f['severity'] == 'block']
         print(presentation.render(report, report['report_path']), file=sys.stderr)
-        if blocked or issues:
+        if issues:
+            return 2
+        if blocked:
             return 1
     except Exception as error:
         print(f'LeakGuard could not complete the scan ({type(error).__name__}); Git operation blocked.', file=sys.stderr)
