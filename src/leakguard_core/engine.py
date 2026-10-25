@@ -656,7 +656,8 @@ class ScanService:
             finding_count += len(result.findings)
             results.append(result)
             reservations.append((generation, cache_key))
-            snapshots.append(snapshot)
+            snapshots.append(snapshot.detach_validator() if snapshot is not None else None)
+            snapshot = None
             if not enumeration_complete:
                 break
         if hasattr(iterator, 'close'):
@@ -672,8 +673,8 @@ class ScanService:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
             results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
-        for index, snapshot in enumerate(snapshots):
-            if snapshot is not None and (time.monotonic() >= deadline or not snapshot.valid()):
+        for index, validate_snapshot in enumerate(snapshots):
+            if validate_snapshot is not None and (time.monotonic() >= deadline or not validate_snapshot()):
                 result = results[index]
                 code = m.ErrorCode.BUDGET_EXHAUSTED if time.monotonic() >= deadline else m.ErrorCode.INPUT_CHANGED
                 results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, result.source, required=True),))
@@ -706,7 +707,7 @@ class ScanService:
         from dataclasses import replace
         from . import models as m, extraction, backends
         source = snapshot.source
-        identity = m.RuntimeIdentity(policy_id, self._runtime, snapshot.context.identity, self._cache_eligible)
+        identity = m.RuntimeIdentity(policy_id, self._runtime, snapshot.context.identity, self._cache_eligible and not snapshot.context.truncated)
         key_data = [snapshot.content.digest, snapshot.content.size_bytes, identity.runtime_id, policy_id, source.kind.value, source.path, source.repository, source.commit, source.index_tree_oid, identity.context_id]
         cache_key = hashlib.sha256(json.dumps(key_data, separators=(',', ':')).encode()).hexdigest()
         if use_cache and identity.cache_eligible:

@@ -84,19 +84,32 @@ class ProofContext:
         self._reader = reader
         self._validator = validator
         self.dependencies = {}
+        self.truncated = False
+        self._total_bytes = 0
+        self.max_dependencies = 1000
+        self.max_dependency_bytes = 12_000_000
 
     def read(self, name):
         reference = PurePosixPath(name.replace('\\', '/'))
         if reference.is_absolute() or '..' in reference.parts or ':' in str(reference):
             return None
         key = str(reference)
+        if self.truncated:
+            return None
         if key not in self.dependencies:
+            if len(self.dependencies) >= self.max_dependencies:
+                self.truncated = True
+                return None
             try:
                 data = self._reader(key)
             except (OSError, AcquisitionError):
                 data = None
             if data is not None and len(data) > 1_000_000:
                 data = None
+            if data is not None and self._total_bytes + len(data) > self.max_dependency_bytes:
+                self.truncated = True
+                return None
+            self._total_bytes += len(data) if data is not None else 0
             self.dependencies[key] = data
         return self.dependencies[key]
 
@@ -104,24 +117,38 @@ class ProofContext:
         if Path(path).suffix.lower() == '.json':
             for name in _reference_names(data):
                 self.read(name)
+                if self.truncated:
+                    break
 
     @property
     def identity(self):
         values = [(name, hashlib.sha256(data).hexdigest() if data is not None else 'missing')
                   for name, data in sorted(self.dependencies.items())]
-        return hashlib.sha256(json.dumps(['proof-context-v1', values], separators=(',', ':')).encode()).hexdigest()
+        return hashlib.sha256(json.dumps(['proof-context-v2', self.truncated, values], separators=(',', ':')).encode()).hexdigest()
+
+    def detach_validator(self):
+        # Keep only digests after classification; raw sibling/source bytes must
+        # not accumulate across an entire bounded batch.
+        expected = {name: hashlib.sha256(data).digest() if data is not None else None
+                    for name, data in self.dependencies.items()}
+        reader = self._validator
+        if reader is None:
+            return lambda: True
+
+        def valid():
+            for name, original in expected.items():
+                try:
+                    current = reader(name)
+                except (OSError, AcquisitionError):
+                    current = None
+                actual = hashlib.sha256(current).digest() if current is not None else None
+                if actual != original:
+                    return False
+            return True
+        return valid
 
     def valid(self):
-        if not self._validator:
-            return True
-        for name, original in self.dependencies.items():
-            try:
-                current = self._validator(name)
-            except (OSError, AcquisitionError):
-                current = None
-            if current != original:
-                return False
-        return True
+        return self.detach_validator()()
 
 
 @dataclass(frozen=True)
@@ -135,8 +162,13 @@ class SnapshotInput:
     def content(self):
         return content_identity(self.data)
 
+    def detach_validator(self):
+        context_check = self.context.detach_validator()
+        primary_check = self.revalidate
+        return lambda: context_check() and (primary_check is None or primary_check())
+
     def valid(self):
-        return self.context.valid() and (self.revalidate is None or self.revalidate())
+        return self.detach_validator()()
 
 
 def acquire_file(path: Path, *, max_bytes: int):
@@ -156,9 +188,10 @@ def acquire_file(path: Path, *, max_bytes: int):
     context = ProofContext(sibling, validator=sibling)
     context.prepare(data, str(path))
 
+    expected_digest = hashlib.sha256(data).digest()
     def valid():
         try:
-            return _bounded_file(path, max_bytes) == data
+            return hashlib.sha256(_bounded_file(path, max_bytes)).digest() == expected_digest
         except AcquisitionError:
             return False
 

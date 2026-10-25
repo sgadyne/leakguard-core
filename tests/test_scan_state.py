@@ -211,3 +211,25 @@ class ServiceTests(unittest.TestCase):
                 self.assertEqual(service.store.query_findings()[0]['state'], 'unknown')
             finally:
                 service.close()
+
+
+class ProofBudgetTests(unittest.TestCase):
+    def test_truncated_dependency_closure_cannot_authorize_proof(self):
+        from leakguard_core.sources import ProofContext
+        context = ProofContext(lambda name: b'synthetic')
+        context.max_dependencies = 1
+        self.assertEqual(context.read('one.py'), b'synthetic')
+        self.assertIsNone(context.read('two.py'))
+        self.assertTrue(context.truncated)
+        self.assertIsNone(context.read('one.py'))
+
+    def test_detached_validator_keeps_digests_without_raw_dependency_data(self):
+        from leakguard_core.sources import ProofContext
+        data = {'module.py': b'original synthetic bytes'}
+        context = ProofContext(data.get, validator=data.get)
+        context.read('module.py')
+        validate = context.detach_validator()
+        context.dependencies.clear()
+        self.assertTrue(validate())
+        data['module.py'] = b'changed synthetic bytes'
+        self.assertFalse(validate())
