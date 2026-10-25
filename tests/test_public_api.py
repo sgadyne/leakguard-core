@@ -195,7 +195,10 @@ class PublicApiTests(unittest.TestCase):
                 for name, raw in live_artifacts.items():
                     absent(f"live SQLite artifact {name}", raw)
                 self.assertTrue(store.conn.execute("SELECT COUNT(*) FROM scan_cache").fetchone()[0])
-                self.assertTrue(store.conn.execute("SELECT COUNT(*) FROM material_locations").fetchone()[0])
+                material_observation_count = store.conn.execute(
+                    "SELECT COUNT(*) FROM material_locations"
+                ).fetchone()[0]
+                self.assertTrue(material_observation_count)
                 self.assertTrue(store.conn.execute("SELECT COUNT(*) FROM finding_history").fetchone()[0])
             finally:
                 if scanner is not None:
@@ -373,9 +376,7 @@ class PublicApiTests(unittest.TestCase):
                     "checks": checked,
                     "api_live_sqlite_artifacts": sorted(live_artifacts),
                     "api_cache_replay": second.results[0].outcome.value,
-                    "api_material_observations": store.conn.execute(
-                        "SELECT COUNT(*) FROM material_locations"
-                    ).fetchone()[0],
+                    "api_material_observations": material_observation_count,
                     "plugin_issue_codes": sorted(error_codes),
                     "source_and_transient_plugin_input_are_synthetic_exceptions": True,
                 }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
