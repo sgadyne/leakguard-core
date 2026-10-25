@@ -398,3 +398,31 @@ class MemoryConcurrencyTests(unittest.TestCase):
             rows = store.query_findings()
             self.assertEqual([row['id'] for row in rows], [expected])
             self.assertEqual(rows[0]['state'], 'active')
+
+
+class MaterialRegistrationTests(unittest.TestCase):
+    def test_registration_changes_invalidate_snapshot_and_assignment_format_is_supported(self):
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        with tempfile.TemporaryDirectory(prefix='leakguard-registration-') as folder:
+            root = Path(folder)
+            source = root / 'reference.py'; source.write_text('TOKEN = "synthetic-reference-value"\n')
+            row = ('private', str(source), 'python-assignment', 'TOKEN', 'credential')
+            for store in (MemoryScanStore(), SQLiteScanStore(root / 'store')):
+                try:
+                    empty = store.material_snapshot()
+                    if isinstance(store, MemoryScanStore):
+                        store.material_sources.append(row)
+                    else:
+                        store.conn.execute('INSERT INTO material_sources VALUES(?,?,?,?,?)', row); store.conn.commit()
+                    self.assertFalse(empty.valid())
+                    registered = store.material_snapshot()
+                    self.assertEqual(registered.issues, ())
+                    self.assertEqual(len(registered.references), 1)
+                    self.assertTrue(registered.valid())
+                    if isinstance(store, MemoryScanStore):
+                        store.material_sources.clear()
+                    else:
+                        store.conn.execute('DELETE FROM material_sources'); store.conn.commit()
+                    self.assertFalse(registered.valid())
+                finally:
+                    store.close()

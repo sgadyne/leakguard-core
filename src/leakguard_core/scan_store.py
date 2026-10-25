@@ -257,7 +257,14 @@ class MemoryScanStore:
     @_synchronized
     def material_snapshot(self, *, max_bytes=1_000_000, max_sources=100):
         from .catalog import snapshot_materials
-        return snapshot_materials(self.material_sources, self._material_key, max_bytes=max_bytes, max_sources=max_sources)
+        from itertools import islice
+        rows = tuple(islice(iter(self.material_sources), max_sources + 1))
+        snapshot = snapshot_materials(rows, self._material_key, max_bytes=max_bytes, max_sources=max_sources)
+        def valid():
+            with self._lock:
+                current = tuple(islice(iter(self.material_sources), max_sources + 1))
+            return current == rows and snapshot.valid()
+        return replace(snapshot, validate=valid)
 
     @_synchronized
     def _record_materials(self, result, observations, *, complete):
@@ -479,6 +486,15 @@ class SQLiteScanStore:
         self.conn = open_database(state_dir)
         self.state_dir = __import__('pathlib').Path(state_dir)
 
+    @classmethod
+    def from_connection(cls, conn, *, state_dir, config=None):
+        """Deprecated wrapper adapter; caller retains connection ownership."""
+        instance = object.__new__(cls)
+        instance.conn = conn
+        instance.state_dir = __import__('pathlib').Path(state_dir)
+        instance.config = config or {}
+        return instance
+
     def reserve(self, source, *, scope=''):
         key = source_key(source, scope)
         with self.conn:
@@ -664,7 +680,7 @@ class SQLiteScanStore:
         import os
         rows = self.conn.execute('SELECT name,source,format,field,kind FROM material_sources ORDER BY name LIMIT ?', (max_sources + 1,)).fetchall()
         if not rows:
-            return MaterialSnapshot((), 'no-materials')
+            return MaterialSnapshot((), 'no-materials', validate=lambda: self.conn.execute('SELECT 1 FROM material_sources LIMIT 1').fetchone() is None)
         key_path = self.state_dir / 'material-key.bin'
         try:
             descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -677,7 +693,11 @@ class SQLiteScanStore:
         key = _bounded_file(key_path, 32)
         if len(key) != 32:
             raise StateError()
-        return snapshot_materials(rows, key, max_bytes=max_bytes, max_sources=max_sources)
+        snapshot = snapshot_materials(rows, key, max_bytes=max_bytes, max_sources=max_sources)
+        def valid():
+            current = self.conn.execute('SELECT name,source,format,field,kind FROM material_sources ORDER BY name LIMIT ?', (max_sources + 1,)).fetchall()
+            return current == rows and snapshot.valid()
+        return replace(snapshot, validate=valid)
 
     def _record_materials(self, result, observations, *, complete):
         from . import catalog, policies

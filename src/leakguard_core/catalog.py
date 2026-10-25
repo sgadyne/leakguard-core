@@ -153,7 +153,8 @@ def snapshot_materials(rows, key, *, max_bytes=1_000_000, max_sources=100):
     identities = []
     expected = []
     issues = []
-    rows = tuple(rows)
+    from itertools import islice
+    rows = tuple(islice(iter(rows), max_sources + 1))
     if len(rows) > max_sources:
         issues.append('detector-output-limit')
         rows = rows[:max_sources]
@@ -179,7 +180,7 @@ def snapshot_materials(rows, key, *, max_bytes=1_000_000, max_sources=100):
                 value = json.loads(text, object_pairs_hook=unique)
                 for component in field.split('.'):
                     value = value[component]
-            elif fmt in {'python', 'py'}:
+            elif fmt in {'python', 'py', 'python-assignment'}:
                 tree = ast.parse(text)
                 candidates = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == field for target in node.targets)]
                 if len(candidates) != 1:
