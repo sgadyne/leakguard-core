@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -165,7 +165,7 @@ class FileInput:
 class BytesInput:
     """Bounded bytes and their caller-supplied logical location."""
 
-    data: bytes
+    data: bytes = field(repr=False)
     logical_path: str
 
     def __post_init__(self) -> None:
@@ -554,8 +554,12 @@ def report_to_dict(report: ScanReport) -> dict[str, object]:
 
 
 def report_to_json(report: ScanReport) -> str:
-    """Return stable UTF-8-compatible JSON with no caller-supplied payloads."""
-    return json.dumps(report_to_dict(report), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """Return stable UTF-8-safe JSON with no caller-supplied payloads.
+
+    ``ensure_ascii`` preserves Git paths containing surrogateescaped bytes as
+    valid JSON text that can be written to UTF-8 files and stdout.
+    """
+    return json.dumps(report_to_dict(report), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 def _source_dict(item: SourceRef) -> dict[str, object]:

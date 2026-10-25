@@ -39,7 +39,9 @@ Advance a persistent crawl with `leakguard audit workspace --budget-seconds 120 
 
 `leakguard-install-hooks /path/to/checkouts` installs pre-commit and pre-push hooks and preserves/chains existing hooks. It also sets up the Git template for future repositories. Installation is explicit and opt-in. Git guards scan staged content and outgoing history, including bounded document blobs. They block on credentials and incomplete required scans. They never push or authenticate discovered credentials.
 
-`leakguard-manage explain` prints the current repository's latest redacted Git report. `--format json` supplies structured data for CLI/AI consumers. Findings retain commit, part and line so historical content is not confused with the working tree. Other commands include `report general`, `report companion`, `locate`, `history`, `copies`, `where`, `register-material` and `plan-location`. Existing companion findings are inventory; Git guards remain blocking. Suggested locations never trigger moves.
+`leakguard-manage explain` prints the current repository's latest redacted typed report; `--format json` supplies its schema object to CLI consumers. To read an older schema-0 JSON report explicitly, use `explain --report PATH`. Findings retain commit, part and line so historical Git content is not confused with the working tree.
+
+`leakguard-manage report general` and `report companion` show current active and unknown findings with first/last-seen and verification times. Add `--state history` to inspect prior observations, or `--format json` for a closed redacted JSON shape. `report all` includes both profiles. These commands query the indexed store directly and do not initialize detectors. Other commands include `locate`, `history`, `copies`, `where`, `register-material` and `plan-location`. Existing companion findings are inventory; Git guards remain blocking. Suggested locations never trigger moves.
 
 The Python API uses the same service and result schema as the CLI and Git guards:
 

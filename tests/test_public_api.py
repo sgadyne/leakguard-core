@@ -15,7 +15,9 @@ from unittest.mock import patch
 
 from leakguard_core.api import ConfigurationError, ScanConfig
 from leakguard_core.cli import _parser, main
+from leakguard_core import manage, presentation
 from leakguard_core.models import (
+    BytesInput,
     ContentIdentity,
     CoverageIssue,
     CoverageState,
@@ -97,6 +99,26 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, process.stderr)
             self.assertFalse(state.exists())
 
+    def test_manage_import_does_not_initialize_scan_engine_or_state(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-manage-import-") as directory:
+            root = Path(directory)
+            state = root / "must-not-exist"
+            config = root / "invalid.json"
+            config.write_text("not json", encoding="utf-8")
+            environment = dict(os.environ)
+            environment["LEAKGUARD_CONFIG"] = str(config)
+            environment["LEAKGUARD_STATE_DIR"] = str(state)
+            environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+            process = subprocess.run(
+                [sys.executable, "-c", "import leakguard_core.manage, sys; assert 'leakguard_core.engine' not in sys.modules"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertFalse(state.exists())
+
     def test_config_is_validated_copied_and_safe_to_repr(self):
         config = ScanConfig.from_mapping({"plugins": [{"module": "example", "options": {"marker": "PRIVATE-MARKER"}}]})
         values = config.to_mapping()
@@ -108,6 +130,10 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "configuration-invalid")
         self.assertNotIn("PRIVATE-MARKER", str(error.exception))
         self.assertNotIn("unknown-private-key", str(error.exception))
+
+    def test_bytes_input_repr_does_not_expose_input_content(self):
+        value = BytesInput(b"PRIVATE-BYTES-MARKER", "fixture.bin")
+        self.assertNotIn("PRIVATE-BYTES-MARKER", repr(value))
 
     def test_config_file_rejects_duplicate_keys_without_echoing_values(self):
         with tempfile.TemporaryDirectory(prefix="leakguard-test-public-") as directory:
@@ -132,6 +158,68 @@ class PublicApiTests(unittest.TestCase):
             "detector_severity", "severity", "classification", "proof_id",
         })
         self.assertEqual(json.loads(report.to_json()), payload)
+
+    def test_report_json_preserves_surrogateescaped_paths_as_utf8_safe_json(self):
+        report = _report()
+        invalid_path = "bad-" + bytes([0xff]).decode("utf-8", "surrogateescape") + ".txt"
+        source = SourceRef(SourceKind.GIT_COMMIT, invalid_path)
+        original = report.results[0]
+        finding = replace(original.findings[0], source=source)
+        result = replace(original, source=source, findings=(finding,))
+        report = replace(report, results=(result,))
+        encoded = report.to_json()
+        encoded.encode("utf-8")
+        self.assertEqual(json.loads(encoded)["results"][0]["source"]["path"], source.path)
+        self.assertIn("\\udcff", presentation.clean(source.path))
+
+    def test_manage_current_history_uses_closed_store_report_without_raw_fields(self):
+        stamp = "2026-10-25T18:00:00+00:00"
+        row = {
+            "id": "a" * 64,
+            "source": {"kind": "filesystem", "path": "fixture.txt", "repository": None,
+                       "commit": None, "blob_oid": None, "index_tree_oid": None,
+                       "extra": "PRIVATE-SOURCE"},
+            "part_id": "text", "start_line": 4, "end_line": 5, "rule": "fixture-rule",
+            "detector_id": "builtin", "detector_severity": "review", "severity": "review",
+            "classification": "credential-candidate", "state": "unknown",
+            "first_seen": stamp, "last_seen": stamp, "last_verified": None,
+            "resolved_at": None, "state_reason": "historical-observation",
+            "matched_value": "PRIVATE-VALUE", "policy_id": "internal-policy-id",
+        }
+
+        class FakeStore:
+            def __init__(self):
+                self.closed = False
+                self.query = None
+
+            def query_findings(self, *, state, profile):
+                self.query = (state, profile)
+                return (row,)
+
+            def close(self):
+                self.closed = True
+
+        store = FakeStore()
+        for state in ("current", "history"):
+            stdout = __import__("io").StringIO()
+            stderr = __import__("io").StringIO()
+            with patch("leakguard_core.manage._open_scan_store", return_value=store):
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = manage.main(["report", "general", "--state", state, "--format", "json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(store.query, (state, "general"))
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(set(payload), {"schema_version", "report_type", "state", "profile", "count", "findings"})
+            self.assertNotIn("PRIVATE-VALUE", stdout.getvalue())
+            self.assertNotIn("PRIVATE-SOURCE", stdout.getvalue())
+            self.assertNotIn("policy_id", payload["findings"][0])
+            self.assertTrue(store.closed)
+            self.assertEqual(stderr.getvalue(), "")
+
+        clean = presentation.findings_report_to_dict("current", "general", (row,))
+        text = presentation.render_findings_report(clean)
+        self.assertNotIn("PRIVATE-VALUE", text)
+        self.assertNotIn("PASS", text)
 
     def test_result_invariants_prevent_bad_reuse_and_coverage_claims(self):
         report = _report()

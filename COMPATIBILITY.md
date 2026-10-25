@@ -58,8 +58,13 @@ human progress and sanitized setup errors go to stderr.
 Git hooks use the same report schema and policy decision. Allow or allow-with-
 omissions returns 0, a blocking finding returns 1, and required incomplete work
 returns 2. A chained hook's nonzero status remains authoritative. `manage explain`
-and report rendering return 0 when they successfully read a report, even when
-that report describes a block; read or state failures return 2.
+renders the indexed latest typed report for the selected/current repository;
+`manage explain --report PATH` remains the explicit schema-0 archive adapter.
+`manage report PROFILE` defaults to indexed current active and unknown findings,
+with `--state history` for prior observations. Both current/history views include
+timestamps and use a closed redacted JSON schema with `--format json`. Successful
+reads return 0 even when reports contain blocking findings; read or state failures
+return 2. The query path opens the store without initializing detectors.
 
 This differs from 0.1 callers that treated a zero scan exit as evidence of a clean
 scan. A zero means the requested inventory completed under its declared policy;
