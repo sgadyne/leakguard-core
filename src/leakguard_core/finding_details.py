@@ -21,8 +21,11 @@ def json_value_at_line(text, line):
             result[key] = value
         return result
 
-    json.loads(text, object_pairs_hook=unique)
-    decoder = json.JSONDecoder()
+    def invalid_constant(_value):
+        raise ValueError()
+
+    json.loads(text, object_pairs_hook=unique, parse_constant=invalid_constant)
+    decoder = json.JSONDecoder(parse_constant=invalid_constant)
     matches = []
     newlines = [index for index, char in enumerate(text) if char == '\n']
 
