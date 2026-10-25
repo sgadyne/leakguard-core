@@ -875,7 +875,14 @@ class ScanService:
                 run_issues.append(m.CoverageIssue(m.ErrorCode.BUDGET_EXHAUSTED, required=True))
                 enumeration_complete = False
                 break
-            source = item.source if isinstance(item, SnapshotInput) else m.SourceRef(m.SourceKind.FILESYSTEM, str(item.path.absolute())) if isinstance(item, m.FileInput) else m.SourceRef(m.SourceKind.BYTES, item.logical_path) if isinstance(item, m.BytesInput) else None
+            try:
+                source = item.source if isinstance(item, SnapshotInput) else m.SourceRef(m.SourceKind.FILESYSTEM, str(item.path.absolute())) if isinstance(item, m.FileInput) else m.SourceRef(m.SourceKind.BYTES, item.logical_path) if isinstance(item, m.BytesInput) else None
+            except (TypeError, ValueError, OSError):
+                # Normalization can exceed the public provenance bound even if
+                # the caller's relative path met FileInput's validation bound.
+                run_issues.append(m.CoverageIssue(m.ErrorCode.INPUT_LIMIT, required=True))
+                enumeration_complete = False
+                break
             if source is None:
                 run_issues.append(m.CoverageIssue(m.ErrorCode.CONFIGURATION_INVALID, required=True))
                 enumeration_complete = False

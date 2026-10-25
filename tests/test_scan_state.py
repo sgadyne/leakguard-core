@@ -964,3 +964,18 @@ class FindingAdmissionTests(unittest.TestCase):
             self.assertEqual(report.results[0].findings[0].severity, m.FindingSeverity.BLOCK)
         finally:
             service.close()
+
+
+class SourceAdmissionTests(unittest.TestCase):
+    def test_normalized_source_path_overflow_is_a_fixed_incomplete_issue(self):
+        from leakguard_core import models as m
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            source = m.FileInput(Path('x' * (m.MAX_PROVENANCE_STRING_LENGTH - 1)))
+            report = service.scan((source,), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
+            self.assertEqual(report.results, ())
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+            self.assertTrue(any(issue.code is m.ErrorCode.INPUT_LIMIT and issue.required for issue in report.issues))
+            self.assertLess(len(report.to_json()), 2048)
+        finally:
+            service.close()
