@@ -310,7 +310,7 @@ class QueueTests(unittest.TestCase):
             service = engine.ScanService({'audit_scopes': {'synthetic': str(root)}, 'gitleaks_executable': str(engine.EXE)}, store=store)
             try:
                 for _ in range(3):
-                    with patch('os.scandir', side_effect=PermissionError()), patch.object(backends, 'detect', return_value=()):
+                    with patch('os.scandir', side_effect=PermissionError()), patch.object(backends, 'detect', return_value=()), patch('leakguard_core.scan_policy.runtime_identity', return_value=(service._runtime, True)):
                         report = service.audit('synthetic', limits=m.ScanLimits(30, 10))
                     self.assertFalse(report.coverage.enumeration_complete)
                     self.assertEqual(report.coverage.pending_directories, 1)
@@ -581,3 +581,51 @@ class PageIsolationTests(unittest.TestCase):
             row = store.query_findings_page(state=state).rows[0]
             row['source']['path'] = '/synthetic/mutated'
             self.assertEqual(store.query_findings_page(state=state).rows[0]['source']['path'], result.source.path)
+
+
+class IdentityBudgetServiceTests(unittest.TestCase):
+    def test_identity_failure_before_admission_is_explicit_and_does_not_read_input(self):
+        from leakguard_core import models as m, scan_policy
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        def inputs():
+            raise AssertionError('input admitted after identity failure')
+            yield
+        try:
+            for code in ('budget-exhausted', 'cancelled', 'source-unavailable'):
+                with self.subTest(code=code), patch.object(scan_policy, 'runtime_identity', side_effect=scan_policy.RuntimeIdentityError(code)):
+                    report = service.scan(inputs(), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
+                self.assertEqual(report.results, ())
+                self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                self.assertTrue(any(issue.code.value == code and issue.required for issue in report.issues))
+        finally:
+            service.close()
+
+    def test_final_identity_failure_keeps_positive_and_revokes_verification(self):
+        from leakguard_core import models as m, scan_policy, backends
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            with patch.object(scan_policy, 'runtime_identity', side_effect=[(service._runtime, True), scan_policy.RuntimeIdentityError('budget-exhausted')]), patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
+            self.assertEqual(report.counts.findings, 1)
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+            self.assertIsNone(report.results[0].last_verified_at)
+            self.assertEqual(report.results[0].coverage, m.CoverageState.INCOMPLETE)
+        finally:
+            service.close()
+
+    def test_budget_consumed_by_backend_prevents_remaining_plugin_startups(self):
+        import time
+        from leakguard_core import models as m, scan_policy, backends, plugins
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        service._plugins = [object() for _ in range(20)]
+        def detect(*args, **kwargs):
+            time.sleep(0.03)
+            return (backends.BackendFinding('literal-password', 1, 1),)
+        try:
+            with patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(backends, 'detect', side_effect=detect), patch.object(plugins, 'detect') as plugin_detect:
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(0.02, 1))
+            plugin_detect.assert_not_called()
+            self.assertEqual(report.counts.findings, 1)
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+        finally:
+            service.close()

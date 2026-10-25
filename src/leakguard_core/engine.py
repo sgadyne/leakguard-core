@@ -691,16 +691,26 @@ class ScanService:
         enumeration_complete = True
         finding_count = 0
         report_bytes = 0
-        runtime, eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins))
-        runtime_valid = runtime == self._runtime
+        identity_failure = None
+        try:
+            runtime, eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins), deadline=deadline, cancel=cancel)
+            runtime_valid = runtime == self._runtime
+            if not runtime_valid:
+                identity_failure = m.ErrorCode.SOURCE_UNAVAILABLE
+        except scan_policy.RuntimeIdentityError as error:
+            runtime_valid = False
+            identity_failure = self._error_code(error.code, 'source-unavailable')
+        if identity_failure is not None:
+            run_issues.append(m.CoverageIssue(identity_failure, required=True))
+            enumeration_complete = False
         materials = None
-        if policy.mode is m.ScanMode.INVENTORY:
+        if runtime_valid and policy.mode is m.ScanMode.INVENTORY:
             try:
                 materials = self.store.material_snapshot(max_bytes=min(limits.max_file_bytes, 1_000_000), max_sources=100)
             except Exception:
                 materials = catalog.MaterialSnapshot((), 'unavailable', ('source-unavailable',))
         iterator = iter(inputs)
-        while True:
+        while runtime_valid:
             if time.monotonic() >= deadline or (cancel and cancel()):
                 code = m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED
                 run_issues.append(m.CoverageIssue(code, required=True))
@@ -779,11 +789,18 @@ class ScanService:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, required=True))
             results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, r.source, required=True),)) for r in results]
-        current_runtime, _ = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins))
-        if current_runtime != self._runtime:
+        if identity_failure is None:
+            try:
+                current_runtime, _ = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins), deadline=deadline, cancel=cancel)
+                if current_runtime != self._runtime:
+                    identity_failure = m.ErrorCode.SOURCE_UNAVAILABLE
+            except scan_policy.RuntimeIdentityError as error:
+                identity_failure = self._error_code(error.code, 'source-unavailable')
+        if identity_failure is not None:
             enumeration_complete = False
-            run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
-            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
+            if not any(issue.code is identity_failure for issue in run_issues):
+                run_issues.append(m.CoverageIssue(identity_failure, required=True))
+            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(identity_failure, r.source, required=True),)) for r in results]
         try:
             materials_valid = materials is None or materials.valid()
         except Exception:
@@ -868,6 +885,10 @@ class ScanService:
         if omitted and not any(issue.omission_id == omitted for issue in issues):
             issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, source, omission_id=omitted))
         for part in extracted.parts:
+            stopped = cancel is not None and cancel()
+            if time.monotonic() >= deadline or stopped:
+                issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if stopped else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
+                break
             if materials is not None:
                 for observation in catalog.material_observations(materials, part.part_id, part.text):
                     observations.append(observation)
@@ -882,6 +903,10 @@ class ScanService:
             except Exception as error:
                 issues.append(m.CoverageIssue(self._error_code(getattr(error, 'code', 'detector-failed')), source, part.part_id, True))
             for instance in self._plugins:
+                stopped = cancel is not None and cancel()
+                if time.monotonic() >= deadline or stopped:
+                    issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if stopped else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
+                    break
                 try:
                     for item in plugins.detect([instance], part.text, source.path, part.part_id, format_id=part.format_id, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), limits=limits, cancel=cancel):
                         findings.append(self._finding(snapshot, part, item.rule, item.line, item.line, item.severity, plugins.detector_id(instance)))
