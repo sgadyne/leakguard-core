@@ -144,7 +144,7 @@ def extract_document(data: bytes, format_id: str, limits: ExtractionLimits) -> E
         issues.append('decode-failed')
     except Exception:
         issues.append('extract-failed')
-    disposition = 'extracted' if parts else ('encrypted' if 'encrypted' in issues else 'no-text' if issues == ['no-text'] else 'error')
+    disposition = 'extracted' if not issues and parts else ('encrypted' if 'encrypted' in issues and not parts else 'no-text' if issues == ['no-text'] and not parts else 'error')
     return ExtractionResult(format_id, disposition, tuple(parts), tuple(dict.fromkeys(issues)))
 
 

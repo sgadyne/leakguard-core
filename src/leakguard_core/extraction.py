@@ -59,6 +59,27 @@ class ExtractionResult:
     issues: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class ExtractedPart:
+    kind: str
+    ordinal: int
+    text: str
+
+
+@dataclass(frozen=True)
+class Extraction:
+    disposition: str
+    parts: tuple[ExtractedPart, ...] = ()
+    issues: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExtractionContext:
+    logical_path: str
+    format_id: str
+    limits: ExtractionLimits
+
+
 _EXTRACT_CODES = frozenset({
     'input-limit', 'unsupported-format', 'format-mismatch', 'ambiguous-format',
     'decode-failed', 'encrypted', 'no-text', 'dependency-unavailable', 'extract-failed',
