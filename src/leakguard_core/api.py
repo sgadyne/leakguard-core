@@ -51,7 +51,7 @@ class ScanConfig:
             # import here so `import leakguard_core.api` remains entirely inert.
             from . import settings
 
-            normalized = settings.validate(mapping)
+            normalized = settings.validate(dict(mapping))
             encoded = json.dumps(
                 normalized,
                 ensure_ascii=False,
@@ -69,7 +69,7 @@ class ScanConfig:
         if not isinstance(path, Path):
             raise ConfigurationError()
         try:
-            raw = path.read_text(encoding="utf-8")
+            raw = path.read_text(encoding="utf-8-sig")
             parsed = json.loads(raw, object_pairs_hook=_unique_object)
         except Exception:
             raise ConfigurationError("configuration") from None
@@ -177,6 +177,49 @@ class Scanner:
         if cancel is not None and not callable(cancel):
             raise TypeError("cancel must be callable or None")
         result = self._service.scan_git(repo, request=request, limits=limits, cancel=cancel)
+        if type(result) is not ScanReport:
+            raise RuntimeError("Scan service returned an invalid report")
+        return result
+
+    def audit(
+        self,
+        scope: str,
+        *,
+        limits: ScanLimits,
+        use_cache: bool = True,
+        cancel: Callable[[], bool] | None = None,
+    ) -> ScanReport:
+        """Advance one bounded scope audit through the shared service."""
+        self._ensure_open()
+        if not isinstance(scope, str) or not scope:
+            raise TypeError("scope must be a nonempty string")
+        if type(limits) is not ScanLimits:
+            raise TypeError("limits must be ScanLimits")
+        if type(use_cache) is not bool:
+            raise TypeError("use_cache must be a bool")
+        if cancel is not None and not callable(cancel):
+            raise TypeError("cancel must be callable or None")
+        result = self._service.audit(scope, limits=limits, use_cache=use_cache, cancel=cancel)
+        if type(result) is not ScanReport:
+            raise RuntimeError("Scan service returned an invalid report")
+        return result
+
+    def drain(
+        self,
+        *,
+        limits: ScanLimits,
+        use_cache: bool = False,
+        cancel: Callable[[], bool] | None = None,
+    ) -> ScanReport:
+        """Process one bounded notification-queue batch through the service."""
+        self._ensure_open()
+        if type(limits) is not ScanLimits:
+            raise TypeError("limits must be ScanLimits")
+        if type(use_cache) is not bool:
+            raise TypeError("use_cache must be a bool")
+        if cancel is not None and not callable(cancel):
+            raise TypeError("cancel must be callable or None")
+        result = self._service.drain(limits=limits, use_cache=use_cache, cancel=cancel)
         if type(result) is not ScanReport:
             raise RuntimeError("Scan service returned an invalid report")
         return result

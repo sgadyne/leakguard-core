@@ -1,4 +1,4 @@
-"""Compatibility launcher for explicitly installed hook environments."""
-from leakguard_core.engine import run
+"""Compatibility CLI launcher for explicitly installed environments."""
+from leakguard_core.cli import main
 
-raise SystemExit(run())
+raise SystemExit(main())
