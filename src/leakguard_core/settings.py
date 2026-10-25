@@ -5,6 +5,7 @@ import os
 import pathlib
 import math
 import re
+import stat
 
 DEFAULTS = {
     'max_file_bytes': 20_971_520,
@@ -168,7 +169,11 @@ def read_config(path):
             value[key] = item
         return value
     try:
-        with pathlib.Path(path).open('rb') as stream:
+        flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+        with os.fdopen(os.open(pathlib.Path(path), flags), 'rb') as stream:
+            observed = os.fstat(stream.fileno())
+            if not stat.S_ISREG(observed.st_mode) or observed.st_size > 1_000_000:
+                raise ConfigurationError()
             raw = stream.read(1_000_001)
         if len(raw) > 1_000_000:
             raise ConfigurationError()
