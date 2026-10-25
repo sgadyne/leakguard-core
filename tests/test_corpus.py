@@ -31,6 +31,7 @@ def _pdf_with_text(text: str) -> bytes:
         from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
     except ImportError:
         raise unittest.SkipTest("optional pypdf is unavailable")
+    import hashlib
     writer = PdfWriter()
     page = writer.add_blank_page(width=612, height=792)
     font = writer._add_object(DictionaryObject({
@@ -45,8 +46,24 @@ def _pdf_with_text(text: str) -> bytes:
     escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
     stream.set_data(("BT /F1 12 Tf 72 720 Td (" + escaped + ") Tj ET").encode("ascii"))
     page[NameObject("/Contents")] = writer._add_object(stream)
+    from pypdf.generic import ArrayObject, ByteStringObject
+    identifier = ByteStringObject(hashlib.sha256(text.encode("utf-8")).digest()[:16])
+    writer._ID = ArrayObject((identifier, identifier))
     buffer = io.BytesIO()
     writer.write(buffer)
+    return buffer.getvalue()
+
+
+def _docx_payload(members) -> bytes:
+    """Build an Office-shaped ZIP with fixed metadata and stable member order."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, text in members:
+            info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = 0o100600 << 16
+            info.compress_type = zipfile.ZIP_STORED
+            archive.writestr(info, "<d><p>" + text + "</p></d>")
     return buffer.getvalue()
 
 
@@ -165,6 +182,18 @@ class DeterministicCorpusTests(unittest.TestCase):
         encoded = json.dumps(summary, sort_keys=True)
         self.assertNotIn("SyntheticOnly~", encoded)
         self.assertIn("true_positive", summary["detector_metrics"])
+        self.assertEqual(summary["counts"]["metric_eligible_cases"], 32)
+        self.assertEqual(summary["counts"]["metric_not_scored_cases"], 13)
+
+    def test_same_seed_artifact_manifest_is_stable_across_wall_clock_ticks(self):
+        import time
+        first = run_labeled_corpus(SEED, engine.EXE)
+        time.sleep(2.1)
+        second = run_labeled_corpus(SEED, engine.EXE)
+        first_hashes = {item["case_id"]: item["artifact_sha256"] for item in first["cases"]}
+        second_hashes = {item["case_id"]: item["artifact_sha256"] for item in second["cases"]}
+        self.assertEqual(first_hashes, second_hashes)
+        self.assertEqual(first["by_category"], second["by_category"])
 
     def test_pdf_fixture_is_parsed_as_a_real_text_document(self):
         payload = _pdf_with_text("Synthetic PDF marker line")
@@ -195,11 +224,11 @@ class DeterministicCorpusTests(unittest.TestCase):
         self.assertEqual((result.disposition, result.issues), ("unsupported", ("unsupported-format",)))
 
     def test_multiline_parts_preserve_boundaries_and_static_labels(self):
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as archive:
-            archive.writestr("word/document.xml", "<d><p>prefix BEGIN</p><p>first line</p></d>")
-            archive.writestr("word/comments1.xml", "<c><p>SECRET suffix</p><p>last line</p></c>")
-        result = extract(buffer.getvalue(), "odd name/é\nrenamed.document", timeout=5)
+        payload = _docx_payload((
+            ("word/document.xml", "prefix BEGIN</p><p>first line"),
+            ("word/comments1.xml", "SECRET suffix</p><p>last line"),
+        ))
+        result = extract(payload, "odd name/é\nrenamed.document", timeout=5)
         self.assertEqual(result.disposition, "extracted")
         self.assertEqual([part.part_id for part in result.parts], ["office-word-1", "office-word-2"])
         self.assertEqual(result.parts[0].text, "prefix BEGIN\nfirst line")
@@ -251,11 +280,7 @@ def _line_number(text: str, value: str) -> int:
 
 
 def _docx_parts(members) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        for name, text in members:
-            archive.writestr(name, "<d><p>" + text + "</p></d>")
-    return buffer.getvalue()
+    return _docx_payload(members)
 
 
 def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
@@ -308,7 +333,7 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     ))
     detector_text = "\n".join(row[1] for row in detector_cases)
     findings = backends.detect(detector_text, binary=gitleaks,
-                               rules=Path(__file__).parents[1] / "src" / "leakguard_core" / "rules.toml",
+                               rules=engine.RULES,
                                timeout=15)
     found_lines = {item.start_line for item in findings}
     for line, (case_id, value, _expected) in enumerate(detector_cases, 1):
@@ -373,7 +398,7 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
         digest = hashlib.sha256(data).hexdigest()
         if result.disposition == "extracted":
             detected = any(backends.detect(part.text, binary=gitleaks,
-                                           rules=Path(__file__).parents[1] / "src" / "leakguard_core" / "rules.toml",
+                                           rules=engine.RULES,
                                            timeout=15) for part in result.parts)
             actual = "finding" if detected else "none"
             coverage = "complete"
@@ -389,8 +414,7 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     office_comment = _docx_parts((("word/document.xml", "ordinary document text"),
                                   ("word/comments1.xml", f'client_secret = "{secret}"')))
     malformed = io.BytesIO()
-    with zipfile.ZipFile(malformed, "w") as archive:
-        archive.writestr("[Content_Types].xml", "<Types/>")
+    malformed.write(_docx_payload((("[Content_Types].xml", "</Types"),)))
     extract_case("office-word-document", office_document, "fixture.docx")
     extract_case("office-word-comments", office_comment, "fixture.docx")
     extract_case("office-word-malformed", malformed.getvalue(), "fixture.docx")
@@ -398,8 +422,7 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     try:
         pdf_text = _pdf_with_text(f'client_secret = "{secret}"')
         from pypdf import PdfWriter
-        empty_writer = PdfWriter(); empty_writer.add_blank_page(width=612, height=792)
-        pdf_empty_buffer = io.BytesIO(); empty_writer.write(pdf_empty_buffer)
+        pdf_empty_buffer = io.BytesIO(); pdf_empty_buffer.write(_pdf_with_text(""))
         extract_case("pdf-text-positive", pdf_text, "fixture.pdf")
         extract_case("pdf-image-only", pdf_empty_buffer.getvalue(), "fixture.pdf")
     except (ImportError, unittest.SkipTest):
@@ -449,9 +472,9 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
                 observed = tuple(plugins.detect([handle], "fixture", "fixture.txt", "text", timeout=15))
                 actual = observed[0].severity if observed else "none"
                 put(case_id, actual, digest_input=definitions["corpus_block.py" if expected == "block" else "corpus_review.py"].encode())
-            service = engine.ScanService({
-                "gitleaks_executable": str(gitleaks),
-                "gitleaks_config": str(Path(__file__).parents[1] / "src" / "leakguard_core" / "rules.toml"),
+                service = engine.ScanService({
+                    "gitleaks_executable": str(gitleaks),
+                    "gitleaks_config": str(engine.RULES),
                 "plugins": [{"module": "corpus_block", "options": {}},
                             {"module": "corpus_review", "options": {}}],
             })
@@ -478,12 +501,15 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
             put(item["case_id"], "uncovered", coverage="uncovered")
 
     counts = {"labeled_cases": len(CASE_CATALOG), "covered": 0, "uncovered": 0, "failed": 0,
+              "metric_eligible_cases": 0, "metric_not_scored_cases": 0,
               "true_positive": 0, "false_positive": 0, "false_negative": 0, "true_negative": 0}
     by_category = {}
     for item in CASE_CATALOG:
         case_id, category = item["case_id"], item["category"]
         result = results[case_id]
-        bucket = by_category.setdefault(category, {"cases": 0, "covered": 0, "uncovered": 0, "failed": 0})
+        bucket = by_category.setdefault(category, {"cases": 0, "covered": 0, "uncovered": 0,
+                                                    "failed": 0, "metric_eligible": 0,
+                                                    "metric_not_scored": 0})
         bucket["cases"] += 1
         if result["status"] == "uncovered":
             counts["uncovered"] += 1; bucket["uncovered"] += 1
@@ -491,11 +517,16 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
         counts["covered"] += 1; bucket["covered"] += 1
         if result["status"] == "failed":
             counts["failed"] += 1; bucket["failed"] += 1
-        if item["kind"] in {"detector", "extractor"} and item["expected"] in {"finding", "none"}:
+        if item["expected"] in {"finding", "none"}:
+            counts["metric_eligible_cases"] += 1
+            bucket["metric_eligible"] += 1
             expected_positive = item["expected"] == "finding"
             actual_positive = result["actual"] == "finding"
             key = ("true_positive" if expected_positive else "false_positive") if actual_positive else ("false_negative" if expected_positive else "true_negative")
             counts[key] += 1
+        else:
+            counts["metric_not_scored_cases"] += 1
+            bucket["metric_not_scored"] += 1
     return {"seed": seed, "policy_id": policy_id, "runtime_id": runtime_id,
             "counts": counts, "detector_metrics": {
                 key: counts[key] for key in ("true_positive", "false_positive", "false_negative", "true_negative")
