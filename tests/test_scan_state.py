@@ -890,7 +890,7 @@ class AggregateReportBudgetTests(unittest.TestCase):
         service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
         try:
             with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
-                report = service.scan((m.BytesInput(b'synthetic', 'first.txt'), m.BytesInput(b'synthetic', 'x' * 16000)), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10, max_report_bytes=8192))
+                report = service.scan((m.BytesInput(b'synthetic', 'first.txt'), m.BytesInput(b'synthetic', 'x' * 4000)), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10, max_report_bytes=8192))
             self.assertEqual(report.counts.findings, 1)
             self.assertEqual(report.results[0].source.path, 'first.txt')
             self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
