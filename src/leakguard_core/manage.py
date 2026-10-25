@@ -291,4 +291,4 @@ def _page_limit(value):
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

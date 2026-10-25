@@ -385,8 +385,10 @@ class PublicApiTests(unittest.TestCase):
                 code = manage.main(["explain", "--report", str(path), "--format", "json"])
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(stdout.getvalue()), report.to_dict())
-            self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
 
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-report-") as directory:
+            path = Path(directory) / "report.json"
             payload = report.to_dict()
             payload["unexpected"] = "PRIVATE-EXTRA"
             path.write_text(json.dumps(payload), encoding="utf-8")
@@ -397,6 +399,21 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(stdout.getvalue(), "")
             self.assertNotIn("PRIVATE-EXTRA", stderr.getvalue())
+
+    def test_manage_module_propagates_explicit_report_failure_exit_code(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-manage-exit-") as directory:
+            missing = Path(directory) / "missing-report.json"
+            environment = dict(os.environ)
+            environment["LEAKGUARD_CONFIG"] = ""
+            environment["LEAKGUARD_STATE_DIR"] = str(Path(directory) / "unused-state")
+            result = subprocess.run(
+                [sys.executable, "-m", "leakguard_core.manage", "explain", "--report", str(missing)],
+                cwd=directory, env=environment, capture_output=True, text=True,
+                timeout=10, check=False,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("LeakGuard: invalid-report", result.stderr)
 
     def test_schema_zero_reports_never_claim_pass_or_echo_free_labels(self):
         old = {
