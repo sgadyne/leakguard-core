@@ -404,6 +404,9 @@ def extract_component(instance, data, path, *, format_id=None, timeout=None, lim
     bounds = ExtractionLimits.from_scan_limits(limits)
     if type(data) is not bytes or len(data) > bounds.max_file_bytes:
         raise PluginError('extract-output-limit')
+    selected_format = format_id or (manifest.formats[0] if manifest else 'extension')
+    if manifest is not None and selected_format not in manifest.formats:
+        raise PluginError()
     import base64
     response = _request({'module': instance.module, 'options': instance.options}, 'extract',
                         {'data': base64.b64encode(data).decode('ascii'), 'path': str(path),
@@ -418,9 +421,6 @@ def extract_component(instance, data, path, *, format_id=None, timeout=None, lim
     if type(response['issues']) is not list or any(type(code) is not str or code not in allowed for code in response['issues']):
         raise PluginError()
     if type(response['parts']) is not list:
-        raise PluginError()
-    selected_format = format_id or (manifest.formats[0] if manifest else 'extension')
-    if manifest is not None and selected_format not in manifest.formats:
         raise PluginError()
     parts = []; total = 0; seen = set()
     for ordinal, item in enumerate(response['parts'], 1):
