@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+from types import SimpleNamespace
 from dataclasses import replace
 from pathlib import Path
 import subprocess
@@ -38,6 +39,7 @@ from leakguard_core.models import (
     ScanPolicy,
     ScanReport,
     ScanResult,
+    MAX_PROVENANCE_STRING_LENGTH,
     SourceKind,
     SourceRef,
     report_to_dict,
@@ -164,6 +166,39 @@ class PublicApiTests(unittest.TestCase):
     def test_bytes_input_repr_does_not_expose_input_content(self):
         value = BytesInput(b"PRIVATE-BYTES-MARKER", "fixture.bin")
         self.assertNotIn("PRIVATE-BYTES-MARKER", repr(value))
+
+    def test_provenance_strings_are_bounded_before_engine_execution(self):
+        calls = []
+
+        class FakeService:
+            def scan(self, *args, **kwargs):
+                calls.append("scan")
+                return None
+
+        scanner = Scanner(FakeService())
+        marker = "PRIVATE-OVERLONG-PATH"
+        with self.assertRaises(ValueError) as error:
+            scanner.scan(
+                [BytesInput(b"small", marker + "x" * MAX_PROVENANCE_STRING_LENGTH)],
+                policy=ScanPolicy.inventory(), limits=ScanLimits(10, 1),
+            )
+        self.assertNotIn(marker, str(error.exception))
+        self.assertEqual(calls, [])
+        with self.assertRaises(ValueError):
+            BytesInput(b"small", "bad\x00path")
+        with self.assertRaises(ValueError):
+            SourceRef(SourceKind.FILESYSTEM, "x" * (MAX_PROVENANCE_STRING_LENGTH + 1))
+        with self.assertRaises(ValueError):
+            SourceRef(
+                SourceKind.FILESYSTEM, "ok.txt",
+                repository="r" * (MAX_PROVENANCE_STRING_LENGTH + 1),
+            )
+        with self.assertRaises(ValueError):
+            SourceRef(SourceKind.FILESYSTEM, "ok.txt", repository="bad\x00repo")
+
+        escaped = "bad-" + bytes([0xff]).decode("utf-8", "surrogateescape") + ".txt"
+        self.assertEqual(BytesInput(b"small", escaped).logical_path, escaped)
+        self.assertEqual(SourceRef(SourceKind.FILESYSTEM, escaped).path, escaped)
 
     def test_source_refs_validate_git_object_identity_without_requiring_nullable_fields(self):
         git = SourceRef(SourceKind.GIT_COMMIT, "fixture.txt", commit="a" * 40, blob_oid="b" * 64)
@@ -605,6 +640,9 @@ class PublicApiTests(unittest.TestCase):
             environment = dict(os.environ)
             environment["LEAKGUARD_CONFIG"] = ""
             environment["LEAKGUARD_STATE_DIR"] = str(Path(directory) / "unused-state")
+            source = str(Path(__file__).resolve().parents[1] / "src")
+            existing = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = source if not existing else source + os.pathsep + existing
             result = subprocess.run(
                 [sys.executable, "-m", "leakguard_core.manage", "explain", "--report", str(missing)],
                 cwd=directory, env=environment, capture_output=True, text=True,
@@ -631,6 +669,8 @@ class PublicApiTests(unittest.TestCase):
             self.assertNotIn(marker, rendered)
             self.assertNotIn(marker, serialized)
         self.assertEqual(presentation.sanitized_report(old)["coverage"], "unknown")
+        with self.assertRaises(ValueError):
+            presentation.sanitized_report({"findings": [{}] * (presentation.MAX_LEGACY_REPORT_ROWS + 1)})
 
     def test_explain_requires_selected_or_current_repository(self):
         stdout = __import__("io").StringIO()
@@ -643,6 +683,92 @@ class PublicApiTests(unittest.TestCase):
         open_store.assert_not_called()
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("report-unavailable", stderr.getvalue())
+
+    def test_repository_argument_preserves_git_path_bytes_except_terminating_lf(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-repo-path-") as directory:
+            repo = Path(directory) / "repo-é with space \n"
+            repo.mkdir()
+            subprocess.run(
+                ["git", "init", "-q", str(repo)], capture_output=True, check=True,
+            )
+            previous = Path.cwd()
+            try:
+                os.chdir(repo)
+                self.assertEqual(manage._repository_argument(None), str(repo.resolve()))
+            finally:
+                os.chdir(previous)
+
+    def test_legacy_archive_uses_bounded_allowlisted_rows(self):
+        marker = "PRIVATE-HISTORICAL-MARKER"
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-legacy-archive-") as directory:
+            state = Path(directory) / "state"
+            archive = state / "reports"
+            archive.mkdir(parents=True)
+            (archive / "old.json").write_text(json.dumps({
+                "schema_version": 0,
+                "label": marker,
+                "repo": marker,
+                "checked_utc": "2026-10-25T18:00:00Z",
+                "findings": [{
+                    "path": "sample.txt", "line": 4, "rule": "fixture-rule", "severity": "block",
+                    "material_name": marker, "info": marker, "field": marker, "priority": marker,
+                    "review": {"reason": marker}, "matched_value": marker,
+                }],
+            }), encoding="utf-8")
+            guard = SimpleNamespace(STATE=state, CONFIG={})
+            result = manage.report("all", None, guard)
+            environment = dict(os.environ)
+            environment["LEAKGUARD_CONFIG"] = ""
+            environment["LEAKGUARD_STATE_DIR"] = str(state)
+            source = str(Path(__file__).resolve().parents[1] / "src")
+            prior = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = source if not prior else source + os.pathsep + prior
+            process = subprocess.run(
+                [sys.executable, "-m", "leakguard_core.manage", "report", "all", "--legacy-archive"],
+                cwd=directory, env=environment, capture_output=True, text=True, timeout=10, check=False,
+            )
+        serialized = json.dumps(result, ensure_ascii=True)
+        self.assertNotIn(marker, serialized)
+        self.assertIn("coverage", result)
+        self.assertIn("unknown", result["coverage"])
+        self.assertEqual(set(result["findings"][0]), {
+            "path", "line", "family", "rules", "profile", "priority", "first_reported", "last_reported",
+        })
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stderr, "")
+        self.assertNotIn(marker, process.stdout)
+        self.assertIn('"coverage"', process.stdout)
+
+    def test_manage_unexpected_errors_return_fixed_stderr_without_traceback(self):
+        marker = "PRIVATE-MANAGE-ERROR"
+        stdout = __import__("io").StringIO()
+        stderr = __import__("io").StringIO()
+        with patch("leakguard_core.manage._main", side_effect=RuntimeError(marker)):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manage.main(["report", "all", "--legacy-archive"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "LeakGuard: manage-failed\n")
+        self.assertNotIn(marker, stderr.getvalue())
+
+    def test_manage_subprocess_sanitizes_legacy_setup_error(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-manage-error-") as directory:
+            bad_config = Path(directory) / "bad.json"
+            bad_config.write_text("PRIVATE-CONFIG-MARKER", encoding="utf-8")
+            environment = dict(os.environ)
+            environment["LEAKGUARD_CONFIG"] = str(bad_config)
+            environment["LEAKGUARD_STATE_DIR"] = str(Path(directory) / "state")
+            source = str(Path(__file__).resolve().parents[1] / "src")
+            prior = environment.get("PYTHONPATH")
+            environment["PYTHONPATH"] = source if not prior else source + os.pathsep + prior
+            result = subprocess.run(
+                [sys.executable, "-m", "leakguard_core.manage", "report", "all", "--legacy-archive"],
+                cwd=directory, env=environment, capture_output=True, text=True, timeout=10, check=False,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "LeakGuard: manage-failed\n")
+        self.assertNotIn("PRIVATE-CONFIG-MARKER", result.stdout + result.stderr)
 
     def test_result_invariants_prevent_bad_reuse_and_coverage_claims(self):
         report = _report()
@@ -675,6 +801,17 @@ class PublicApiTests(unittest.TestCase):
                 reused_from="previous-scan",
                 identity=replace(result.identity, cache_eligible=False),
             )
+        with self.assertRaises(ValueError):
+            replace(report, coverage=CoverageSummary(True, True, 0, pending_files=1))
+        with self.assertRaises(ValueError):
+            replace(report, issues=(CoverageIssue(ErrorCode.DECODE_FAILED, required=True),))
+        with self.assertRaises(ValueError):
+            replace(report, results=(replace(result, coverage=CoverageState.INCOMPLETE),))
+        with self.assertRaises(ValueError):
+            replace(
+                report,
+                results=(replace(result, identity=replace(result.identity, policy_id="other-policy")),),
+            )
 
     def test_legacy_model_counts_are_stable_and_cli_defaults_are_bounded(self):
         parser = _parser()
@@ -684,6 +821,11 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual((scan.budget_seconds, scan.max_files, scan.use_cache), (120, 1000, True))
         self.assertEqual((audit.budget_seconds, audit.max_files, audit.use_cache), (600, 3000, True))
         self.assertEqual((drain.budget_seconds, drain.max_files, drain.use_cache), (45, 150, False))
+
+    def test_scan_limits_keep_a_minimum_report_envelope_budget(self):
+        self.assertEqual(ScanLimits(10, 1, max_report_bytes=2_048).max_report_bytes, 2_048)
+        with self.assertRaises(ValueError):
+            ScanLimits(10, 1, max_report_bytes=2_047)
 
     def test_cli_json_stdout_is_one_object_and_fail_on_is_explicit(self):
         report = _report(verdict=DecisionVerdict.ALLOW, severity=FindingSeverity.BLOCK)

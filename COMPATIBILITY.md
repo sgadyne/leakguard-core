@@ -35,6 +35,10 @@ Without `state_dir` or an injected store, the API uses private temporary work an
 does not persist a catalog or semantic cache. `Scanner.scan()` accepts one
 `FileInput` per file or bounded `BytesInput`; `Scanner.scan_paths()` delegates
 directory expansion and enumeration coverage to the shared service.
+Public source paths, repository identities and `BytesInput.logical_path` values
+are limited to 4,096 Unicode code points and reject NUL. Valid POSIX
+surrogateescaped path characters remain accepted and are escaped safely in
+JSON. This matches the public report metadata bound.
 Audit directory enumeration is bounded per step. An unusually large or
 continuously changing directory may remain pending indefinitely, in which case
 the audit cycle remains incomplete and does not establish a complete inventory.
@@ -68,7 +72,9 @@ unfinished work return 2. JSON mode writes exactly one report object to stdout;
 human progress and sanitized setup errors go to stderr.
 CLI bounds can be set with `--budget-seconds` and `--max-files`; validated
 configuration supplies the maximum input size and per-detector timeout. Python
-callers choose those values explicitly through `ScanLimits`.
+callers choose those values explicitly through `ScanLimits`. The strict report
+byte cap defaults to 64 MB and must be at least 2,048 bytes for the bounded
+diagnostic envelope.
 
 Git hooks use the same report schema and policy decision. Allow or allow-with-
 omissions returns 0, a blocking finding returns 1, and required incomplete work
@@ -90,7 +96,10 @@ not promise a snapshot while concurrent scans change the indexed observations.
 Successful reads return 0 even when reports contain blocking findings; read or
 state failures return 2. The query path opens the store without initializing
 detectors. `--legacy-archive` retains the older archive reader and does not accept
-page cursors.
+page cursors. The legacy view is explicitly coverage-unknown, bounded to 1,000
+directory entries, 4 MB per file and 64 MB total, and exposes only allowlisted
+path, line, rule, severity-derived labels and timestamps. It omits legacy
+material names and free-form review text.
 Current findings describe the latest observed state, not confirmed filesystem
 absence. An observed delete or rename makes prior evidence unknown rather than
 resolving it; notifications can be lost. A bounded internal service check may

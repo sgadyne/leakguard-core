@@ -9,11 +9,19 @@ import pathlib
 import re
 import subprocess
 
-from .models import DecisionVerdict, ErrorCode, ScanReport, SourceKind, SourceRef
+from .models import (
+    DecisionVerdict,
+    ErrorCode,
+    MAX_PROVENANCE_STRING_LENGTH,
+    ScanReport,
+    SourceKind,
+    SourceRef,
+)
 
 
 MAX_FINDINGS_PAGE_SIZE = 10_000
 MAX_FINDINGS_CURSOR_LENGTH = 1_024
+MAX_LEGACY_REPORT_ROWS = 10_000
 
 
 def sanitized_report(report):
@@ -29,16 +37,24 @@ def sanitized_report(report):
         except ValueError:
             pass
     repository = report.get("repo")
-    if isinstance(repository, str) and len(repository) <= 4096:
+    if (isinstance(repository, str) and len(repository) <= MAX_PROVENANCE_STRING_LENGTH
+            and "\x00" not in repository):
         result["repo"] = repository
-    result["findings"] = [_sanitize_legacy_finding(item) for item in report.get("findings", []) if type(item) is dict]
+    raw_findings = report.get("findings", [])
+    if type(raw_findings) is not list or len(raw_findings) > MAX_LEGACY_REPORT_ROWS:
+        raise ValueError("legacy report findings exceed the public bound")
+    result["findings"] = [_sanitize_legacy_finding(item) for item in raw_findings if type(item) is dict]
     stable_codes = {item.value for item in ErrorCode} | {"error-directory"}
     issues = []
-    for issue in report.get("coverage_issues", []):
+    raw_issues = report.get("coverage_issues", [])
+    if type(raw_issues) is not list or len(raw_issues) > MAX_LEGACY_REPORT_ROWS:
+        raise ValueError("legacy report coverage exceeds the public bound")
+    for issue in raw_issues:
         if type(issue) is not dict:
             continue
         path = issue.get("path")
-        if not isinstance(path, str) or len(path) > 4096:
+        if (not isinstance(path, str) or len(path) > MAX_PROVENANCE_STRING_LENGTH
+                or "\x00" in path):
             path = "scan"
         status = issue.get("status")
         if not isinstance(status, str) or status not in stable_codes:
@@ -50,7 +66,8 @@ def sanitized_report(report):
 
 def _sanitize_legacy_finding(finding):
     path = finding.get("path")
-    if not isinstance(path, str) or len(path) > 4096:
+    if (not isinstance(path, str) or len(path) > MAX_PROVENANCE_STRING_LENGTH
+            or "\x00" in path):
         path = "unknown"
     line = finding.get("line")
     if type(line) is not int or line <= 0:
@@ -367,7 +384,8 @@ def _public_finding_row(row):
 def _public_text(value, allow_none=False, allow_empty=True):
     if allow_none and value is None:
         return
-    if not isinstance(value, str) or (not allow_empty and not value) or len(value) > 4096:
+    if (not isinstance(value, str) or (not allow_empty and not value)
+            or len(value) > MAX_PROVENANCE_STRING_LENGTH or "\x00" in value):
         raise ValueError("invalid stored finding")
 
 

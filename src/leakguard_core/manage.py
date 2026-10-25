@@ -18,6 +18,10 @@ from . import policies
 from . import presentation
 
 MAX_EXPLICIT_REPORT_BYTES = 64_000_000
+MAX_LEGACY_ARCHIVE_ENTRIES = 1_000
+MAX_LEGACY_ARCHIVE_TOTAL_BYTES = 64_000_000
+MAX_LEGACY_ARCHIVE_FILE_BYTES = 4_000_000
+MAX_LEGACY_ARCHIVE_FINDINGS = 10_000
 
 
 def rows(conn, sql, args=()):
@@ -27,42 +31,93 @@ def rows(conn, sql, args=()):
 
 
 def report(profile, conn, guard):
+    """Return a bounded schema-0 view using only the safe legacy allowlist."""
     cases = {}
-    for path in (guard.STATE / 'reports').glob('*.json'):
-        try:
-            data = json.loads(path.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            continue
-        if 'fixture' in data.get('label', '') or 'leakguard-test-' in data.get('repo', ''):
-            continue
-        for finding in data.get('findings', []):
-            if finding.get('severity') == 'info' or finding.get('detector_severity') == 'info':
-                continue
-            name = policies.canonical(finding['path'], guard.CONFIG)
-            if 'leakguard-test-' in name or 'leakguard-watch-fixture' in name or name.endswith('synthetic.py'):
-                continue
-            case_profile = policies.profile(name, guard.CONFIG)
-            if profile != 'all' and case_profile != profile:
-                continue
-            rule = finding['rule']
-            family = 'application-credential' if rule in {'azure-ad-client-secret', 'literal-client-secret', 'known-material-credential'} else rule
-            key = (name, finding['line'], family)
-            case = cases.setdefault(key, {'path': name, 'line': finding['line'], 'family': family, 'rules': [], 'materials': [], 'profile': case_profile, 'priority': 'inventory' if case_profile == 'companion' else ('review' if finding.get('severity') in {'review', 'info'} or rule == 'generic-api-key' else 'high'), 'first_reported': data['checked_utc'], 'last_reported': data['checked_utc']})
-            case['first_reported'] = min(case['first_reported'], data['checked_utc'])
-            case['last_reported'] = max(case['last_reported'], data['checked_utc'])
-            if rule not in case['rules']:
-                case['rules'].append(rule)
-            if finding.get('material_name') and finding['material_name'] not in case['materials']:
-                case['materials'].append(finding['material_name'])
-    for key, case in cases.items():
-        review = conn.execute('SELECT status,reason,updated FROM finding_reviews WHERE path=? AND line=? AND family=?', key).fetchone()
-        if review:
-            case['review'] = dict(zip(['status', 'reason', 'updated'], review))
-    active = [c for c in cases.values() if c['profile'] == 'general' and c.get('review', {}).get('status') not in {'false-positive', 'accepted-location'}]
-    return {'profile': profile, 'cases': len(cases), 'needs_review': len(active), 'priority_counts': dict(collections.Counter(c['priority'] for c in active)), 'coverage': 'Historical observations, not proof that a file or credential is still present. Consult location history and rescan before remediation.', 'findings': sorted(cases.values(), key=lambda c: (c['priority'] != 'high', c['path'], c['line']))}
+    report_dir = guard.STATE / 'reports'
+    total_bytes = 0
+    entries_seen = 0
+    findings_seen = 0
+    if report_dir.exists():
+        with os.scandir(report_dir) as entries:
+            for entry in entries:
+                entries_seen += 1
+                if entries_seen > MAX_LEGACY_ARCHIVE_ENTRIES:
+                    raise ValueError('legacy archive entry bound exceeded')
+                if not entry.name.endswith('.json'):
+                    continue
+                remaining = MAX_LEGACY_ARCHIVE_TOTAL_BYTES - total_bytes
+                if remaining <= 0:
+                    raise ValueError('legacy archive byte bound exceeded')
+                raw = _read_explicit_report_bytes(
+                    pathlib.Path(entry.path),
+                    max_bytes=min(MAX_LEGACY_ARCHIVE_FILE_BYTES, remaining),
+                )
+                total_bytes += len(raw)
+                try:
+                    data = _decode_report(raw)
+                except (ValueError, UnicodeError):
+                    continue
+                version = data.get('schema_version', 0) if type(data) is dict else None
+                if type(version) is not int or version != 0:
+                    continue
+                safe = presentation.sanitized_report(data)
+                checked = safe.get('checked_utc')
+                for finding in safe['findings']:
+                    findings_seen += 1
+                    if findings_seen > MAX_LEGACY_ARCHIVE_FINDINGS:
+                        raise ValueError('legacy archive finding bound exceeded')
+                    if finding['severity'] == 'info':
+                        continue
+                    name = policies.canonical(finding['path'], guard.CONFIG)
+                    case_profile = policies.profile(name, guard.CONFIG)
+                    if profile != 'all' and case_profile != profile:
+                        continue
+                    rule = finding['rule']
+                    family = (
+                        'application-credential'
+                        if rule in {'azure-ad-client-secret', 'literal-client-secret', 'known-material-credential'}
+                        else rule
+                    )
+                    key = (name, finding['line'], family)
+                    priority = (
+                        'inventory' if case_profile == 'companion'
+                        else ('review' if finding['severity'] == 'review' or rule == 'generic-api-key' else 'high')
+                    )
+                    case = cases.setdefault(key, {
+                        'path': name, 'line': finding['line'], 'family': family,
+                        'rules': [], 'profile': case_profile, 'priority': priority,
+                        'first_reported': checked, 'last_reported': checked,
+                    })
+                    if checked is not None:
+                        if case['first_reported'] is None or checked < case['first_reported']:
+                            case['first_reported'] = checked
+                        if case['last_reported'] is None or checked > case['last_reported']:
+                            case['last_reported'] = checked
+                    if rule not in case['rules']:
+                        case['rules'].append(rule)
+    for case in cases.values():
+        case['rules'].sort()
+    active = [case for case in cases.values() if case['profile'] == 'general']
+    return {
+        'legacy_schema': 0,
+        'profile': profile,
+        'cases': len(cases),
+        'needs_review': len(active),
+        'priority_counts': dict(collections.Counter(case['priority'] for case in active)),
+        'coverage': 'unknown (legacy historical observations; current presence and archive completeness are unverified)',
+        'findings': sorted(cases.values(), key=lambda case: (case['priority'] != 'high', case['path'], case['line'])),
+    }
 
 
 def main(argv=None):
+    try:
+        return _main(argv)
+    except Exception:
+        print('LeakGuard: manage-failed', file=sys.stderr)
+        return 2
+
+
+def _main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('status')
@@ -259,29 +314,36 @@ def _repository_argument(value):
         return None
     if process.returncode:
         return None
-    return os.fsdecode(process.stdout.strip())
+    return os.fsdecode(process.stdout.removesuffix(b'\n'))
 
 
 def _read_explicit_report(path):
+    return _decode_report(_read_explicit_report_bytes(path))
+
+
+def _read_explicit_report_bytes(path, *, max_bytes=MAX_EXPLICIT_REPORT_BYTES):
     flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
     descriptor = os.open(path, flags)
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_EXPLICIT_REPORT_BYTES:
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
             raise ValueError('report is not a bounded regular file')
         chunks = []
         size = 0
-        while size <= MAX_EXPLICIT_REPORT_BYTES:
-            chunk = os.read(descriptor, min(1_048_576, MAX_EXPLICIT_REPORT_BYTES + 1 - size))
+        while size <= max_bytes:
+            chunk = os.read(descriptor, min(1_048_576, max_bytes + 1 - size))
             if not chunk:
                 break
             chunks.append(chunk)
             size += len(chunk)
-        if size > MAX_EXPLICIT_REPORT_BYTES:
+        if size > max_bytes:
             raise ValueError('report exceeds the configured read bound')
-        raw = b''.join(chunks)
+        return b''.join(chunks)
     finally:
         os.close(descriptor)
+
+
+def _decode_report(raw):
     return json.loads(raw.decode('utf-8-sig'), object_pairs_hook=_unique_json_object)
 
 

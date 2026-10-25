@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import TypeAlias
 
 
+# Provenance is repeated across findings in a report, so cap it at the same
+# size accepted by the public legacy-report adapter. Surrogateescaped POSIX
+# path characters remain valid and serialize through JSON escaping.
+MAX_PROVENANCE_STRING_LENGTH = 4_096
+
+
 class StringEnum(str, Enum):
     """Base for stable string-valued public enums."""
 
@@ -171,7 +177,7 @@ class BytesInput:
     def __post_init__(self) -> None:
         if type(self.data) is not bytes:
             raise TypeError("data must be bytes")
-        _require_nonempty("logical_path", self.logical_path)
+        _require_bounded_provenance("logical_path", self.logical_path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +275,8 @@ class ScanLimits:
             "worker_memory_bytes", "max_ipc_bytes", "max_directory_entries",
         ):
             _require_positive_int(name, getattr(self, name))
+        if self.max_report_bytes < 2_048:
+            raise ValueError("max_report_bytes must be at least 2048")
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,8 +290,9 @@ class SourceRef:
 
     def __post_init__(self) -> None:
         _require_enum("kind", self.kind, SourceKind)
-        _require_nonempty("path", self.path)
-        for name in ("repository", "commit", "blob_oid", "index_tree_oid"):
+        _require_bounded_provenance("path", self.path)
+        _require_optional_bounded_provenance("repository", self.repository)
+        for name in ("commit", "blob_oid", "index_tree_oid"):
             _require_optional_string(name, getattr(self, name))
         for name in ("commit", "blob_oid", "index_tree_oid"):
             value = getattr(self, name)
@@ -508,10 +517,23 @@ class ScanReport:
             raise TypeError("decision must be a PolicyDecision")
         if self.decision.policy_id != self.policy_id:
             raise ValueError("decision policy_id must match the report")
+        if any(result.identity.policy_id != self.policy_id for result in self.results):
+            raise ValueError("result policy_id must match the report")
         if (not self.coverage.enumeration_complete or not self.coverage.required_complete) and self.decision.verdict is not DecisionVerdict.INCOMPLETE:
             raise ValueError("incomplete coverage requires an incomplete decision")
         if type(self.issues) is not tuple or any(type(item) is not CoverageIssue for item in self.issues):
             raise TypeError("issues must be a tuple of CoverageIssue values")
+        if self.coverage.required_complete:
+            if any(issue.required for issue in self.issues):
+                raise ValueError("required-complete reports cannot contain required issues")
+            if any(
+                result.coverage is CoverageState.INCOMPLETE
+                or any(issue.required for issue in result.issues)
+                for result in self.results
+            ):
+                raise ValueError("required-complete reports cannot contain incomplete results")
+            if (self.coverage.pending_files or 0) > 0 or (self.coverage.pending_directories or 0) > 0:
+                raise ValueError("required-complete reports cannot have pending work")
 
     @property
     def counts(self) -> ScanCounts:
@@ -665,6 +687,17 @@ def _require_enum(name: str, value: object, enum_type: type[Enum]) -> None:
 def _require_nonempty(name: str, value: object) -> None:
     if not isinstance(value, str) or not value:
         raise TypeError(f"{name} must be a nonempty string")
+
+
+def _require_bounded_provenance(name: str, value: object) -> None:
+    _require_nonempty(name, value)
+    if len(value) > MAX_PROVENANCE_STRING_LENGTH or "\x00" in value:
+        raise ValueError(f"{name} must be a bounded path without NUL")
+
+
+def _require_optional_bounded_provenance(name: str, value: object) -> None:
+    if value is not None:
+        _require_bounded_provenance(name, value)
 
 
 def _require_optional_string(name: str, value: object) -> None:
