@@ -235,3 +235,24 @@ class GitPathIdentityTests(unittest.TestCase):
         (directory / 'pre-commit.before-leakguard').write_text('#!/bin/sh\nexit 7\n')
         self.git('config', 'core.hooksPath', str(directory))
         self.assertEqual(engine.existing_hook(self.repo, 'pre-commit', (), b''), 7)
+
+
+class GitContextEnvironmentTests(unittest.TestCase):
+    def test_git_preserves_user_config_discovery_without_expanding_other_workers(self):
+        import os
+        from types import SimpleNamespace
+        from leakguard_core.git_scanning import git_output, repository_root
+        from leakguard_core.sources import AcquisitionError
+        captured = {}
+        def worker(*args, **kwargs):
+            captured.update(kwargs['env'])
+            return SimpleNamespace(returncode=0, stdout=b'/synthetic/repository\n')
+        with tempfile.TemporaryDirectory(prefix='leakguard-private-xdg-') as folder, patch.dict(os.environ, {'XDG_CONFIG_HOME': folder}), patch('leakguard_core._supervision.run_worker', side_effect=worker):
+            git_output(Path(folder), 'rev-parse', '--show-toplevel')
+            self.assertEqual(captured.get('HOME'), os.environ.get('HOME'))
+            self.assertEqual(captured['XDG_CONFIG_HOME'], folder)
+            self.assertEqual(captured['GIT_NO_REPLACE_OBJECTS'], '1')
+            self.assertEqual(captured['GIT_GRAFT_FILE'], os.devnull)
+            with self.assertRaises(AcquisitionError) as failure:
+                repository_root(Path(folder), deadline=__import__('time').monotonic() + 5, cancel=lambda: True)
+            self.assertEqual(failure.exception.code, 'cancelled')
