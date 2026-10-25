@@ -113,6 +113,16 @@ There is no blanket pre-scan hash masking and no filename-wide hash exception. A
 
 Explicit password fields do not need high entropy to be sensitive: weak literal passwords are detected too. Placeholder exceptions are limited to exact documented markers/environment references rather than broad `example-*` or `your-*` prefixes. Provider rules are independently evaluated. Duplicate Git/plugin observations retain the most restrictive severity.
 
+The legacy `review_only_rules` setting applies only to built-in Gitleaks findings
+in inventory mode. It cannot downgrade a plugin's declared blocking rule or any
+Git-mode finding. Reports retain the detector's native value in
+`detector_severity`; the final `severity` can be `review` for inventory display
+or `info` for verified metadata. Earlier releases applied this inventory setting
+to Git scans too; that was corrected because inventory configuration cannot
+weaken Git protection. Configurations that relied on Git findings being
+downgraded must no longer expect that behavior. See
+[compatibility notes](COMPATIBILITY.md) for migration details.
+
 ## Plugins
 
 See [the plugin API](PLUGIN_API.md). Plugins are optional trusted Python code explicitly named by module in external configuration. Nothing is downloaded/discovered automatically. Detector results have a narrow schema without matched values. Plugins cannot waive unrelated findings. V2 detector and extractor examples are separate installable packages; the v1 example remains for source compatibility. Host-specific rules, scopes, material references and firm checks belong in separately distributed extension packages.

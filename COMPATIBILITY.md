@@ -127,6 +127,20 @@ signature remain supported. V1 plugins without a complete declared runtime
 closure can execute but cannot authorize semantic cache reuse. See
 [PLUGIN_API.md](PLUGIN_API.md) for the distinct v2 detector and extractor API.
 
+## Legacy inventory severity setting
+
+`review_only_rules` is retained for compatibility as an inventory presentation
+setting for built-in Gitleaks findings. It may display those findings at
+`review` severity during inventory scans. It does not weaken a plugin's
+declared minimum severity, and it never changes Git-mode findings. The
+`detector_severity` field preserves the detector's native `block` or `review`
+result; final `severity` may be `review` for inventory presentation or `info`
+when a verified metadata classification applies. Git policy uses the native
+detector severity. Older releases applied this setting too broadly, including
+to Git scans; that behavior was a bug. Configurations that relied on Git
+findings being downgraded must no longer expect that behavior. Keep any
+inventory-only review choices separate from Git protection.
+
 ## CLI behavior
 
 For `leakguard scan` and one audit/drain batch, a completed inventory returns 0
