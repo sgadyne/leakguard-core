@@ -135,11 +135,12 @@ setting for built-in Gitleaks findings. It may display those findings at
 declared minimum severity, and it never changes Git-mode findings. The
 `detector_severity` field preserves the detector's native `block` or `review`
 result; final `severity` may be `review` for inventory presentation or `info`
-when a verified metadata classification applies. Git policy uses the native
-detector severity. Older releases applied this setting too broadly, including
-to Git scans; that behavior was a bug. Configurations that relied on Git
-findings being downgraded must no longer expect that behavior. Keep any
-inventory-only review choices separate from Git protection.
+when a verified metadata classification applies. Git mode ignores the inventory
+review override, while verified core metadata classifications still apply.
+Older releases applied this setting too broadly, including to Git scans; that
+behavior was a bug. Configurations that relied on Git findings being downgraded
+must no longer expect that behavior. Keep inventory-only review choices
+separate from Git protection.
 
 ## CLI behavior
 
