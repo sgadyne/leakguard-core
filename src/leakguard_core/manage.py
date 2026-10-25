@@ -90,9 +90,17 @@ def main(argv=None):
         try:
             path = pathlib.Path(args.report)
             data = _read_explicit_report(path)
-            if type(data) is dict and type(data.get('schema_version')) is int and data['schema_version'] == 1:
+            if type(data) is not dict:
+                raise ValueError('report must be an object')
+            version = data.get('schema_version')
+            if 'schema_version' in data and (type(version) is not int or version not in {0, 1}):
+                raise ValueError('unsupported report schema')
+            if version == 1:
                 from .scan_store import _report_from
                 typed = _report_from(data)
+                canonical = json.dumps(data, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
+                if canonical != typed.to_json():
+                    raise ValueError('invalid schema-1 report')
                 if args.format == 'json':
                     print(typed.to_json())
                 else:

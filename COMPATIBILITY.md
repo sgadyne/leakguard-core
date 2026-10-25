@@ -75,7 +75,9 @@ omissions returns 0, a blocking finding returns 1, and required incomplete work
 returns 2. A chained hook's nonzero status remains authoritative. `manage explain`
 renders the indexed latest typed report for the selected/current repository;
 `manage explain --report PATH` explicitly reads a bounded schema-0 archive or
-schema-1 report file.
+schema-1 report file. Explicit report input is capped at 64 MB; duplicate JSON
+keys, malformed schema-1 payloads and unsupported schema versions fail with a
+fixed redacted error.
 `manage report PROFILE` defaults to indexed current active and unknown findings,
 with `--state history` for prior observations. Both current/history views include
 timestamps. The indexed query is bounded and paginated: `--limit` accepts 1 to
@@ -91,8 +93,11 @@ detectors. `--legacy-archive` retains the older archive reader and does not acce
 page cursors.
 Current findings describe the latest observed state, not confirmed filesystem
 absence. An observed delete or rename makes prior evidence unknown rather than
-resolving it; notifications can be lost, and this release exposes no explicit
-absence-confirmation action. Partial or failed audits do not establish absence.
+resolving it; notifications can be lost. A bounded internal service check may
+resolve old-path evidence as `source-absent` only after validating its directory
+identity chain; this reason differs from a successful clean content scan. The
+CLI and public `Scanner` facade do not expose that confirmation action. Partial
+or failed audits do not establish absence.
 
 This differs from 0.1 callers that treated a zero scan exit as evidence of a clean
 scan. A zero means the requested inventory completed under its declared policy;

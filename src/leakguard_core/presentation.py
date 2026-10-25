@@ -7,7 +7,7 @@ import pathlib
 import re
 import subprocess
 
-from .models import DecisionVerdict, ErrorCode, ScanReport
+from .models import DecisionVerdict, ErrorCode, ScanReport, SourceKind, SourceRef
 
 
 MAX_FINDINGS_PAGE_SIZE = 10_000
@@ -22,7 +22,10 @@ def sanitized_report(report):
     result = {"legacy_schema": 0, "coverage": "unknown"}
     checked = report.get("checked_utc")
     if isinstance(checked, str) and len(checked) <= 64:
-        result["checked_utc"] = checked
+        try:
+            result["checked_utc"] = _public_timestamp(checked)
+        except ValueError:
+            pass
     repository = report.get("repo")
     if isinstance(repository, str) and len(repository) <= 4096:
         result["repo"] = repository
@@ -169,6 +172,8 @@ def findings_report_to_dict(state, profile, rows):
         raise ValueError("invalid finding profile")
     if type(rows) not in {tuple, list}:
         raise TypeError("finding rows must be a tuple or list")
+    if len(rows) > MAX_FINDINGS_PAGE_SIZE:
+        raise ValueError("findings report exceeds the public bound")
     findings = [_public_finding_row(row) for row in rows]
     findings.sort(key=lambda row: (
         row["source"]["path"], row["start_line"], row["rule"], row["id"]
@@ -221,17 +226,24 @@ def render_findings_report(report, limit=50):
     if type(report) is not dict:
         raise TypeError("report must be a public findings report")
     version = report.get("schema_version")
-    if type(version) is not int or version not in {1, 2}:
+    if type(version) is not int:
         raise TypeError("report must be a public findings report")
-    is_page = version == 2 and report.get("report_type") == "findings-page"
-    expected = page_expected if is_page else old_expected
+    if version == 1 and report.get("report_type") == "findings":
+        is_page = False
+        expected = old_expected
+    elif version == 2 and report.get("report_type") == "findings-page":
+        is_page = True
+        expected = page_expected
+    else:
+        raise TypeError("report must be a public findings report")
     if set(report) != expected or report["report_type"] != ("findings-page" if is_page else "findings"):
         raise TypeError("report must be a public findings report")
     if report["state"] not in {"current", "history"} or report["profile"] not in {"general", "companion", "all"}:
         raise ValueError("invalid findings report")
     findings = report["findings"]
     count_key = "page_count" if is_page else "count"
-    if type(findings) is not list or type(report[count_key]) is not int or report[count_key] != len(findings):
+    if (type(findings) is not list or len(findings) > MAX_FINDINGS_PAGE_SIZE or
+            type(report[count_key]) is not int or report[count_key] != len(findings)):
         raise ValueError("invalid findings report")
     if is_page:
         if report["page_count"] > MAX_FINDINGS_PAGE_SIZE:
@@ -244,6 +256,7 @@ def render_findings_report(report, limit=50):
                 raise ValueError("invalid findings report")
         elif cursor is not None:
             raise ValueError("invalid findings report")
+    findings = [_validate_public_finding(item) for item in findings]
     lines = [
         f"LeakGuard findings ({report['state']}, profile={report['profile']}): "
         f"{report[count_key]} observations" + (" in this page" if is_page else "")
@@ -283,6 +296,14 @@ def _public_finding_row(row):
     _public_text(clean_source["path"], allow_empty=False)
     for key in source_fields[2:]:
         _public_text(clean_source[key], allow_none=True)
+    try:
+        SourceRef(
+            SourceKind(clean_source["kind"]), clean_source["path"],
+            clean_source["repository"], clean_source["commit"],
+            clean_source["blob_oid"], clean_source["index_tree_oid"],
+        )
+    except (TypeError, ValueError):
+        raise ValueError("invalid stored finding") from None
 
     finding_id = row.get("id")
     if not isinstance(finding_id, str) or re.fullmatch(r"[0-9a-f]{64}", finding_id) is None:
@@ -311,7 +332,7 @@ def _public_finding_row(row):
     if reason not in {
         "historical-observation", "incomplete-scan", "policy-obsolete", "complete-content-scan",
         "verified-present", "partial-observation", "legacy-unverified", "source-event",
-        "source-unavailable",
+        "source-unavailable", "source-absent",
     }:
         raise ValueError("invalid stored finding")
     first_seen = _public_timestamp(row.get("first_seen"))
@@ -346,6 +367,22 @@ def _public_text(value, allow_none=False, allow_empty=True):
         return
     if not isinstance(value, str) or (not allow_empty and not value) or len(value) > 4096:
         raise ValueError("invalid stored finding")
+
+
+def _validate_public_finding(finding):
+    fields = {
+        "id", "source", "part_id", "start_line", "end_line", "rule", "detector_id",
+        "detector_severity", "severity", "classification", "state", "first_seen",
+        "last_seen", "last_verified", "resolved_at", "state_reason",
+    }
+    source_fields = {"kind", "path", "repository", "commit", "blob_oid", "index_tree_oid"}
+    if (type(finding) is not dict or set(finding) != fields or
+            type(finding.get("source")) is not dict or set(finding["source"]) != source_fields):
+        raise ValueError("invalid findings report")
+    normalized = _public_finding_row(finding)
+    if normalized != finding:
+        raise ValueError("invalid findings report")
+    return normalized
 
 
 def _public_timestamp(value, allow_none=False):

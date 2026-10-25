@@ -81,6 +81,19 @@ def _report(*, verdict=DecisionVerdict.ALLOW, severity=FindingSeverity.REVIEW):
     )
 
 
+def _run_explicit_report(path, cwd):
+    environment = dict(os.environ)
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = source if not existing else source + os.pathsep + existing
+    environment["LEAKGUARD_CONFIG"] = ""
+    environment["LEAKGUARD_STATE_DIR"] = str(Path(cwd) / "unused-state")
+    return subprocess.run(
+        [sys.executable, "-m", "leakguard_core.manage", "explain", "--report", str(path), "--format", "json"],
+        cwd=cwd, env=environment, capture_output=True, text=True, timeout=30, check=False,
+    )
+
+
 class PublicApiTests(unittest.TestCase):
     def test_import_is_inert_even_with_invalid_operator_environment(self):
         with tempfile.TemporaryDirectory(prefix="leakguard-test-public-") as directory:
@@ -189,14 +202,6 @@ class PublicApiTests(unittest.TestCase):
             "detector_severity", "severity", "classification", "proof_id",
         })
         self.assertEqual(json.loads(report.to_json()), payload)
-
-    def test_typed_scan_summary_does_not_claim_a_git_operation_was_blocked(self):
-        text = presentation.render(_report(
-            verdict=DecisionVerdict.BLOCK, severity=FindingSeverity.BLOCK,
-        ))
-        self.assertIn("BLOCKING FINDINGS", text)
-        self.assertIn("Blocking findings are present", text)
-        self.assertNotIn("blocked this Git operation", text)
 
     def test_typed_scan_summary_does_not_claim_a_git_operation_was_blocked(self):
         text = presentation.render(_report(
@@ -347,6 +352,28 @@ class PublicApiTests(unittest.TestCase):
             presentation.render_findings_report({
                 **page, "schema_version": True,
             })
+        with self.assertRaises(TypeError):
+            presentation.render_findings_report({
+                **page, "schema_version": 2, "report_type": "findings",
+            })
+
+    def test_public_finding_serialization_rejects_malformed_git_identity(self):
+        row = {
+            "id": "a" * 64,
+            "source": {"kind": "git-commit", "path": "fixture.txt", "repository": "/fixture",
+                       "commit": "PRIVATE-SOURCE-BYTES", "blob_oid": "b" * 40,
+                       "index_tree_oid": None},
+            "part_id": "text", "start_line": 1, "end_line": 1, "rule": "fixture-rule",
+            "detector_id": "builtin", "detector_severity": "review", "severity": "review",
+            "classification": "credential-candidate", "state": "active",
+            "first_seen": "2026-10-25T18:00:00Z", "last_seen": "2026-10-25T18:00:00Z",
+            "last_verified": "2026-10-25T18:00:00Z", "resolved_at": None,
+            "state_reason": "verified-present",
+        }
+        with self.assertRaises(ValueError):
+            presentation.findings_page_report_to_dict(
+                "current", "all", (row,), has_more=False, next_cursor=None,
+            )
 
     def test_manage_pages_sqlite_current_history_cursor_and_empty(self):
         from leakguard_core.scan_store import SQLiteScanStore
@@ -475,6 +502,68 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(stdout.getvalue(), "")
             self.assertNotIn("PRIVATE-EXTRA", stderr.getvalue())
+
+    def test_explicit_report_subprocess_rejects_unknown_schema_and_malformed_schema_one(self):
+        marker = "PRIVATE-SOURCE-BYTES-MARKER"
+        report = _report()
+        valid = report.to_dict()
+        wrong_counts = json.loads(json.dumps(valid))
+        wrong_counts["counts"]["findings"] = 9182
+        nested_extra = json.loads(json.dumps(valid))
+        nested_extra["results"][0]["findings"][0]["source"]["private"] = marker
+        cases = {
+            "newer-schema.json": json.dumps({"schema_version": 2, "findings": [{"path": marker}]}),
+            "boolean-schema.json": json.dumps({"schema_version": True, "findings": [{"path": marker}]}),
+            "wrong-counts.json": json.dumps(wrong_counts),
+            "nested-extra.json": json.dumps(nested_extra),
+            "duplicate-key.json": '{"schema_version":1,"schema_version":2,"findings":["' + marker + '"]}',
+        }
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-report-schema-") as directory:
+            for name, serialized in cases.items():
+                with self.subTest(name=name):
+                    path = Path(directory) / name
+                    path.write_text(serialized, encoding="utf-8")
+                    result = _run_explicit_report(path, directory)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(result.stderr, "LeakGuard: invalid-report\n")
+                    self.assertNotIn(marker, result.stdout + result.stderr)
+
+    def test_explicit_legacy_report_subprocess_drops_arbitrary_labels_and_source_bytes(self):
+        marker = "PRIVATE-SOURCE-BYTES-MARKER"
+        old = {
+            "label": marker, "checked_utc": marker, "source_bytes": marker,
+            "findings": [{
+                "path": "fixture.txt", "line": 1, "rule": "fixture-rule", "severity": "review",
+                "info": marker, "field": marker, "material_name": marker, "value": marker,
+            }],
+            "coverage_issues": [{"path": "fixture.txt", "status": "coverage-unknown", "material_name": marker}],
+        }
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-report-legacy-") as directory:
+            path = Path(directory) / "legacy.json"
+            path.write_text(json.dumps(old), encoding="utf-8")
+            result = _run_explicit_report(path, directory)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn(marker, result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["legacy_schema"], 0)
+        self.assertEqual(payload["coverage"], "unknown")
+        self.assertNotIn("source_bytes", payload)
+        self.assertNotIn("material_name", payload["findings"][0])
+
+    def test_explicit_report_subprocess_bounds_oversized_json_without_echoing_input(self):
+        marker = "PRIVATE-OVERSIZED-REPORT-MARKER"
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-report-large-") as directory:
+            path = Path(directory) / "oversized.json"
+            with path.open("wb") as stream:
+                stream.write(marker.encode("ascii"))
+                stream.truncate(manage.MAX_EXPLICIT_REPORT_BYTES + 1)
+            result = _run_explicit_report(path, directory)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "LeakGuard: invalid-report\n")
+        self.assertNotIn(marker, result.stdout + result.stderr)
 
     def test_manage_module_propagates_explicit_report_failure_exit_code(self):
         with tempfile.TemporaryDirectory(prefix="leakguard-test-manage-exit-") as directory:
