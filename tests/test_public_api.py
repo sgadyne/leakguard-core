@@ -221,6 +221,32 @@ class PublicApiTests(unittest.TestCase):
         self.assertNotIn("PRIVATE-VALUE", text)
         self.assertNotIn("PASS", text)
 
+    def test_manage_explain_reads_indexed_typed_report(self):
+        report = _report()
+
+        class FakeStore:
+            closed = False
+
+            def latest_report(self, repository):
+                self.repository = repository
+                return report
+
+            def close(self):
+                self.closed = True
+
+        store = FakeStore()
+        stdout = __import__("io").StringIO()
+        stderr = __import__("io").StringIO()
+        with patch("leakguard_core.manage._open_scan_store", return_value=store), \
+             patch("leakguard_core.manage._repository_argument", return_value="fixture-repo"):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manage.main(["explain", "--format", "json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(store.repository, "fixture-repo")
+        self.assertEqual(json.loads(stdout.getvalue()), report.to_dict())
+        self.assertTrue(store.closed)
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_result_invariants_prevent_bad_reuse_and_coverage_claims(self):
         report = _report()
         result = report.results[0]
