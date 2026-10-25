@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import sys
 import tempfile
 import unittest
@@ -284,13 +285,16 @@ class DeterministicCorpusTests(unittest.TestCase):
         self.assertEqual(len({item["case_id"] for item in CASE_CATALOG}), len(CASE_CATALOG))
         uncovered = {item["case_id"] for item in CASE_CATALOG if item["state"] == "uncovered"}
         self.assertEqual(uncovered, set())
-        self.assertEqual(_CATALOG_DOC["schema_version"], 2)
+        self.assertEqual(_CATALOG_DOC["schema_version"], 3)
+        for item in CASE_CATALOG:
+            if item["expected"] == "finding":
+                self.assertRegex(item.get("expected_rule", ""), r"\A[a-z0-9][a-z0-9_-]{0,79}\Z")
         self.assertEqual(_CATALOG_DOC["seed"], SEED)
 
     def test_actual_labeled_cases_emit_case_level_counts_without_fixture_text(self):
         summary = run_labeled_corpus(SEED, engine.EXE)
         expected_uncovered = set()
-        expected_metric_eligible = 34
+        expected_metric_eligible = 35
         expected_metric_not_scored = 13
         if importlib.util.find_spec("pypdf") is None:
             expected_uncovered.update({"pdf-text-positive", "pdf-image-only"})
@@ -311,6 +315,25 @@ class DeterministicCorpusTests(unittest.TestCase):
         self.assertIn("true_positive", summary["detector_metrics"])
         self.assertEqual(summary["counts"]["metric_eligible_cases"], expected_metric_eligible)
         self.assertEqual(summary["counts"]["metric_not_scored_cases"], expected_metric_not_scored)
+        metric_names = ("true_positive", "false_positive", "false_negative", "true_negative")
+        for metric in metric_names:
+            self.assertEqual(
+                sum(summary["by_category"][category][metric]
+                    for category in summary["by_category"]),
+                summary["detector_metrics"][metric],
+            )
+        for bucket in summary["by_category"].values():
+            self.assertEqual(sum(bucket[metric] for metric in metric_names), bucket["metric_eligible"])
+        self.assertEqual(sum(summary["detector_metrics"][metric] for metric in metric_names),
+                         expected_metric_eligible)
+        self.assertEqual(
+            summary["detector_metrics"]["by_rule"]["github-pat"],
+            {"true_positive": 1, "false_positive": 0, "false_negative": 0},
+        )
+        provider = next(item for item in summary["cases"]
+                        if item["case_id"] == "provider-github-token-positive")
+        self.assertEqual(provider["rules"], ["github-pat"])
+        self.assertNotIn("ghp_", encoded)
 
     def test_same_seed_artifact_manifest_is_stable_across_wall_clock_ticks(self):
         import time
@@ -446,19 +469,32 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     """Execute each declared fixture and return only closed labels/counts/hashes."""
     catalog = {item["case_id"]: item for item in CASE_CATALOG}
     secret = _seeded_secret(seed)
+    provider_token = "ghp_" + hashlib.sha256(
+        f"LeakGuard synthetic provider token {seed}".encode("ascii")).hexdigest()[:36]
     results = {}
 
-    def put(case_id, actual, *, coverage="complete", digest_input=b""):
+    def put(case_id, actual, *, coverage="complete", digest_input=b"", rules=()):
         item = catalog[case_id]
+        if any(type(rule) is not str or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", rule) is None
+               for rule in rules):
+            raise ValueError("invalid static detector rule id")
+        rule_names = sorted(set(rules))
         if item["state"] == "uncovered":
             results[case_id] = {"actual": "uncovered", "coverage": "uncovered",
-                                "status": "uncovered", "artifact_sha256": None}
+                                "status": "uncovered", "artifact_sha256": None, "rules": []}
             return
         expected = item["expected"]
-        passed = expected == actual
+        expected_rule = item.get("expected_rule")
+        if (expected == "finding" and expected_rule is not None
+                and (type(expected_rule) is not str
+                     or re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", expected_rule) is None)):
+            raise ValueError("invalid expected detector rule id")
+        rule_matches = expected != "finding" or expected_rule is None or expected_rule in rule_names
+        passed = expected == actual and rule_matches
         results[case_id] = {"actual": actual, "coverage": coverage,
                             "status": "passed" if passed else "failed",
-                            "artifact_sha256": hashlib.sha256(digest_input).hexdigest()}
+                            "artifact_sha256": hashlib.sha256(digest_input).hexdigest(),
+                            "rules": rule_names}
 
     # Exact placeholders and intentionally weak values are separate labeled
     # detector cases; line mapping lets one bounded backend request exercise them.
@@ -489,14 +525,19 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     detector_cases.extend((
         ("literal-client-secret-positive-01", f'client_secret = "{secret}"', "finding"),
         ("literal-password-positive-01", f'password = "{secret}"', "finding"),
+        ("provider-github-token-positive", f'github_token = "{provider_token}"', "finding"),
     ))
     detector_text = "\n".join(row[1] for row in detector_cases)
     findings = backends.detect(detector_text, binary=gitleaks,
                                rules=engine.RULES,
                                timeout=15)
-    found_lines = {item.start_line for item in findings}
+    found_rules_by_line = {}
+    for finding in findings:
+        found_rules_by_line.setdefault(finding.start_line, set()).add(finding.rule)
     for line, (case_id, value, _expected) in enumerate(detector_cases, 1):
-        put(case_id, "finding" if line in found_lines else "none", digest_input=value.encode("utf-8"))
+        observed_rules = found_rules_by_line.get(line, set())
+        put(case_id, "finding" if observed_rules else "none",
+            digest_input=value.encode("utf-8"), rules=observed_rules)
 
     # Version-bound provider and function-AST proofs; wrong hashes, absent
     # source, changed source and duplicate JSON keys always remain heuristic.
@@ -551,21 +592,24 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
                 or (case_id.startswith("msg-") or case_id == "unsupported-compound")
                 and importlib.util.find_spec("olefile") is None):
             results[case_id] = {"actual": "uncovered", "coverage": "uncovered",
-                                "status": "uncovered", "artifact_sha256": hashlib.sha256(data).hexdigest()}
+                                "status": "uncovered", "artifact_sha256": hashlib.sha256(data).hexdigest(),
+                                "rules": []}
             return
         result = extract(data, path, timeout=15)
         digest = hashlib.sha256(data).hexdigest()
+        detected_rules = set()
         if result.disposition == "extracted":
-            detected = any(backends.detect(part.text, binary=gitleaks,
-                                           rules=engine.RULES,
-                                           timeout=15) for part in result.parts)
-            actual = "finding" if detected else "none"
+            for part in result.parts:
+                detected_rules.update(finding.rule for finding in backends.detect(
+                    part.text, binary=gitleaks, rules=engine.RULES, timeout=15))
+            actual = "finding" if detected_rules else "none"
             coverage = "complete"
         elif result.disposition in {"unsupported", "no-text", "encrypted"}:
             actual, coverage = "omission", "omitted"
         else:
             actual, coverage = "incomplete", "incomplete"
-        put(case_id, actual, coverage=coverage, digest_input=data)
+        put(case_id, actual, coverage=coverage, digest_input=data,
+            rules=detected_rules if result.disposition == "extracted" else ())
 
     extract_case("utf16-text-positive", b"\xff\xfe" + f'client_secret = "{secret}"'.encode("utf-16le"), "input.txt")
     extract_case("unusual-extension-positive", f'client_secret = "{secret}"'.encode(), "input.odd")
@@ -595,7 +639,7 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     except (ImportError, unittest.SkipTest):
         for case_id in ("pdf-text-positive", "pdf-image-only"):
             results[case_id] = {"actual": "uncovered", "coverage": "uncovered",
-                                "status": "uncovered", "artifact_sha256": None}
+                                "status": "uncovered", "artifact_sha256": None, "rules": []}
     msg_subject = f'client_secret = "{secret}"'
     msg_body = f'client_secret = "{secret}"'
     try:
@@ -605,7 +649,7 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     except ImportError:
         for case_id in ("msg-subject-positive", "msg-body-positive", "unsupported-compound"):
             results[case_id] = {"actual": "uncovered", "coverage": "uncovered",
-                                "status": "uncovered", "artifact_sha256": None}
+                                "status": "uncovered", "artifact_sha256": None, "rules": []}
 
     parts = (
         ("part-boundary-first", (("word/document.xml", f'client_secret = "{secret}"'),), "finding"),
@@ -670,13 +714,17 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     counts = {"labeled_cases": len(CASE_CATALOG), "covered": 0, "uncovered": 0, "failed": 0,
               "metric_eligible_cases": 0, "metric_not_scored_cases": 0,
               "true_positive": 0, "false_positive": 0, "false_negative": 0, "true_negative": 0}
+    metric_names = ("true_positive", "false_positive", "false_negative", "true_negative")
     by_category = {}
+    by_rule = {}
     for item in CASE_CATALOG:
         case_id, category = item["case_id"], item["category"]
         result = results[case_id]
         bucket = by_category.setdefault(category, {"cases": 0, "covered": 0, "uncovered": 0,
                                                     "failed": 0, "metric_eligible": 0,
-                                                    "metric_not_scored": 0})
+                                                    "metric_not_scored": 0,
+                                                    "true_positive": 0, "false_positive": 0,
+                                                    "false_negative": 0, "true_negative": 0})
         bucket["cases"] += 1
         if result["status"] == "uncovered":
             counts["uncovered"] += 1; bucket["uncovered"] += 1
@@ -691,12 +739,34 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
             actual_positive = result["actual"] == "finding"
             key = ("true_positive" if expected_positive else "false_positive") if actual_positive else ("false_negative" if expected_positive else "true_negative")
             counts[key] += 1
+            bucket[key] += 1
+            if expected_positive:
+                expected_rule = item.get("expected_rule")
+                if not expected_rule:
+                    raise ValueError("finding label lacks expected detector rule")
+                rule_counts = by_rule.setdefault(expected_rule, {
+                    "true_positive": 0, "false_positive": 0, "false_negative": 0,
+                })
+                if expected_rule in result["rules"]:
+                    rule_counts["true_positive"] += 1
+                else:
+                    rule_counts["false_negative"] += 1
+                for observed_rule in set(result["rules"]) - {expected_rule}:
+                    by_rule.setdefault(observed_rule, {
+                        "true_positive": 0, "false_positive": 0, "false_negative": 0,
+                    })["false_positive"] += 1
+            else:
+                for observed_rule in result["rules"]:
+                    by_rule.setdefault(observed_rule, {
+                        "true_positive": 0, "false_positive": 0, "false_negative": 0,
+                    })["false_positive"] += 1
         else:
             counts["metric_not_scored_cases"] += 1
             bucket["metric_not_scored"] += 1
     return {"seed": seed, "policy_id": policy_id, "runtime_id": runtime_id,
             "counts": counts, "detector_metrics": {
-                key: counts[key] for key in ("true_positive", "false_positive", "false_negative", "true_negative")
+                **{key: counts[key] for key in metric_names},
+                "by_rule": by_rule,
             }, "by_category": by_category,
             "cases": [{"case_id": item["case_id"], "category": item["category"],
                        **results[item["case_id"]]} for item in CASE_CATALOG]}

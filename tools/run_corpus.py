@@ -93,7 +93,7 @@ def _validate(args):
     output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     catalog_data = json.loads(CATALOG.read_text(encoding="utf-8"))
     if (type(catalog_data) is not dict or set(catalog_data) != {"schema_version", "seed", "cases"}
-            or catalog_data["schema_version"] != 2 or type(catalog_data["cases"]) is not list
+            or catalog_data["schema_version"] != 3 or type(catalog_data["cases"]) is not list
             or len(catalog_data["cases"]) < 32):
         raise ValueError
     return config, backend, state, output, manifest_path

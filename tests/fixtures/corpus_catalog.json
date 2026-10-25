@@ -144,6 +144,7 @@
       "case_id": "literal-client-secret-positive-01",
       "category": "literal-positive",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "detector",
       "state": "covered"
     },
@@ -151,6 +152,7 @@
       "case_id": "literal-password-positive-01",
       "category": "literal-positive",
       "expected": "finding",
+      "expected_rule": "literal-password",
       "kind": "detector",
       "state": "covered"
     },
@@ -214,6 +216,7 @@
       "case_id": "utf16-text-positive",
       "category": "utf16",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -221,6 +224,7 @@
       "case_id": "unusual-extension-positive",
       "category": "unusual-extension",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -228,6 +232,7 @@
       "case_id": "office-word-document",
       "category": "office-word",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -235,6 +240,7 @@
       "case_id": "office-word-comments",
       "category": "office-word",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -249,6 +255,7 @@
       "case_id": "pdf-text-positive",
       "category": "pdf",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -263,6 +270,7 @@
       "case_id": "msg-subject-positive",
       "category": "msg",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -270,6 +278,7 @@
       "case_id": "msg-body-positive",
       "category": "msg",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -284,6 +293,7 @@
       "case_id": "part-boundary-first",
       "category": "part-boundary",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -291,6 +301,7 @@
       "case_id": "part-boundary-second",
       "category": "part-boundary",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -319,6 +330,7 @@
       "case_id": "office-sheet-positive",
       "category": "office-sheet",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
       "state": "covered"
     },
@@ -326,10 +338,19 @@
       "case_id": "office-slides-positive",
       "category": "office-slides",
       "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "extractor",
+      "state": "covered"
+    },
+    {
+      "case_id": "provider-github-token-positive",
+      "category": "provider-credential",
+      "expected": "finding",
+      "expected_rule": "github-pat",
+      "kind": "detector",
       "state": "covered"
     }
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "seed": 20261025
 }
