@@ -89,6 +89,8 @@ def main():
         if len(output) > 80_000_000:
             raise p.PluginError('detector-output-limit')
         sys.stdout.buffer.write(output)
+    except ModuleNotFoundError:
+        sys.stdout.buffer.write(b'{"error":"dependency-unavailable"}')
     except p.PluginError as error:
         sys.stdout.buffer.write(json.dumps({'error': error.code}).encode())
     except BaseException:
