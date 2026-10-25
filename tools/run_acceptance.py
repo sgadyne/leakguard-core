@@ -77,9 +77,10 @@ def _command(argv, *, cwd: Path, env: dict[str, str], stage: str,
     return process
 
 
-def _parse_unittest_summary(output: str) -> dict | None:
-    """Extract aggregate counts and fixed skip IDs, discarding test output text."""
-    lines = output.splitlines()
+def _parse_unittest_summary(stderr: str, stdout: str = "") -> dict | None:
+    """Parse unittest's stderr summary; discard arbitrary test stdout."""
+    del stdout
+    lines = stderr.splitlines()
     ran = [re.fullmatch(r"Ran (\d+) tests? in [0-9.]+s", line.strip())
            for line in lines]
     ran = [match for match in ran if match]
@@ -380,8 +381,9 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     # The script adapter fixture is exercised by the full installed test suite.
     suite = _command([str(target), "-m", "unittest", "discover", "-s", "tests", "-v"],
                      cwd=installed_tests, env=test_env, stage="installed-full-suite", timeout=MAX_STAGE_SECONDS)
-    suite_text = suite.stderr.decode("utf-8", errors="replace") + suite.stdout.decode("utf-8", errors="replace")
-    test_summary = _parse_unittest_summary(suite_text)
+    test_summary = _parse_unittest_summary(
+        suite.stderr.decode("utf-8", errors="replace"),
+        suite.stdout.decode("utf-8", errors="replace"))
     if test_summary is None or test_summary["failures"] or test_summary["errors"]:
         raise AcceptanceFailure("installed-full-suite")
     test_count = test_summary["total"]
@@ -448,9 +450,9 @@ def main(argv=None) -> int:
             completed = _command([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
                                  cwd=ROOT, env={**env, "PYTHONPATH": str(ROOT / "src")},
                                  stage="source-full-suite")
-            output_text = (completed.stderr.decode("utf-8", errors="replace")
-                           + completed.stdout.decode("utf-8", errors="replace"))
-            test_summary = _parse_unittest_summary(output_text)
+            test_summary = _parse_unittest_summary(
+                completed.stderr.decode("utf-8", errors="replace"),
+                completed.stdout.decode("utf-8", errors="replace"))
             if (test_summary is None or test_summary["total"] < 100
                     or test_summary["failures"] or test_summary["errors"]):
                 raise AcceptanceFailure("source-full-suite")

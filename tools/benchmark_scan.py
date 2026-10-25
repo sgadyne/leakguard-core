@@ -57,7 +57,7 @@ def _sha(payload: bytes) -> str:
 def _rss_high_water_bytes() -> dict[str, int | None]:
     if resource is None:
         return {"parent_lifetime_high_water_bytes": None,
-                "children_lifetime_high_water_bytes": None}
+                "largest_waited_child_lifetime_high_water_bytes": None}
 
     def one(who):
         try:
@@ -67,7 +67,7 @@ def _rss_high_water_bytes() -> dict[str, int | None]:
         return int(value if sys.platform == "darwin" else value * 1024)
 
     return {"parent_lifetime_high_water_bytes": one(resource.RUSAGE_SELF),
-            "children_lifetime_high_water_bytes": one(resource.RUSAGE_CHILDREN)}
+            "largest_waited_child_lifetime_high_water_bytes": one(resource.RUSAGE_CHILDREN)}
 
 
 class _ProcessTreeRssSampler:
@@ -546,7 +546,7 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
             "sqlite_write_statement_count": "Trace callback count of known SQLite DML/DDL mutator first tokens; statement text and parameters are discarded.",
             "sqlite_lock_time_seconds": "Not measured; scan duration is not used as a lock-time proxy.",
             "parent_lifetime_high_water_bytes": "Parent process lifetime RSS high-water, not per-operation peak.",
-            "children_lifetime_high_water_bytes": "Cumulative child-process lifetime RSS high-water, not per-operation peak.",
+            "largest_waited_child_lifetime_high_water_bytes": "Largest waited-for child process lifetime RSS high-water per getrusage(RUSAGE_CHILDREN); not cumulative or a process-tree total.",
             "sampled_process_tree_peak_bytes": "Approximate peak sum of VmRSS for the benchmark process and observed descendants, sampled every 20ms on Linux. It can miss shorter-lived children and double-count shared pages.",
             "hook_latency_summary": "Median and nearest-rank p95 for repeated installed clean and blocked synthetic commits; no optimization or speedup claim is implied.",
             "service_open_seconds": "ScanService constructor time, recorded separately from scan calls.",

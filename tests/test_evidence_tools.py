@@ -203,7 +203,8 @@ class AcceptanceSummaryTests(unittest.TestCase):
             "test_regular_case (test_corpus.CorpusTests) ... ok\n\n"
             "Ran 3 tests in 0.012s\n\nOK (skipped=2)\n"
         )
-        summary = run_acceptance._parse_unittest_summary(output)
+        summary = run_acceptance._parse_unittest_summary(
+            output, "harmless plugin stdout after the unittest summary")
         self.assertEqual(summary, {
             "total": 3, "passed": 1, "skipped": 2, "failures": 0, "errors": 0,
             "skip_test_ids": [
