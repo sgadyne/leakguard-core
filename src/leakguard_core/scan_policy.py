@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from contextvars import ContextVar
 import hashlib
 import importlib.metadata
 import importlib.machinery
@@ -12,10 +13,78 @@ import platform
 import re
 import shutil
 import sys
+import time
 
 from .models import (CoverageSummary, CoverageState, DecisionVerdict, ErrorCode,
                      Omission, OmissionSelector, OmissionSelectorKind, PolicyDecision,
                      PolicyReason, ScanPolicy)
+
+
+class RuntimeIdentityError(RuntimeError):
+    def __init__(self, code='budget-exhausted'):
+        self.code = code if code in {'budget-exhausted', 'cancelled'} else 'budget-exhausted'
+        super().__init__(self.code)
+
+
+class _IdentityBudget:
+    def __init__(self, deadline, cancel):
+        self.deadline = deadline
+        self.cancel = cancel
+        self.files = 0
+        self.bytes = 0
+        self.entries = 0
+
+    def check(self):
+        if self.cancel is not None:
+            try:
+                cancelled = self.cancel()
+            except Exception:
+                cancelled = True
+            if cancelled:
+                raise RuntimeIdentityError('cancelled')
+        if time.monotonic() >= self.deadline:
+            raise RuntimeIdentityError()
+
+    def admit(self, size):
+        self.check()
+        self.files += 1
+        self.bytes += size
+        if self.files > 20_000 or self.bytes > 1_073_741_824:
+            raise RuntimeIdentityError()
+
+
+_IDENTITY_BUDGET = ContextVar('leakguard_identity_budget', default=None)
+
+
+def _check_budget():
+    budget = _IDENTITY_BUDGET.get()
+    if budget is not None:
+        budget.check()
+
+
+def _python_files(root):
+    """Bound directory discovery before sorting or hashing package artifacts."""
+    pending = [Path(root)]
+    paths = []
+    while pending:
+        _check_budget()
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                _check_budget()
+                budget = _IDENTITY_BUDGET.get()
+                if budget is not None:
+                    budget.entries += 1
+                    if budget.entries > 100_000:
+                        raise RuntimeIdentityError()
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name != '__pycache__':
+                        pending.append(Path(entry.path))
+                elif entry.name.endswith(('.py', '.toml')) and entry.is_file():
+                    paths.append(Path(entry.path))
+                    if len(paths) > 10_000:
+                        raise RuntimeIdentityError()
+    return sorted(paths)
 
 
 def _digest(value) -> str:
@@ -45,13 +114,18 @@ def policy_identity(*, config=None, policy=None, limits=None):
 
 def _file_identity(path):
     try:
+        _check_budget()
         source = Path(path)
         if not source.is_file() or source.stat().st_size > 512 * 1024 * 1024:
             return 'unavailable'
         before = source.stat()
+        budget = _IDENTITY_BUDGET.get()
+        if budget is not None:
+            budget.admit(before.st_size)
         digest = hashlib.sha256()
         with source.open('rb') as stream:
             while chunk := stream.read(1_048_576):
+                _check_budget()
                 digest.update(chunk)
         after = source.stat()
         if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
@@ -62,6 +136,7 @@ def _file_identity(path):
 
 
 def _distribution_identity(name):
+    _check_budget()
     try:
         distribution = importlib.metadata.distribution(name)
     except importlib.metadata.PackageNotFoundError:
@@ -69,8 +144,11 @@ def _distribution_identity(name):
     files = distribution.files
     if not files:
         return {'name': name, 'version': distribution.version, 'status': 'unverifiable'}, False
+    if len(files) > 20_000:
+        raise RuntimeIdentityError()
     artifacts = []; complete = True
     for entry in sorted(files, key=str):
+        _check_budget()
         label = str(entry)
         if label.endswith(('.pyc', '.pyo')) or '__pycache__' in Path(label).parts:
             continue
@@ -92,6 +170,7 @@ def _module_artifacts(name):
     prefix = []
     try:
         for component in name.split('.'):
+            _check_budget()
             prefix.append(component)
             spec = importlib.machinery.PathFinder.find_spec('.'.join(prefix), search)
             if spec is None:
@@ -104,7 +183,7 @@ def _module_artifacts(name):
         if search:
             count = 0
             for directory in search:
-                for path in sorted(Path(directory).rglob('*.py')):
+                for path in _python_files(directory):
                     count += 1
                     if count > 10_000:
                         return artifacts + [('closure', 'unavailable')]
@@ -123,6 +202,7 @@ def _dependency_closure(names):
         Requirement = None
     pending = list(dict.fromkeys(names)); seen = set(); closure = []; complete = True
     while pending:
+        _check_budget()
         name = pending.pop()
         key = re.sub('[-_.]+', '-', name).lower()
         if key in seen:
@@ -156,33 +236,47 @@ def _dependency_closure(names):
     return sorted(closure, key=lambda item: item['name'].lower()), complete
 
 
-def runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manifests=()):
+def runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manifests=(), deadline=None, cancel=None):
+    """Bound artifact inspection by both wall time and total filesystem work."""
+    budget = _IdentityBudget(deadline if deadline is not None else time.monotonic() + 30, cancel)
+    token = _IDENTITY_BUDGET.set(budget)
+    try:
+        budget.check()
+        return _runtime_identity(config, binary, plugin_specs, plugin_manifests=plugin_manifests)
+    finally:
+        _IDENTITY_BUDGET.reset(token)
+
+
+def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manifests=()):
     """Hash actual behavior-bearing bytes; unknown extension closure disables reuse."""
     config = config or {}
     root = Path(__file__).resolve().parent
     core = [(str(path.relative_to(root)), _file_identity(path))
-            for path in sorted(root.rglob('*')) if path.suffix in {'.py', '.toml'}]
+            for path in _python_files(root)]
     executable = binary or config.get('gitleaks_executable') or os.environ.get('LEAKGUARD_GITLEAKS') or shutil.which('gitleaks')
     if executable and not Path(executable).is_file():
         executable = shutil.which(str(executable))
     binary_id = _file_identity(executable) if executable else 'unavailable'
     specs = list(plugin_specs or config.get('plugins', ()))
-    dependencies = ['pypdf', 'olefile']
+    dependencies = ['pypdf', 'olefile', 'packaging']
     module_artifacts = []
     try:
         distributions = importlib.metadata.packages_distributions() if specs else {}
     except Exception:
         distributions = {}
     for spec in specs:
+        _check_budget()
         module = spec['module']
         module_artifacts.append((module, _module_artifacts(module)))
         dependencies.extend(distributions.get(module.split('.')[0], ()))
     manifests = []
     for manifest in plugin_manifests:
+        _check_budget()
         if manifest is not None:
             manifests.append(asdict(manifest))
             dependencies.extend(item.name for item in manifest.dependencies)
     for script in config.get('script_checks', ()):
+        _check_budget()
         dependencies.extend(script.get('dependencies', ()))
     closure, complete = _dependency_closure(dependencies)
     value = {'abi': 'leakguard-runtime-2', 'core': core,
@@ -194,6 +288,8 @@ def runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manife
              'scripts': [{'spec': spec, 'artifacts': [(index, _file_identity(value)) for index, value in enumerate(spec['argv']) if Path(value).is_file()]} for spec in config.get('script_checks', ())]}
     if specs or value['scripts'] or config.get('credential_store'):
         complete = False
+    _check_budget()
+    complete = complete and all(identity != 'unavailable' for _, identity in core)
     return _digest(value), complete and binary_id != 'unavailable' and value['rules'] != 'unavailable'
 
 
