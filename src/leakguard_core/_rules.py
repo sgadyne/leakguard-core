@@ -94,7 +94,7 @@ def inspect(path, *, cwd=None, check=None):
 
 
 def stage(closure, scratch):
-    """Return a private cwd preserving bounded relative rule-file references."""
+    """Return private cwd/config paths for the admitted rule-file snapshot."""
     scratch = _resolved(scratch)
     depth = max((sum(part == '..' for part in Path(name).parts)
                  for name, _ in closure.relative_files), default=0) + 1
@@ -113,4 +113,11 @@ def stage(closure, scratch):
         with destination.open('xb') as stream:
             stream.write(data)
         destination.chmod(0o600)
-    return directory
+    # Keep the top-level file above the relative-reference subtree. Even the
+    # maximum admitted number of '..' components cannot alias this name, and
+    # the backend must not reopen the caller's mutable top-level policy file.
+    config = scratch / 'rules.toml'
+    with config.open('xb') as stream:
+        stream.write(closure.files[0][1])
+    config.chmod(0o600)
+    return directory, config

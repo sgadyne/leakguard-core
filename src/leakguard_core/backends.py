@@ -51,7 +51,8 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
             # stdin still reads CWD/.gitleaksignore in the pinned backend. Keep
             # repository content out of its policy context while preserving
             # explicitly configured relative rule inheritance in private files.
-            directory = stage(closure, scratch)
+            directory, staged_config = stage(closure, scratch)
+            command[command.index('--config') + 1] = str(staged_config)
             check_budget()
             process = run_worker(command, text.encode('utf-8'), timeout=max(0.001, timeout - (time.monotonic() - started)),
                                  max_input_bytes=80_000_000,
