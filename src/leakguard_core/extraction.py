@@ -105,7 +105,7 @@ def sniff(data: bytes, logical_path: str) -> tuple[str, str | None]:
         return hint, 'format-mismatch'
     if data.startswith((b'\xff\xfe', b'\xfe\xff')):
         return 'text', None
-    if b'\x00' in data[:8192]:
+    if b'\x00' in data:
         return 'binary', 'unsupported-format'
     return 'text', None
 
