@@ -1006,3 +1006,38 @@ class IncrementalReportAdmissionTests(unittest.TestCase):
         self.assertLessEqual(size, 65536)
         self.assertEqual(size, len(actual(admitted).encode()))
         self.assertTrue(all(count <= 20 for count in serialized_counts))
+
+
+class AdvertisedDeadlineFailureTests(unittest.TestCase):
+    def test_failed_budget_setup_makes_no_further_store_calls_or_input_admission(self):
+        from leakguard_core import models as m
+        from leakguard_core.scan_store import MemoryScanStore, StateError
+        class BrokenDeadlineStore(MemoryScanStore):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+            def set_deadline(self, deadline):
+                self.calls.append('set_deadline')
+                raise StateError()
+            def material_snapshot(self, **kwargs):
+                raise AssertionError('store used after failed setup')
+            def acquire_cycle(self, *args, **kwargs):
+                raise AssertionError('queue used after failed setup')
+            def record_report(self, *args, **kwargs):
+                raise AssertionError('report written after failed setup')
+        def inputs():
+            raise AssertionError('input admitted after failed setup')
+            yield
+        with tempfile.TemporaryDirectory(prefix='leakguard-deadline-setup-') as folder:
+            store = BrokenDeadlineStore()
+            service = engine.ScanService({'gitleaks_executable': str(engine.EXE), 'audit_scopes': {'synthetic': folder}}, store=store)
+            try:
+                reports = [service.scan(inputs(), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1)), service.audit('synthetic', limits=m.ScanLimits(30, 1)), service.drain(limits=m.ScanLimits(30, 1)), service.scan_git(folder, request=m.GitRequest(m.GitRequestKind.INDEX), limits=m.ScanLimits(30, 1))]
+                self.assertEqual(store.calls, ['set_deadline'] * 4)
+                for report in reports:
+                    self.assertEqual(report.results, ())
+                    self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                    self.assertEqual(tuple(issue.code for issue in report.issues), (m.ErrorCode.STATE_FAILED,))
+                    self.assertLess(len(report.to_json()), 2048)
+            finally:
+                service.close()

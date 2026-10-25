@@ -569,14 +569,7 @@ class ScanService:
     def scan_git(self, repo, *, request, limits, cancel=None):
         from . import git_scanning, models as m
         session = git_scanning.GitInputs(pathlib.Path(repo), request, limits=limits, cancel=cancel)
-        try:
-            return self._run(session, policy=m.ScanPolicy.git(), limits=limits, use_cache=False, cancel=cancel, enumeration=session.status, final_check=session.valid, repository=str(session.repo), _deadline=session.deadline)
-        finally:
-            if hasattr(self.store, 'set_deadline'):
-                try:
-                    self.store.set_deadline(None)
-                except Exception:
-                    pass
+        return self._run(session, policy=m.ScanPolicy.git(), limits=limits, use_cache=False, cancel=cancel, enumeration=session.status, final_check=session.valid, repository=str(session.repo), _deadline=session.deadline, _clear_deadline=True)
 
     def confirm_absent(self, path, *, root, limits):
         """Internal explicit absence check, separate from failed scans/events."""
@@ -649,7 +642,7 @@ class ScanService:
             try:
                 self.store.set_deadline(deadline)
             except Exception:
-                pass
+                return self._state_failure_report(m.ScanPolicy.inventory(), limits)
         if root is not None and not root.is_dir():
             try:
                 self.store.invalidate_scope(root)
@@ -813,7 +806,18 @@ class ScanService:
             issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
         return issues
 
-    def _run(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None, _deadline=None, repository=None):
+    def _state_failure_report(self, policy, limits):
+        # Failed budget setup authorizes no further calls into that store. This
+        # local result has no fallback archive or implicit durable mirror.
+        from . import models as m, scan_policy
+        policy = scan_policy.effective_policy(policy, self.config)
+        policy_id = scan_policy.policy_identity(config=self.config, policy=policy, limits=limits)
+        issues = (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)
+        coverage, decision = scan_policy.evaluate((), policy=policy, policy_id=policy_id, enumeration_complete=False, issues=issues)
+        now = dt.datetime.now(dt.timezone.utc)
+        return _cap_report(m.ScanReport(1, uuid.uuid4().hex, now, now, policy_id, (), coverage, decision, issues), limits.max_report_bytes)
+
+    def _run(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None, _deadline=None, repository=None, _clear_deadline=False):
         from .scan_store import StateError
         if self._closed:
             raise StateError('state-closed')
@@ -824,11 +828,11 @@ class ScanService:
             try:
                 self.store.set_deadline(deadline)
             except Exception:
-                pass  # The bounded run will publish a sanitized state issue.
+                return self._state_failure_report(policy, limits)
         try:
             return self._run_inner(inputs, policy=policy, limits=limits, use_cache=use_cache, cancel=cancel, enumeration=enumeration, final_check=final_check, work_claims=work_claims, _deadline=deadline, repository=repository)
         finally:
-            if _deadline is None and hasattr(self.store, 'set_deadline'):
+            if (_deadline is None or _clear_deadline) and hasattr(self.store, 'set_deadline'):
                 try:
                     self.store.set_deadline(None)
                 except Exception:
