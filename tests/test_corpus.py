@@ -76,6 +76,109 @@ def _docx_payload(members) -> bytes:
     return buffer.getvalue()
 
 
+def _ooxml_payload(members) -> bytes:
+    """Build deterministic Office packages with package relationships and XML parts."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, xml in members:
+            info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+            info.create_system = 3
+            info.external_attr = 0o100600 << 16
+            info.compress_type = zipfile.ZIP_STORED
+            archive.writestr(info, xml)
+    return buffer.getvalue()
+
+
+def _xlsx_fixture(cells: tuple[tuple[str, ...], ...]) -> bytes:
+    cell_xml = []
+    for index, fragments in enumerate(cells, 1):
+        runs = "".join("<r><t xml:space=\"preserve\">" + escape(fragment) + "</t></r>"
+                       for fragment in fragments)
+        cell_xml.append(f'<c r="{chr(64 + index)}1" t="inlineStr"><is>{runs}</is></c>')
+    worksheet = (
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetData><row r="1">' + "".join(cell_xml) + '</row></sheetData></worksheet>'
+    )
+    content_types = (
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '</Types>'
+    )
+    root_relationships = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        '</Relationships>'
+    )
+    workbook = (
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="Synthetic" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+    workbook_relationships = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        '</Relationships>'
+    )
+    return _ooxml_payload((
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_relationships),
+        ("xl/workbook.xml", workbook),
+        ("xl/_rels/workbook.xml.rels", workbook_relationships),
+        ("xl/worksheets/sheet1.xml", worksheet),
+    ))
+
+
+def _pptx_fixture(paragraphs: tuple[tuple[str, ...], ...]) -> bytes:
+    paragraph_xml = []
+    for fragments in paragraphs:
+        runs = "".join(
+            '<a:r><a:rPr lang="en-US"/><a:t xml:space="preserve">'
+            + escape(fragment) + '</a:t></a:r>' for fragment in fragments
+        )
+        paragraph_xml.append('<a:p>' + runs + '<a:endParaRPr lang="en-US"/></a:p>')
+    slide = (
+        '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>'
+        '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
+        '<p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>' + "".join(paragraph_xml)
+        + '</p:txBody></p:sp></p:spTree></p:cSld></p:sld>'
+    )
+    content_types = (
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
+        '<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+        '</Types>'
+    )
+    root_relationships = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>'
+        '</Relationships>'
+    )
+    presentation = (
+        '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>'
+    )
+    presentation_relationships = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>'
+        '</Relationships>'
+    )
+    return _ooxml_payload((
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_relationships),
+        ("ppt/presentation.xml", presentation),
+        ("ppt/_rels/presentation.xml.rels", presentation_relationships),
+        ("ppt/slides/slide1.xml", slide),
+    ))
+
+
 def _directory_entry(name: str, object_type: int, *, left=0xFFFFFFFF,
                      right=0xFFFFFFFF, child=0xFFFFFFFF,
                      start=0xFFFFFFFE, size=0) -> bytes:
@@ -176,16 +279,18 @@ class DeterministicCorpusTests(unittest.TestCase):
         self.assertEqual(manifest(SEED), manifest(SEED))
         self.assertNotEqual(manifest(SEED), manifest(SEED + 1))
 
-    def test_catalog_has_at_least_32_static_cases_and_marks_uncovered_formats(self):
+    def test_catalog_is_versioned_and_every_declared_case_has_a_fixture(self):
         self.assertGreaterEqual(len(CASE_CATALOG), 32)
         self.assertEqual(len({item["case_id"] for item in CASE_CATALOG}), len(CASE_CATALOG))
         uncovered = {item["case_id"] for item in CASE_CATALOG if item["state"] == "uncovered"}
-        self.assertEqual(uncovered, {"office-sheet-uncovered", "office-slides-uncovered"})
+        self.assertEqual(uncovered, set())
+        self.assertEqual(_CATALOG_DOC["schema_version"], 2)
+        self.assertEqual(_CATALOG_DOC["seed"], SEED)
 
     def test_actual_labeled_cases_emit_case_level_counts_without_fixture_text(self):
         summary = run_labeled_corpus(SEED, engine.EXE)
-        expected_uncovered = {"office-sheet-uncovered", "office-slides-uncovered"}
-        expected_metric_eligible = 32
+        expected_uncovered = set()
+        expected_metric_eligible = 34
         expected_metric_not_scored = 13
         if importlib.util.find_spec("pypdf") is None:
             expected_uncovered.update({"pdf-text-positive", "pdf-image-only"})
@@ -255,6 +360,38 @@ class DeterministicCorpusTests(unittest.TestCase):
         self.assertEqual([part.part_id for part in result.parts], ["office-word-1", "office-word-2"])
         self.assertEqual(result.parts[0].text, "prefix BEGIN\nfirst line")
         self.assertEqual(result.parts[1].text, "SECRET suffix\nlast line")
+
+    def test_spreadsheet_and_slides_join_formatting_runs_but_preserve_boundaries(self):
+        secret = _seeded_secret(SEED)
+        text = f'client_secret = "{secret}"'
+        split = len("client_se")
+        sheet = extract(_xlsx_fixture(((text[:split], text[split:]),)), "fixture.xlsx", timeout=10)
+        self.assertEqual((sheet.format_id, sheet.disposition), ("office-sheet", "extracted"))
+        self.assertEqual(len(sheet.parts), 1)
+        self.assertIn(text, sheet.parts[0].text)
+        self.assertTrue(backends.detect(sheet.parts[0].text, binary=engine.EXE,
+                                        rules=engine.RULES, timeout=15))
+
+        slides = extract(_pptx_fixture(((text[:split], text[split:]),)), "fixture.pptx", timeout=10)
+        self.assertEqual((slides.format_id, slides.disposition), ("office-slides", "extracted"))
+        self.assertEqual(len(slides.parts), 1)
+        self.assertIn(text, slides.parts[0].text)
+        self.assertTrue(backends.detect(slides.parts[0].text, binary=engine.EXE,
+                                        rules=engine.RULES, timeout=15))
+
+        cross_cell = _xlsx_fixture((('client_secret = "SyntheticOnly~',), ('CorpusSecretTail"',)))
+        cell_result = extract(cross_cell, "fixture.xlsx", timeout=10)
+        self.assertEqual(cell_result.disposition, "extracted")
+        self.assertFalse(any(backends.detect(part.text, binary=engine.EXE,
+                                             rules=engine.RULES, timeout=15)
+                             for part in cell_result.parts))
+
+        cross_paragraph = _pptx_fixture((('client_secret = "SyntheticOnly~',), ('CorpusSecretTail"',)))
+        paragraph_result = extract(cross_paragraph, "fixture.pptx", timeout=10)
+        self.assertEqual(paragraph_result.disposition, "extracted")
+        self.assertFalse(any(backends.detect(part.text, binary=engine.EXE,
+                                             rules=engine.RULES, timeout=15)
+                             for part in paragraph_result.parts))
 
 
 class PluginCollisionTests(unittest.TestCase):
@@ -440,6 +577,14 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
     extract_case("office-word-document", office_document, "fixture.docx")
     extract_case("office-word-comments", office_comment, "fixture.docx")
     extract_case("office-word-malformed", malformed.getvalue(), "fixture.docx")
+    sheet_text = f'client_secret = "{secret}"'
+    sheet_split = len("client_se")
+    extract_case("office-sheet-positive",
+                 _xlsx_fixture(((sheet_text[:sheet_split], sheet_text[sheet_split:]),)),
+                 "fixture.xlsx")
+    extract_case("office-slides-positive",
+                 _pptx_fixture(((sheet_text[:sheet_split], sheet_text[sheet_split:]),)),
+                 "fixture.pptx")
 
     try:
         pdf_text = _pdf_with_text(f'client_secret = "{secret}"')

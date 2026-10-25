@@ -316,22 +316,20 @@
       "state": "covered"
     },
     {
-      "case_id": "office-sheet-uncovered",
+      "case_id": "office-sheet-positive",
       "category": "office-sheet",
-      "expected": "uncovered",
+      "expected": "finding",
       "kind": "extractor",
-      "reason_code": "fixture-not-implemented",
-      "state": "uncovered"
+      "state": "covered"
     },
     {
-      "case_id": "office-slides-uncovered",
+      "case_id": "office-slides-positive",
       "category": "office-slides",
-      "expected": "uncovered",
+      "expected": "finding",
       "kind": "extractor",
-      "reason_code": "fixture-not-implemented",
-      "state": "uncovered"
+      "state": "covered"
     }
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "seed": 20261025
 }

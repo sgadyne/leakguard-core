@@ -23,6 +23,10 @@ running the suite. If `pypdf` or `olefile` is absent, their real-format tests ar
 reported as skipped and those formats remain uncovered. Synthetic fixtures use
 fixed seeds and stable archive metadata; generated case labels and test outcomes
 are distinct from unittest regression counts.
+The version-2 seed catalog has 47 implemented labels, including real synthetic
+XLSX and PPTX packages. With document extras installed, every label is executed;
+without optional PDF/MSG parsers, their unavailable rows remain explicitly
+uncovered.
 
 All CPU-heavy suites and measurements in the development run use the shared
 `heavy.py` wrapper, which enforces a global two-job limit. The disposable review
