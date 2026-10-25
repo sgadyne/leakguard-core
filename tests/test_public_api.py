@@ -247,6 +247,60 @@ class PublicApiTests(unittest.TestCase):
         self.assertTrue(store.closed)
         self.assertEqual(stderr.getvalue(), "")
 
+    def test_schema_one_report_file_uses_closed_decoder(self):
+        report = _report()
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-report-") as directory:
+            path = Path(directory) / "report.json"
+            path.write_text(report.to_json(), encoding="utf-8")
+            stdout = __import__("io").StringIO()
+            stderr = __import__("io").StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manage.main(["explain", "--report", str(path), "--format", "json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(stdout.getvalue()), report.to_dict())
+            self.assertEqual(stderr.getvalue(), "")
+
+            payload = report.to_dict()
+            payload["unexpected"] = "PRIVATE-EXTRA"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            stdout = __import__("io").StringIO()
+            stderr = __import__("io").StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manage.main(["explain", "--report", str(path), "--format", "json"])
+            self.assertEqual(code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertNotIn("PRIVATE-EXTRA", stderr.getvalue())
+
+    def test_schema_zero_reports_never_claim_pass_or_echo_free_labels(self):
+        old = {
+            "label": "PRIVATE-LABEL",
+            "findings": [{
+                "path": "fixture.txt", "line": 1, "rule": "fixture-rule", "severity": "review",
+                "info": "PRIVATE-INFO", "field": "PRIVATE-FIELD", "material_name": "PRIVATE-MATERIAL",
+            }],
+            "coverage_issues": [],
+        }
+        rendered = presentation.render(old)
+        serialized = json.dumps(presentation.sanitized_report(old), ensure_ascii=True)
+        self.assertIn("INCOMPLETE (coverage unknown)", rendered)
+        self.assertNotIn("PASS", rendered)
+        for marker in ("PRIVATE-LABEL", "PRIVATE-INFO", "PRIVATE-FIELD", "PRIVATE-MATERIAL"):
+            self.assertNotIn(marker, rendered)
+            self.assertNotIn(marker, serialized)
+        self.assertEqual(presentation.sanitized_report(old)["coverage"], "unknown")
+
+    def test_explain_requires_selected_or_current_repository(self):
+        stdout = __import__("io").StringIO()
+        stderr = __import__("io").StringIO()
+        with patch("leakguard_core.manage._repository_argument", return_value=None), \
+             patch("leakguard_core.manage._open_scan_store") as open_store:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manage.main(["explain"])
+        self.assertEqual(code, 2)
+        open_store.assert_not_called()
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("report-unavailable", stderr.getvalue())
+
     def test_result_invariants_prevent_bad_reuse_and_coverage_claims(self):
         report = _report()
         result = report.results[0]

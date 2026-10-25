@@ -7,17 +7,59 @@ import pathlib
 import re
 import subprocess
 
-from .models import DecisionVerdict, ScanReport
+from .models import DecisionVerdict, ErrorCode, ScanReport
 
 
 def sanitized_report(report):
     if type(report) is ScanReport:
         return report.to_dict()
-    allowed = {'path', 'line', 'end_line', 'rule', 'severity', 'info', 'field', 'commit', 'part', 'classification', 'material_name'}
-    return {key: report.get(key) for key in ['label', 'checked_utc', 'repo', 'hook_passed'] if key in report} | {
-        'findings': [{k: v for k, v in f.items() if k in allowed} for f in report.get('findings', [])],
-        'coverage_issues': [{k: v for k, v in x.items() if k in {'path', 'status', 'error_type'}} for x in report.get('coverage_issues', [])],
-    }
+    if type(report) is not dict:
+        raise TypeError("report must be a typed or legacy report")
+    result = {"legacy_schema": 0, "coverage": "unknown"}
+    checked = report.get("checked_utc")
+    if isinstance(checked, str) and len(checked) <= 64:
+        result["checked_utc"] = checked
+    repository = report.get("repo")
+    if isinstance(repository, str) and len(repository) <= 4096:
+        result["repo"] = repository
+    result["findings"] = [_sanitize_legacy_finding(item) for item in report.get("findings", []) if type(item) is dict]
+    stable_codes = {item.value for item in ErrorCode} | {"error-directory"}
+    issues = []
+    for issue in report.get("coverage_issues", []):
+        if type(issue) is not dict:
+            continue
+        path = issue.get("path")
+        if not isinstance(path, str) or len(path) > 4096:
+            path = "scan"
+        status = issue.get("status")
+        if not isinstance(status, str) or status not in stable_codes:
+            status = "coverage-unknown"
+        issues.append({"path": path, "status": status})
+    result["coverage_issues"] = issues
+    return result
+
+
+def _sanitize_legacy_finding(finding):
+    path = finding.get("path")
+    if not isinstance(path, str) or len(path) > 4096:
+        path = "unknown"
+    line = finding.get("line")
+    if type(line) is not int or line <= 0:
+        line = 1
+    end_line = finding.get("end_line")
+    if type(end_line) is not int or end_line < line:
+        end_line = line
+    rule = finding.get("rule")
+    if not isinstance(rule, str) or re.fullmatch(r"[a-z][a-z0-9-]{0,79}", rule) is None:
+        rule = "unknown-rule"
+    severity = finding.get("severity")
+    if not isinstance(severity, str) or severity not in {"block", "review", "info"}:
+        severity = "review"
+    commit = finding.get("commit")
+    if not isinstance(commit, str) or re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", commit) is None:
+        commit = None
+    return {"path": path, "line": line, "end_line": end_line, "rule": rule,
+            "severity": severity, "commit": commit}
 
 
 def clean(value):
@@ -31,9 +73,10 @@ def render(report, report_path=None, limit=20):
     report = sanitized_report(report)
     findings = report['findings']; issues = report['coverage_issues']
     counts = collections.Counter(f.get('severity', 'review') for f in findings)
-    blocked = bool(counts['block'] or issues)
-    title = 'BLOCKED' if blocked else 'PASS'
-    lines = [f"LeakGuard {clean(report.get('label', 'report'))}: {title} ({counts['block']} blocking, {counts['review']} review, {counts['info']} verified metadata)"]
+    blocked = bool(counts['block'])
+    title = 'BLOCKED' if blocked else 'INCOMPLETE (coverage unknown)'
+    lines = [f"LeakGuard legacy report: {title} ({counts['block']} blocking, {counts['review']} review, {counts['info']} informational)"]
+    lines.append('Coverage: unknown (schema-0 report)')
     repo = report.get('repo')
     for finding in findings[:limit]:
         path = finding['path']
@@ -45,18 +88,8 @@ def render(report, report_path=None, limit=20):
             except ValueError:
                 pass
         revision = finding.get('commit')
-        version = revision[:12] if revision else ('index' if report.get('label') == 'git-pre-commit' else 'commit not recorded')
-        part = finding.get('part')
-        part_note = '  part=' + clean(part) if part and part != 'text' else ''
-        lines.append(f"  {clean(path)}:{finding['line']}  [{clean(version)}]  {clean(finding['severity'])}{part_note}")
-        detail = finding.get('info', finding['rule'])
-        if detail != finding['rule']:
-            detail += ' [rule: ' + finding['rule'] + ']'
-        if finding.get('field'):
-            detail = finding['field'] + ' - ' + detail
-        if finding.get('classification') not in {'verified-function-ast-sha256', 'verified-file-sha256'}:
-            detail += ' [value redacted]'
-        lines.append('    ' + clean(detail))
+        version = revision[:12] if revision else 'commit not recorded'
+        lines.append(f"  {clean(path)}:{finding['line']}  [{clean(version)}]  {clean(finding['severity'])}  rule={clean(finding['rule'])}")
     if len(findings) > limit:
         lines.append(f'  ... {len(findings) - limit} more findings in the report')
     for issue in issues[:limit]:

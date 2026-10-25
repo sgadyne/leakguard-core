@@ -59,7 +59,8 @@ Git hooks use the same report schema and policy decision. Allow or allow-with-
 omissions returns 0, a blocking finding returns 1, and required incomplete work
 returns 2. A chained hook's nonzero status remains authoritative. `manage explain`
 renders the indexed latest typed report for the selected/current repository;
-`manage explain --report PATH` remains the explicit schema-0 archive adapter.
+`manage explain --report PATH` explicitly reads a bounded schema-0 archive or
+schema-1 report file.
 `manage report PROFILE` defaults to indexed current active and unknown findings,
 with `--state history` for prior observations. Both current/history views include
 timestamps and use a closed redacted JSON schema with `--format json`. Successful

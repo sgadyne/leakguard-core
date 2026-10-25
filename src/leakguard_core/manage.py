@@ -16,6 +16,8 @@ from . import catalog
 from . import policies
 from . import presentation
 
+MAX_EXPLICIT_REPORT_BYTES = 64_000_000
+
 
 def rows(conn, sql, args=()):
     cursor = conn.execute(sql, args)
@@ -84,13 +86,22 @@ def main(argv=None):
     if args.command == 'explain':
         try:
             path = pathlib.Path(args.report)
-            data = json.loads(path.read_text(encoding='utf-8'))
-            if args.format == 'json':
-                print(json.dumps(presentation.sanitized_report(data), ensure_ascii=True, indent=2))
+            data = _read_explicit_report(path)
+            if type(data) is dict and type(data.get('schema_version')) is int and data['schema_version'] == 1:
+                from .scan_store import _report_from
+                typed = _report_from(data)
+                if args.format == 'json':
+                    print(typed.to_json())
+                else:
+                    print(presentation.render(typed, path))
             else:
-                print(presentation.render(data, path))
+                sanitized = presentation.sanitized_report(data)
+                if args.format == 'json':
+                    print(json.dumps(sanitized, ensure_ascii=True, sort_keys=True, indent=2))
+                else:
+                    print(presentation.render(data, path))
             return 0
-        except (OSError, ValueError, TypeError):
+        except Exception:
             print('LeakGuard: invalid-report', file=sys.stderr)
             return 2
     if args.command == 'report' and not args.legacy_archive:
@@ -191,8 +202,11 @@ def _typed_findings_report(args):
 def _typed_explain(args):
     store = None
     try:
-        store = _open_scan_store()
         repository = _repository_argument(args.repo)
+        if repository is None:
+            print('LeakGuard: report-unavailable', file=sys.stderr)
+            return 2
+        store = _open_scan_store()
         report = store.latest_report(repository)
         if report is None:
             print('LeakGuard: report-unavailable', file=sys.stderr)
@@ -226,6 +240,23 @@ def _repository_argument(value):
     if process.returncode:
         return None
     return os.fsdecode(process.stdout.strip())
+
+
+def _read_explicit_report(path):
+    with path.open('rb') as stream:
+        raw = stream.read(MAX_EXPLICIT_REPORT_BYTES + 1)
+    if len(raw) > MAX_EXPLICIT_REPORT_BYTES:
+        raise ValueError('report exceeds the configured read bound')
+    return json.loads(raw.decode('utf-8-sig'), object_pairs_hook=_unique_json_object)
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate report field')
+        result[key] = value
+    return result
 
 
 def _report_state_error(error):
