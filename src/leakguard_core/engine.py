@@ -379,6 +379,84 @@ def _legacy_git_report(report, repo, kind):
     return {'checked_utc': report.finished_at.isoformat(), 'label': 'git-' + kind, 'repo': str(repo), 'file_counts': {result.outcome.value: sum(item.outcome == result.outcome for item in report.results) for result in report.results}, 'findings': findings, 'findings_count': len(findings), 'coverage_issues': issues, 'decision': report.decision.verdict.value}
 
 
+class _IssueBudget(list):
+    """Bound diagnostics while reserving a fixed, source-less truncation issue."""
+    def __init__(self, maximum):
+        from . import models as m
+        super().__init__()
+        self.maximum = maximum
+        self.used = 0
+        self.truncated = False
+        self.marker = m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, required=True)
+        self.reserve = self._size(self.marker) + 1
+
+    @staticmethod
+    def _size(issue):
+        from . import models as m
+        return len(json.dumps(m._issue_dict(issue), ensure_ascii=True, separators=(',', ':')).encode('utf-8'))
+
+    def append(self, issue):
+        if self.truncated:
+            return False
+        size = self._size(issue) + 1
+        if self.used + size + self.reserve > self.maximum:
+            super().append(self.marker)
+            self.used += self.reserve
+            self.truncated = True
+            return False
+        super().append(issue)
+        self.used += size
+        return True
+
+    def extend(self, values):
+        for issue in values:
+            if not self.append(issue):
+                break
+
+
+def _admit_result(result, available):
+    """Keep a bounded positive prefix before using remaining space for issues."""
+    from dataclasses import replace
+    from . import models as m
+    from .scan_store import _result_json
+    size = len(_result_json(result).encode('utf-8'))
+    if size <= available:
+        return result, size, False
+    marker = m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, required=True)
+    bounded = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome,
+                      coverage=m.CoverageState.INCOMPLETE, findings=(), issues=(marker,), last_verified_at=None)
+    used = len(_result_json(bounded).encode('utf-8'))
+    if used > available:
+        return None, 0, True
+    accepted = []
+    for finding in result.findings:
+        cost = len(json.dumps(m._finding_dict(finding), ensure_ascii=True, separators=(',', ':')).encode('utf-8')) + bool(accepted)
+        if used + cost > available:
+            break
+        accepted.append(finding)
+        used += cost
+    issues = [marker]
+    for issue in result.issues:
+        cost = _IssueBudget._size(issue) + 1
+        if used + cost > available:
+            break
+        issues.append(issue)
+        used += cost
+    bounded = replace(bounded, findings=tuple(accepted), issues=tuple(issues))
+    return bounded, len(_result_json(bounded).encode('utf-8')), True
+
+
+def _cap_report(report, maximum):
+    """Last-resort guard after exact canonical serialization, always fail closed."""
+    from . import models as m
+    if len(report.to_json().encode('utf-8')) <= maximum:
+        return report
+    return m.ScanReport(1, report.run_id, report.started_at, report.finished_at, report.policy_id, (),
+                        m.CoverageSummary(False, False, 0),
+                        m.PolicyDecision(m.DecisionVerdict.INCOMPLETE, (m.ErrorCode.DETECTOR_OUTPUT_LIMIT,), report.policy_id),
+                        (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, required=True),))
+
+
 class ScanService:
     """One bounded pipeline for files, caller bytes and immutable Git snapshots."""
     def __init__(self, config, *, state_dir=None, store=None):
@@ -416,7 +494,7 @@ class ScanService:
 
     def scan_paths(self, paths, *, policy, limits, use_cache=True, cancel=None):
         from . import models as m
-        state = {'complete': True, 'issues': [], 'pending_files': None, 'pending_directories': 0}
+        state = {'complete': True, 'issues': _IssueBudget(min(32768, limits.max_report_bytes // 16)), 'pending_files': None, 'pending_directories': 0}
         deadline = time.monotonic() + limits.deadline_seconds
         pending = [pathlib.Path(path) for path in paths]
         admitted = 0
@@ -457,7 +535,7 @@ class ScanService:
 
         def enumeration():
             state['pending_directories'] = len(pending)
-            return state
+            return {**state, 'complete': state['complete'] and not state['issues'].truncated}
         return self._run(walk(), policy=policy, limits=limits, use_cache=use_cache, cancel=cancel, enumeration=enumeration)
 
     def _excluded(self, path):
@@ -529,7 +607,7 @@ class ScanService:
     def _work_batch(self, scope, root, *, limits, use_cache, cancel, ingest=False):
         from . import models as m
         from .scan_store import StateError
-        issues = []
+        issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
         lease = None
         claims = {}
         deadline = time.monotonic() + limits.deadline_seconds
@@ -637,7 +715,7 @@ class ScanService:
                     from . import scan_policy
                     failure_issues = report.issues + (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)
                     coverage, decision = scan_policy.evaluate(report.results, policy=m.ScanPolicy.inventory(), policy_id=report.policy_id, enumeration_complete=False, issues=failure_issues, pending_files=report.coverage.pending_files, pending_directories=report.coverage.pending_directories, cycle_id=report.coverage.cycle_id)
-                    report = replace(report, coverage=coverage, decision=decision, issues=failure_issues)
+                    report = _cap_report(replace(report, coverage=coverage, decision=decision, issues=failure_issues), limits.max_report_bytes)
                     try:
                         self.store.record_report(report)
                     except Exception:
@@ -721,6 +799,8 @@ class ScanService:
         from .scan_store import StateError
         if self._closed:
             raise StateError('state-closed')
+        if limits.max_report_bytes < 2048:
+            raise ValueError('max_report_bytes')
         deadline = _deadline if _deadline is not None else time.monotonic() + limits.deadline_seconds
         if hasattr(self.store, 'set_deadline'):
             try:
@@ -752,10 +832,11 @@ class ScanService:
         material_results = []
         snapshots = []
         anchors = []
-        run_issues = []
+        run_issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
         enumeration_complete = True
         finding_count = 0
         report_bytes = 0
+        envelope_bytes = 1024 + min(1024, limits.max_report_bytes // 16)
         identity_failure = None
         try:
             runtime, eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins), deadline=deadline, cancel=cancel)
@@ -826,12 +907,22 @@ class ScanService:
                 remaining = max(0, limits.max_findings - finding_count)
                 result = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, findings=result.findings[:remaining], coverage=m.CoverageState.INCOMPLETE, issues=result.issues + (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, result.source, required=True),), last_verified_at=None)
                 cache_key = None
-            size = len(_result_json(result).encode('utf-8'))
-            if report_bytes + size > limits.max_report_bytes:
-                result = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, findings=(), coverage=m.CoverageState.INCOMPLETE, issues=result.issues + (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, result.source, required=True),), last_verified_at=None)
+            result, size, truncated = _admit_result(result, limits.max_report_bytes - envelope_bytes - run_issues.maximum - report_bytes - 768)
+            if truncated:
                 cache_key = None
                 enumeration_complete = False
-            report_bytes += len(_result_json(result).encode('utf-8'))
+                run_issues.append(m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, required=True))
+            if result is None:
+                if source.kind is m.SourceKind.FILESYSTEM and hasattr(self.store, 'invalidate_scope'):
+                    try:
+                        self.store.invalidate_scope(source.path, reason='incomplete-scan')
+                    except Exception:
+                        pass
+                snapshot = None
+                break
+            # Reserve final source/runtime/material validation issues for every
+            # accepted result; later failures cannot evict accepted positives.
+            report_bytes += size + 1 + 768
             finding_count += len(result.findings)
             results.append(result)
             reservations.append((generation, cache_key))
@@ -854,7 +945,7 @@ class ScanService:
         if not final_valid:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, required=True))
-            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, r.source, required=True),)) for r in results]
+            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, required=True),)) for r in results]
         if identity_failure is None:
             try:
                 current_runtime, _ = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins), deadline=deadline, cancel=cancel)
@@ -866,19 +957,19 @@ class ScanService:
             enumeration_complete = False
             if not any(issue.code is identity_failure for issue in run_issues):
                 run_issues.append(m.CoverageIssue(identity_failure, required=True))
-            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(identity_failure, r.source, required=True),)) for r in results]
+            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(identity_failure, required=True),)) for r in results]
         try:
             materials_valid = materials is None or materials.valid()
         except Exception:
             materials_valid = False
         if not materials_valid:
-            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
+            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True),)) for r in results]
         for index, validate_snapshot in enumerate(snapshots):
             if validate_snapshot is not None and (time.monotonic() >= deadline or not validate_snapshot()):
                 result = results[index]
                 code = m.ErrorCode.BUDGET_EXHAUSTED if time.monotonic() >= deadline else m.ErrorCode.INPUT_CHANGED
                 anchors[index] = None
-                results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, result.source, required=True),))
+                results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, required=True),))
         # Publication is after validation; no slow detector runs under a write lock.
         for result, (generation, cache_key), observations, anchor in zip(results, reservations, material_results, anchors):
             try:
@@ -897,8 +988,10 @@ class ScanService:
             metadata = {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)}
         enumeration_complete = enumeration_complete and metadata.get('complete', True)
         run_issues.extend(metadata.get('issues', ()))
+        enumeration_complete = enumeration_complete and not run_issues.truncated
         coverage, decision = scan_policy.evaluate(tuple(results), policy=policy, policy_id=policy_id, enumeration_complete=enumeration_complete, issues=tuple(run_issues), pending_files=metadata.get('pending_files'), pending_directories=metadata.get('pending_directories'), cycle_id=metadata.get('cycle_id'))
         report = m.ScanReport(1, uuid.uuid4().hex, started, dt.datetime.now(dt.timezone.utc), policy_id, tuple(results), coverage, decision, tuple(run_issues))
+        report = _cap_report(report, limits.max_report_bytes)
         try:
             if repository is None:
                 self.store.record_report(report)
@@ -908,7 +1001,7 @@ class ScanService:
             issue = m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True)
             coverage, decision = scan_policy.evaluate(report.results, policy=policy, policy_id=policy_id, enumeration_complete=False, issues=report.issues + (issue,), pending_files=coverage.pending_files, pending_directories=coverage.pending_directories, cycle_id=coverage.cycle_id)
             report = replace(report, coverage=coverage, decision=decision, issues=report.issues + (issue,))
-        return report
+        return _cap_report(report, limits.max_report_bytes)
 
     @staticmethod
     def _error_code(value, fallback='detector-failed'):
@@ -935,7 +1028,9 @@ class ScanService:
         when = dt.datetime.now(dt.timezone.utc)
         remaining = max(0.001, deadline - time.monotonic())
         extracted = extraction.extract(snapshot.data, source.path, limits=limits, timeout=min(limits.extract_timeout_seconds, remaining), plugins=self._plugins, cancel=cancel, extractor_overrides=self.config.get('extractor_overrides'))
-        issues = [m.CoverageIssue(self._error_code(code), source, required=True) for code in materials.issues] if materials is not None else []
+        issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
+        if materials is not None:
+            issues.extend(m.CoverageIssue(self._error_code(code), source, required=True) for code in materials.issues)
         findings = []
         observations = []
         omitted = self._omission(policy, source.path, extracted.format_id)

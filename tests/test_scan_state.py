@@ -884,6 +884,54 @@ class OptionalAbsenceStoreTests(unittest.TestCase):
                 service.close()
 
 
+class AggregateReportBudgetTests(unittest.TestCase):
+    def test_oversized_later_input_preserves_earlier_positive_with_exact_cap(self):
+        from leakguard_core import models as m, backends
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                report = service.scan((m.BytesInput(b'synthetic', 'first.txt'), m.BytesInput(b'synthetic', 'x' * 16000)), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10, max_report_bytes=8192))
+            self.assertEqual(report.counts.findings, 1)
+            self.assertEqual(report.results[0].source.path, 'first.txt')
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+            self.assertLessEqual(len(report.to_json().encode()), 8192)
+        finally:
+            service.close()
+
+    def test_result_keeps_bounded_positive_prefix_and_marks_truncation(self):
+        from leakguard_core import models as m, backends
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            findings = tuple(backends.BackendFinding('synthetic-rule-' + str(index), 1, 1) for index in range(30))
+            with patch.object(backends, 'detect', return_value=findings):
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10, max_report_bytes=8192))
+            self.assertGreater(report.counts.findings, 0)
+            self.assertLess(report.counts.findings, 30)
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+            self.assertLessEqual(len(report.to_json().encode()), 8192)
+            self.assertTrue(any(issue.code is m.ErrorCode.DETECTOR_OUTPUT_LIMIT for issue in report.issues))
+        finally:
+            service.close()
+
+    def test_enumeration_issues_and_minimum_report_are_bounded(self):
+        from leakguard_core import models as m
+        with tempfile.TemporaryDirectory(prefix='leakguard-report-issues-') as folder:
+            paths = []
+            for index in range(60):
+                path = Path(folder) / (str(index) + 'x' * 170) / 'blocked'; path.mkdir(parents=True)
+                paths.append(path)
+            service = engine.ScanService({'gitleaks_executable': str(engine.EXE), 'exclude_components': ['blocked']})
+            try:
+                for maximum in (2048, 8192):
+                    report = service.scan_paths(paths, policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 100, max_report_bytes=maximum))
+                    self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                    self.assertFalse(report.coverage.enumeration_complete)
+                    self.assertLessEqual(len(report.to_json().encode()), maximum)
+                    self.assertTrue(any(issue.code is m.ErrorCode.DETECTOR_OUTPUT_LIMIT for issue in report.issues))
+            finally:
+                service.close()
+
+
 class FindingAdmissionTests(unittest.TestCase):
     def test_classification_deadline_keeps_accepted_positive_and_stops_items(self):
         import time
