@@ -110,8 +110,10 @@ package. Configuration provides an absolute executable, fixed argv, static rule
 IDs/severities and an implementation version. LeakGuard sends one bounded JSON
 request on stdin per independently extracted part and accepts exactly one
 bounded JSON response containing `schema_version: 1` and
-`findings: [{rule, line, severity}]`. An empty list with exit 0 means that part
-was checked. Extra fields, invalid lines, nonzero exits, malformed output,
+`findings: [{rule, line, severity}]`. Requests contain `schema_version: 1`,
+`logical_path`, the core-generated `part_id` and `format_id`, and the part's
+`text`. An empty list with exit 0 means that part was checked. Extra fields,
+invalid lines, nonzero exits, malformed output,
 timeouts, crashes and output over the configured limit are sanitized failures.
 
 The script example is in [`examples/script_checks`](examples/script_checks).

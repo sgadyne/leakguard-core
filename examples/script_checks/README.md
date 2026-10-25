@@ -18,7 +18,7 @@ with an absolute executable and no shell interpolation:
 ```
 
 For each independently extracted part, the adapter sends one bounded JSON
-request on stdin with `protocol_version`, `logical_path`, core-generated
+request on stdin with `schema_version: 1`, `logical_path`, core-generated
 `part_id`, `format_id` and `text`. The script writes exactly one JSON object to
 stdout: `{"schema_version":1,"findings":[{"rule":"...","line":1,"severity":"review"}]}`.
 Exit 0 with an empty list means the part was checked and no rule matched. Extra

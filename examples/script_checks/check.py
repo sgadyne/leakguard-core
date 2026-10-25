@@ -15,7 +15,7 @@ def main() -> int:
         request = json.loads(request_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return 2
-    if not isinstance(request, dict) or request.get("protocol_version") != 1:
+    if not isinstance(request, dict) or type(request.get("schema_version")) is not int or request["schema_version"] != 1:
         return 2
     text = request.get("text")
     if not isinstance(text, str):
