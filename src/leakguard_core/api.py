@@ -1,0 +1,246 @@
+"""Explicit Python entry point for the single LeakGuard scan service.
+
+Importing this module is inert. Configuration is validated only through an
+explicit ``ScanConfig`` constructor, and the engine is imported only by
+``Scanner.open``.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Iterable, Mapping
+
+from .models import (
+    BytesInput,
+    FileInput,
+    GitRequest,
+    ScanLimits,
+    ScanPolicy,
+    ScanReport,
+)
+
+
+class ConfigurationError(ValueError):
+    """Safe configuration failure with a stable code and optional key name."""
+
+    code = "configuration-invalid"
+
+    def __init__(self, field_name: str = "configuration") -> None:
+        self.field = field_name if field_name in _SAFE_CONFIG_FIELDS else "configuration"
+        super().__init__(f"Invalid LeakGuard configuration at {self.field}")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ScanConfig:
+    """Validated immutable snapshot of operator configuration.
+
+    Use ``from_mapping`` or ``from_file`` so values are normalized, copied and
+    checked by the same settings helper as the CLI. The private serialized
+    snapshot is omitted from repr because extension options can be sensitive.
+    """
+
+    _canonical_json: str = field(repr=False)
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, object]) -> ScanConfig:
+        if not isinstance(mapping, Mapping):
+            raise ConfigurationError()
+        try:
+            # Importing settings itself performs no environment reads. Keep the
+            # import here so `import leakguard_core.api` remains entirely inert.
+            from . import settings
+
+            normalized = settings.validate(mapping)
+            encoded = json.dumps(
+                normalized,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except Exception as error:
+            field_name = getattr(error, "field", "configuration")
+            raise ConfigurationError(field_name) from None
+        return cls(encoded)
+
+    @classmethod
+    def from_file(cls, path: Path) -> ScanConfig:
+        if not isinstance(path, Path):
+            raise ConfigurationError()
+        try:
+            raw = path.read_text(encoding="utf-8")
+            parsed = json.loads(raw, object_pairs_hook=_unique_object)
+        except Exception:
+            raise ConfigurationError("configuration") from None
+        if not isinstance(parsed, dict):
+            raise ConfigurationError("configuration")
+        return cls.from_mapping(parsed)
+
+    def to_mapping(self) -> dict[str, object]:
+        """Return a fresh mutable copy for the service's private setup."""
+        value = json.loads(self._canonical_json)
+        if type(value) is not dict:
+            raise ConfigurationError("configuration")
+        return value
+
+    def __repr__(self) -> str:
+        return "ScanConfig(<validated>)"
+
+
+class Scanner:
+    """Thin, explicit facade over the shared engine service."""
+
+    def __init__(self, service: object) -> None:
+        self._service = service
+        self._closed = False
+
+    @classmethod
+    def open(
+        cls,
+        *,
+        config: ScanConfig,
+        state_dir: Path | None = None,
+        store: object | None = None,
+    ) -> Scanner:
+        if type(config) is not ScanConfig:
+            raise ConfigurationError("configuration")
+        if state_dir is not None and not isinstance(state_dir, Path):
+            raise TypeError("state_dir must be a pathlib.Path or None")
+        # This is the first import of engine internals. Calling open is the
+        # explicit point at which backend and durable-state setup may occur.
+        from .engine import ScanService
+
+        service = ScanService(config.to_mapping(), state_dir=state_dir, store=store)
+        return cls(service)
+
+    def scan(
+        self,
+        inputs: Iterable[FileInput | BytesInput],
+        *,
+        policy: ScanPolicy,
+        limits: ScanLimits,
+        use_cache: bool = True,
+        cancel: Callable[[], bool] | None = None,
+    ) -> ScanReport:
+        self._ensure_open()
+        _validate_scan_args(policy, limits, use_cache, cancel)
+        result = self._service.scan(
+            _validated_inputs(inputs),
+            policy=policy,
+            limits=limits,
+            use_cache=use_cache,
+            cancel=cancel,
+        )
+        if type(result) is not ScanReport:
+            raise RuntimeError("Scan service returned an invalid report")
+        return result
+
+    def scan_paths(
+        self,
+        paths: Iterable[Path],
+        *,
+        policy: ScanPolicy,
+        limits: ScanLimits,
+        use_cache: bool = True,
+        cancel: Callable[[], bool] | None = None,
+    ) -> ScanReport:
+        """Scan bounded filesystem targets, expanding directories in the service."""
+        self._ensure_open()
+        _validate_scan_args(policy, limits, use_cache, cancel)
+        result = self._service.scan_paths(
+            paths,
+            policy=policy,
+            limits=limits,
+            use_cache=use_cache,
+            cancel=cancel,
+        )
+        if type(result) is not ScanReport:
+            raise RuntimeError("Scan service returned an invalid report")
+        return result
+
+    def scan_git(
+        self,
+        repo: Path,
+        *,
+        request: GitRequest,
+        limits: ScanLimits,
+        cancel: Callable[[], bool] | None = None,
+    ) -> ScanReport:
+        self._ensure_open()
+        if not isinstance(repo, Path):
+            raise TypeError("repo must be a pathlib.Path")
+        if type(request) is not GitRequest:
+            raise TypeError("request must be a GitRequest")
+        if type(limits) is not ScanLimits:
+            raise TypeError("limits must be ScanLimits")
+        if cancel is not None and not callable(cancel):
+            raise TypeError("cancel must be callable or None")
+        result = self._service.scan_git(repo, request=request, limits=limits, cancel=cancel)
+        if type(result) is not ScanReport:
+            raise RuntimeError("Scan service returned an invalid report")
+        return result
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._service.close()
+
+    def __enter__(self) -> Scanner:
+        self._ensure_open()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Scanner is closed")
+
+
+def _validate_scan_args(
+    policy: ScanPolicy,
+    limits: ScanLimits,
+    use_cache: bool,
+    cancel: Callable[[], bool] | None,
+) -> None:
+    if type(policy) is not ScanPolicy:
+        raise TypeError("policy must be a ScanPolicy")
+    if type(limits) is not ScanLimits:
+        raise TypeError("limits must be ScanLimits")
+    if type(use_cache) is not bool:
+        raise TypeError("use_cache must be a bool")
+    if cancel is not None and not callable(cancel):
+        raise TypeError("cancel must be callable or None")
+
+
+def _validated_inputs(inputs: Iterable[FileInput | BytesInput]) -> Iterable[FileInput | BytesInput]:
+    for item in inputs:
+        if type(item) not in {FileInput, BytesInput}:
+            raise TypeError("inputs must contain only FileInput or BytesInput values")
+        yield item
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate configuration key")
+        result[key] = value
+    return result
+
+
+# Only static configuration keys may appear in the exception message.
+_SAFE_CONFIG_FIELDS = frozenset({
+    "max_file_bytes", "scan_timeout_seconds", "review_only_rules", "audit_scopes",
+    "watch_scopes", "scope_aliases", "profiles", "priority_paths", "exclude_roots",
+    "exclude_components", "plugins", "credential_store", "gitleaks_executable",
+    "gitleaks_config", "script_checks", "required_formats", "omissions",
+    "extractor_overrides", "configuration",
+})
+
+
+__all__ = [
+    "BytesInput", "ConfigurationError", "FileInput", "GitRequest", "ScanConfig",
+    "ScanLimits", "ScanPolicy", "ScanReport", "Scanner",
+]
