@@ -111,28 +111,33 @@ def sniff(data: bytes, logical_path: str) -> tuple[str, str | None]:
 
 
 def extract(data: bytes, logical_path: str, *, limits=None, timeout: float | None = None,
-            plugins=(), cancel=None) -> ExtractionResult:
+            plugins=(), extractor_overrides=None, cancel=None) -> ExtractionResult:
     bounds = ExtractionLimits.from_scan_limits(limits)
     if type(data) is not bytes or len(data) > bounds.max_file_bytes:
         return ExtractionResult('unknown', 'error', issues=('input-limit',))
     format_id, issue = sniff(data, logical_path)
+    selected = (extractor_overrides or {}).get(PurePath(logical_path).suffix.lower())
+    if selected is not None:
+        from . import plugins as registry
+        candidates = [instance for instance in plugins
+                      if isinstance(instance, registry.LoadedPlugin)
+                      and instance.has_extract
+                      and (instance.manifest.id if instance.manifest is not None else instance.module) == selected]
+        if len(candidates) != 1:
+            return ExtractionResult(format_id, 'error', issues=('configuration-invalid',))
+        instance = candidates[0]
+        manifest = instance.manifest
+        hint = DOCUMENT_FORMATS.get(PurePath(logical_path).suffix.lower())
+        if manifest is not None and (manifest.kind != 'extractor' or hint and hint not in manifest.formats):
+            return ExtractionResult(format_id, 'error', issues=('configuration-invalid',))
+        selected_format = hint or (manifest.formats[0] if manifest is not None else 'extension')
+        try:
+            return registry.extract_component(instance, data, logical_path, format_id=selected_format,
+                                              limits=limits, timeout=timeout, cancel=cancel)
+        except registry.PluginError as error:
+            return ExtractionResult(selected_format, 'error', issues=(error.code,))
     if issue:
         return ExtractionResult(format_id, 'unsupported' if issue == 'unsupported-format' else 'error', issues=(issue,))
-    # Explicit legacy extension extractors may select otherwise unsupported input.
-    # The registry adapter validates parts and creates static report labels.
-    if plugins:
-        from . import plugins as registry
-        provided = registry.extract(plugins, data, logical_path)
-        if provided is not None:
-            total = 0; parts = []
-            for ordinal, (_, text) in enumerate(provided, 1):
-                total += len(text.encode('utf-8'))
-                if ordinal > bounds.max_parts:
-                    return ExtractionResult('extension', 'error', tuple(parts), ('extract-part-limit',))
-                if total > bounds.max_text_bytes:
-                    return ExtractionResult('extension', 'error', tuple(parts), ('extract-output-limit',))
-                parts.append(TextPart(f'extension-{ordinal}', text, 'extension'))
-            return ExtractionResult('extension', 'extracted' if parts else 'no-text', tuple(parts), () if parts else ('no-text',))
     if format_id == 'text':
         try:
             text = data.decode('utf-16' if data.startswith((b'\xff\xfe', b'\xfe\xff')) else 'utf-8-sig', errors='strict')

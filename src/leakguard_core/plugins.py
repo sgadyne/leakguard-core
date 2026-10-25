@@ -28,7 +28,9 @@ class PluginError(RuntimeError):
         self.code = code if code in {'plugin-invalid', 'plugin-timeout', 'plugin-crashed',
                                    'detector-output-invalid', 'detector-output-limit',
                                    'extract-output-limit', 'extract-part-limit',
-                                   'resource-bound-unavailable', 'cancelled'} else 'plugin-invalid'
+                                   'resource-bound-unavailable', 'cancelled', 'encrypted', 'no-text',
+                                   'unsupported-format', 'decode-failed', 'extract-failed',
+                                   'dependency-unavailable'} else 'plugin-invalid'
         super().__init__(self.code)
 
 
@@ -325,7 +327,7 @@ def detect(instances, text, path, part, *, format_id='text', timeout=None, limit
 
 
 def _validate_extraction(result, manifest, bounds):
-    if type(result) is not Extraction or result.disposition not in {'extracted', 'unsupported', 'encrypted', 'no-text'} or type(result.parts) not in {tuple, list}:
+    if type(result) is not Extraction or result.disposition not in {'extracted', 'unsupported', 'encrypted', 'no-text'} or isinstance(result.parts, (str, bytes, dict)):
         raise PluginError()
     if type(result.issues) not in {tuple, list} or any(code not in {'encrypted', 'no-text', 'unsupported-format', 'decode-failed', 'extract-failed'} for code in result.issues):
         raise PluginError()
@@ -359,32 +361,12 @@ def extract(instances, data, path, *, format_id=None, overrides=None, timeout=No
         if isinstance(instance, LoadedPlugin):
             if not instance.has_extract:
                 continue
-            import base64
-            response = _request({'module': instance.module, 'options': instance.options}, 'extract',
-                                {'data': base64.b64encode(data).decode('ascii'), 'path': str(path),
-                                 'format_id': format_id or (manifest.formats[0] if manifest else 'extension'),
-                                 'limits': asdict(bounds)}, timeout=timeout, limits=limits, cancel=cancel)
-            if set(response) != {'parts', 'disposition', 'issues'}:
-                raise PluginError()
-            if response['disposition'] == 'unsupported':
+            result = extract_component(instance, data, path, format_id=format_id, timeout=timeout, limits=limits, cancel=cancel)
+            if result.disposition == 'unsupported':
                 continue
-            if response['disposition'] != 'extracted' or response['issues']:
-                raise PluginError()
-            parts = response['parts']
-            if type(parts) is not list:
-                raise PluginError()
-            validated = []; total = 0; seen = set()
-            for ordinal, item in enumerate(parts, 1):
-                if (type(item) is not list or len(item) != 2 or any(type(x) is not str for x in item)
-                        or not re.fullmatch(r'[a-z][a-z0-9-]{0,79}-[1-9][0-9]*', item[0]) or item[0] in seen):
-                    raise PluginError()
-                seen.add(item[0]); total += len(item[1].encode('utf-8'))
-                if ordinal > bounds.max_parts:
-                    raise PluginError('extract-part-limit')
-                if total > bounds.max_text_bytes:
-                    raise PluginError('extract-output-limit')
-                validated.append(tuple(item))
-            return validated
+            if result.issues or result.disposition != 'extracted':
+                raise PluginError(result.issues[0] if result.issues else result.disposition)
+            return [(part.part_id, part.text) for part in result.parts]
         method = getattr(instance, 'extract', None)
         if method is None:
             continue
@@ -409,3 +391,55 @@ def extract(instances, data, path, *, format_id=None, overrides=None, timeout=No
 def load_scripts(specifications):
     from .script_checks import ScriptDetector
     return [ScriptDetector.from_mapping(spec) for spec in specifications]
+
+
+def extract_component(instance, data, path, *, format_id=None, timeout=None, limits=None, cancel=None):
+    """Run one explicitly selected extractor, preserving disposition and issues."""
+    from .extraction import ExtractionResult, TextPart
+    if not isinstance(instance, LoadedPlugin) or not instance.has_extract:
+        raise PluginError()
+    manifest = instance.manifest
+    if manifest is not None and manifest.kind != 'extractor':
+        raise PluginError()
+    bounds = ExtractionLimits.from_scan_limits(limits)
+    if type(data) is not bytes or len(data) > bounds.max_file_bytes:
+        raise PluginError('extract-output-limit')
+    import base64
+    response = _request({'module': instance.module, 'options': instance.options}, 'extract',
+                        {'data': base64.b64encode(data).decode('ascii'), 'path': str(path),
+                         'format_id': format_id or (manifest.formats[0] if manifest else 'extension'),
+                         'limits': asdict(bounds)}, timeout=timeout, limits=limits, cancel=cancel)
+    if set(response) != {'parts', 'disposition', 'issues'}:
+        raise PluginError()
+    disposition = response['disposition']
+    if disposition not in {'extracted', 'unsupported', 'encrypted', 'no-text'}:
+        raise PluginError()
+    allowed = {'encrypted', 'no-text', 'unsupported-format', 'decode-failed', 'extract-failed', 'dependency-unavailable'}
+    if type(response['issues']) is not list or any(type(code) is not str or code not in allowed for code in response['issues']):
+        raise PluginError()
+    if type(response['parts']) is not list:
+        raise PluginError()
+    selected_format = format_id or (manifest.formats[0] if manifest else 'extension')
+    parts = []; total = 0; seen = set()
+    for ordinal, item in enumerate(response['parts'], 1):
+        if (type(item) is not list or len(item) != 2 or any(type(x) is not str for x in item)
+                or not re.fullmatch(r'[a-z][a-z0-9-]{0,79}-[1-9][0-9]*', item[0]) or item[0] in seen):
+            raise PluginError()
+        name = item[0]
+        kind = name.rsplit('-', 1)[0]
+        if manifest is not None and kind not in manifest.part_kinds:
+            raise PluginError()
+        if manifest is None and name != f'extension-{ordinal}':
+            raise PluginError()
+        seen.add(name); total += len(item[1].encode('utf-8'))
+        if ordinal > bounds.max_parts:
+            raise PluginError('extract-part-limit')
+        if total > bounds.max_text_bytes:
+            raise PluginError('extract-output-limit')
+        parts.append(TextPart(name, item[1], selected_format))
+    if disposition == 'extracted' and not parts or disposition != 'extracted' and parts:
+        raise PluginError()
+    issues = tuple(response['issues'])
+    if disposition != 'extracted' and not issues:
+        issues = ({'unsupported': 'unsupported-format', 'encrypted': 'encrypted', 'no-text': 'no-text'}[disposition],)
+    return ExtractionResult(selected_format, disposition, tuple(parts), issues)
