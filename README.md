@@ -43,6 +43,16 @@ input and detector execution. Python callers supply these limits explicitly in
 
 Advance a persistent crawl with `leakguard audit workspace --budget-seconds 120 --max-files 1000`. Queues survive interruption. A bounded one-off `scan` reports remaining work but does not persist its pending paths; use `audit` for a full resumable baseline. Directory enumeration is bounded per step. A directory that is larger than the enumeration bound or keeps changing may remain pending indefinitely; its audit cycle stays incomplete. Reports expose skipped/error paths and cycle completion, not a false "clean drive" claim. Excluded directories are policy omissions: their contents are not enumerated. Review configured exclusions when assessing coverage.
 
+Directory audits use sequential traversal plus bounded post-scan directory-signature
+checks; they are not an atomic filesystem snapshot. If a checked directory changes
+or its identity is unavailable, work is requeued and the cycle remains incomplete
+until validation succeeds. New directory work invalidates earlier checks. Changes
+after the final check or changes hidden by coarse filesystem metadata can still be
+observed only on a later audit. A full `ScanStore` queue implementation must
+provide these directory-page and signature-check methods; otherwise audit/drain
+returns incomplete. The full store protocol and bounded directory signature are
+documented in [compatibility notes](COMPATIBILITY.md).
+
 ## Git guards and inventory
 
 `leakguard-install-hooks /path/to/checkouts` installs pre-commit and pre-push hooks and preserves/chains existing hooks. It also sets up the Git template for future repositories. Installation is explicit and opt-in. Git guards scan staged content and outgoing history, including bounded document blobs. They block on credentials and incomplete required scans. They never push or authenticate discovered credentials.
@@ -85,15 +95,19 @@ path characters are preserved and escaped safely in JSON.
 Gitleaks provider-specific rules are extended with explicit client-secret/password assignment rules and XML password settings. Bare `secret` variable names, folder names, high entropy alone, file extensions and generic hash shapes do not justify suppressing or declaring credentials. Generic engine matches remain blocking in Git unless a narrow evidence check proves metadata.
 
 The backend runs Gitleaks with a private working directory, so a caller
-repository's `.gitleaksignore` cannot waive a required scan. Explicit local
-Gitleaks configuration may inherit relative rule files; LeakGuard snapshots the
-top file and up to two inherited files, each bounded to 1 MB, and stages only
-those rule files in the private directory. Scanned source stays on stdin and is
-not written into the staging area. External or unknown inherited configurations
-disable persistent cache reuse; bounded local rule bytes still participate in
-runtime identity. Missing, malformed or over-bound rules fail closed with a
-fixed configuration error. See [compatibility notes](COMPATIBILITY.md) for
-relative-path and inheritance bounds.
+repository's `.gitleaksignore` cannot waive a required scan. LeakGuard reads the
+explicit top-level rule file and up to two inherited files, each bounded to
+1 MB. It stages the admitted top-level file as private `rules.toml` and stages
+relative inherited files in a layout that preserves their reference paths.
+Absolute inherited files remain at their configured external paths; those bytes
+are inspected for runtime identity but are not copied into staging, and an
+absolute reference is not an immutable worker snapshot if it changes concurrently.
+Any inherited rule reference currently disables persistent cache reuse,
+including a bounded relative file. Scanned source stays on stdin and is not
+written into the staging area. Missing, malformed or over-bound rules fail
+closed with a fixed configuration error.
+See [compatibility notes](COMPATIBILITY.md) for relative-path and inheritance
+bounds.
 
 There is no blanket pre-scan hash masking and no filename-wide hash exception. AST fingerprints are informational only when the digest matches the sibling function in the same commit/index version. `source_fingerprints` file hashes require matching file bytes from that version. Wrong/missing/ambiguous source, duplicate JSON keys and mixed values on one line do not grant exemptions. Real credentials alongside hashes still block.
 

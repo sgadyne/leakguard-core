@@ -56,8 +56,18 @@ The complete `ScanStore` protocol includes bounded current/history page queries,
 material snapshots, lifecycle methods and optional work-queue capabilities. A
 store used for `audit()` or `drain()` must implement the queue and event methods:
 `acquire_cycle`, `lease_valid`, `enqueue_work`, `claim_work`,
-`finish_directory`, `cycle_status`, `release_cycle`, `invalidate_scope` and
-`record_event`. A rooted audit also requires
+`finish_directory(claim, *, success, signature=None, omitted=False)`,
+`directory_page(lease, *, limit=256)`, `record_directory_checks(lease, checks)`,
+`cycle_status`, `release_cycle`, `invalidate_scope` and `record_event`. A
+`DirectorySnapshot` contains a path and either no signature or the bounded
+filesystem signature `(device, inode, mode, mtime_ns, ctime_ns)`. Directory pages
+are limited to 1,000 rows; directory-check batches are also bounded. Completed
+directories that have not passed the post-scan signature check remain pending.
+Changed or unavailable signatures requeue the directory and refresh its direct
+file entries; newly queued/enumerated work revokes earlier checks. The service
+does not claim an atomic filesystem snapshot: traversal is sequential, and
+changes after final validation or changes hidden by coarse filesystem metadata
+remain possible until a later audit. A rooted audit also requires
 `reconcile_cycle(lease, root)`. If a required method is missing or fails, that
 batch is incomplete; it cannot publish a complete cycle. `record_metadata` is an
 optional bounded hint used when importing change events. Delete and rename events
@@ -87,18 +97,24 @@ Gitleaks runs from a private temporary working directory so a caller's
 `.gitleaksignore` cannot suppress a required scan. The backend reads the
 explicit top-level TOML file and follows at most two `[extend].path` inheritance
 edges. Each top-level or inherited config file must be a regular file no larger
-than 1 MB. Relative paths keep Gitleaks' caller-working-directory meaning and
-are staged with their same relative names under the private working directory;
+than 1 MB. The admitted top-level bytes are staged as private `rules.toml`.
+Relative inherited paths keep Gitleaks' caller-working-directory meaning and are
+staged under the private working directory with their reference paths preserved;
 the scanned source content remains on stdin and is never copied into staging.
+Absolute inherited paths remain external references: their bytes participate in
+the observed runtime identity, but the worker follows the configured original
+path rather than a private copy, so concurrent changes to those files are not
+isolated by staging. Path/URL, relative, and unknown inheritance disables
+persistent cache reuse.
 An explicit config path may be a symlink to a regular file; symlink loops fail
 with the same fixed `configuration-invalid` error as other malformed paths.
 Relative references with more than 32 `..` components, unavailable files,
 non-files, malformed TOML, and staging-name collisions fail with the fixed
 `configuration-invalid` error. In particular, a reference that aliases the
 private `.gitleaksignore` staging name fails closed. Local inherited file bytes
-contribute to the runtime identity. Path/URL inheritance and incomplete
-or unknown closures are not eligible for persistent cache reuse, even when the
-local bytes that were available could be hashed.
+contribute to the runtime identity. Incomplete or unknown closures are not
+eligible for persistent cache reuse, even when the local bytes that were
+available could be hashed.
 
 The temporary `engine.scan_file()` and `engine.scan_blob()` compatibility wrappers
 remain for existing internal callers. Their legacy return shapes are not the new
