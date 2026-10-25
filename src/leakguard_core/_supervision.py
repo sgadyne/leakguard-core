@@ -57,6 +57,7 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
                cwd: str | os.PathLike | None = None,
                cancel: Callable[[], bool] | None = None) -> WorkerResult:
     """Execute fixed argv with bounded output, timeout, and owned group cleanup."""
+    started = time.monotonic()
     if (isinstance(argv, (str, bytes)) or not argv or any(type(x) is not str or not x or '\x00' in x for x in argv)
             or type(data) is not bytes or type(max_input_bytes) is not int or max_input_bytes <= 0 or len(data) > max_input_bytes
             or not isinstance(timeout, (float, int)) or isinstance(timeout, bool)
@@ -65,18 +66,39 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
         raise WorkerError('worker-input-invalid')
     if memory_bytes is not None and (type(memory_bytes) is not int or memory_bytes <= 0):
         raise WorkerError('worker-input-invalid')
-    if memory_bytes is not None and os.name != 'posix':
-        # Do not silently substitute a wall timer for a Windows hard memory bound.
+    if os.name not in {'posix', 'nt'}:
         raise WorkerError('resource-bound-unavailable')
+    job = None
+    if os.name == 'nt':
+        try:
+            from ._windows_jobs import WindowsJob
+            job = WindowsJob(memory_bytes)
+        except Exception:
+            raise WorkerError('resource-bound-unavailable') from None
     try:
         process = subprocess.Popen(
             list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, cwd=cwd, env=dict(env) if env is not None else worker_environment(),
             start_new_session=os.name == 'posix',
+            creationflags=(0x00000004 | 0x00000200) if os.name == 'nt' else 0,
             preexec_fn=(lambda: _resource_setup(memory_bytes)) if os.name == 'posix' else None,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
+        if job is not None:
+            job.close()
         raise WorkerError('worker-start-failed') from None
+    if job is not None:
+        try:
+            job.attach_and_resume(process)
+        except Exception:
+            job.terminate()
+            process.kill()
+            process.wait()
+            job.close()
+            for pipe in (process.stdin, process.stdout):
+                if pipe:
+                    pipe.close()
+            raise WorkerError('resource-bound-unavailable') from None
 
     output = bytearray()
     overflow = threading.Event()
@@ -114,7 +136,7 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
     writer = threading.Thread(target=write_input, name='leakguard-worker-input', daemon=True)
     reader.start()
     writer.start()
-    deadline = time.monotonic() + timeout
+    deadline = started + timeout
     failure = None
     try:
         while process.poll() is None:
@@ -135,14 +157,20 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        elif job is not None:
+            job.terminate()
         elif process.poll() is None:
             process.kill()
         process.wait()
+        if job is not None:
+            job.close()
         reader.join(timeout=2)
         writer.join(timeout=2)
         for pipe in (process.stdin, process.stdout):
             if pipe and not pipe.closed:
                 pipe.close()
+    if time.monotonic() >= deadline and failure is None:
+        failure = 'worker-timeout'
     if failure:
         raise WorkerError(failure)
     if overflow.is_set() or not reader_done.is_set() or not writer_done.is_set():
