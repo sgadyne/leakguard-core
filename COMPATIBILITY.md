@@ -90,6 +90,8 @@ edges. Each top-level or inherited config file must be a regular file no larger
 than 1 MB. Relative paths keep Gitleaks' caller-working-directory meaning and
 are staged with their same relative names under the private working directory;
 the scanned source content remains on stdin and is never copied into staging.
+An explicit config path may be a symlink to a regular file; symlink loops fail
+with the same fixed `configuration-invalid` error as other malformed paths.
 Relative references with more than 32 `..` components, unavailable files,
 non-files, malformed TOML, and staging-name collisions fail with the fixed
 `configuration-invalid` error. In particular, a reference that aliases the

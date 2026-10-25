@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+import io
 from unittest.mock import patch
 
 from leakguard_core import backends, engine, hooks, scan_policy
@@ -173,6 +175,62 @@ class BackendIsolationTests(unittest.TestCase):
             head = git('rev-parse', '--verify', 'HEAD')
             self.assertNotEqual(head.returncode, 0, 'the hook must prevent Git from creating the commit')
             self.assertTrue(state.is_dir(), 'the hook used only the explicitly private fixture state')
+
+    @unittest.skipIf(os.name == 'nt', 'self-referential symlink creation is not portable on Windows')
+    def test_top_level_and_inherited_rule_symlink_loops_are_sanitized(self):
+        """Public scans return incomplete or fixed config errors without path tracebacks."""
+        from leakguard_core.api import ConfigurationError, ScanConfig, Scanner
+        from leakguard_core.models import (
+            BytesInput, DecisionVerdict, ErrorCode, ScanLimits, ScanPolicy,
+        )
+
+        with tempfile.TemporaryDirectory(prefix='leakguard-rule-loop-marker-') as temporary:
+            root = Path(temporary)
+            top_loop = root / 'private-top-rule-loop.toml'
+            top_loop.symlink_to(top_loop.name)
+            inherited_loop = root / 'private-inherited-rule-loop.toml'
+            inherited_loop.symlink_to(inherited_loop.name)
+            inherited_parent = root / 'private-inherited-parent.toml'
+            inherited_parent.write_text(
+                '[extend]\npath = ' + json.dumps(str(inherited_loop)) + '\n',
+                encoding='utf-8',
+            )
+
+            for label, selected_rules in (
+                ('top-level', top_loop),
+                ('inherited', inherited_parent),
+            ):
+                with self.subTest(config=label), patch.object(backends, 'run_worker') as worker:
+                    config = ScanConfig.from_mapping({'gitleaks_config': str(selected_rules)})
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    try:
+                        with redirect_stdout(stdout), redirect_stderr(stderr):
+                            with Scanner.open(config=config) as scanner:
+                                report = scanner.scan(
+                                    [BytesInput(TEXT.encode('utf-8'), 'synthetic-input.txt')],
+                                    policy=ScanPolicy.inventory(),
+                                    limits=ScanLimits(deadline_seconds=10, max_files=1),
+                                )
+                    except Exception as error:
+                        # A public boundary may reject at open time, but only as a
+                        # fixed API configuration error; never let pathlib's loop
+                        # diagnostic include the operator-supplied path.
+                        self.assertIs(type(error), ConfigurationError)
+                        self.assertEqual(getattr(error, 'code', None), 'configuration-invalid')
+                        self.assertNotIn(str(root), str(error))
+                        self.assertNotIn('Traceback', stdout.getvalue() + stderr.getvalue())
+                        self.assertNotIn(str(root), stdout.getvalue() + stderr.getvalue())
+                    else:
+                        self.assertIs(report.decision.verdict, DecisionVerdict.INCOMPLETE)
+                        issues = [*report.issues, *(issue for result in report.results for issue in result.issues)]
+                        self.assertIn(ErrorCode.CONFIGURATION_INVALID, {issue.code for issue in issues})
+                        serialized = report.to_json()
+                        self.assertNotIn(str(root), serialized)
+                        self.assertNotIn(SYNTHETIC, serialized)
+                        self.assertNotIn('Traceback', stdout.getvalue() + stderr.getvalue())
+                        self.assertNotIn(str(root), stdout.getvalue() + stderr.getvalue())
+                    worker.assert_not_called()
 
     def test_relative_extended_rule_change_invalidates_persistent_runtime_identity(self):
         """Hash two levels of relative rules and disable reuse for inheritance."""
