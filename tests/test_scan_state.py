@@ -721,7 +721,8 @@ class IdentityBudgetServiceTests(unittest.TestCase):
             with patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(backends, 'detect', side_effect=detect), patch.object(plugins, 'detect') as plugin_detect:
                 report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(0.02, 1))
             plugin_detect.assert_not_called()
-            self.assertEqual(report.counts.findings, 1)
+            # The backend spent the whole budget before any item was admitted.
+            self.assertEqual(report.counts.findings, 0)
             self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
         finally:
             service.close()
@@ -881,3 +882,37 @@ class OptionalAbsenceStoreTests(unittest.TestCase):
                 self.assertEqual(len(store.memory.results), 1)
             finally:
                 service.close()
+
+
+class FindingAdmissionTests(unittest.TestCase):
+    def test_classification_deadline_keeps_accepted_positive_and_stops_items(self):
+        import time
+        from leakguard_core import models as m, backends, scan_policy
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        original = service._finding
+        calls = []
+        def classify(*args, **kwargs):
+            calls.append(1)
+            finding = original(*args, **kwargs)
+            time.sleep(0.03)
+            return finding
+        try:
+            with patch.object(backends, 'detect', return_value=tuple(backends.BackendFinding('literal-password', 1, 1) for _ in range(10000))), patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(service, '_finding', side_effect=classify):
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(0.02, 1))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(report.counts.findings, 1)
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+        finally:
+            service.close()
+
+    def test_metadata_proof_failure_retains_original_blocking_detection(self):
+        from leakguard_core import models as m, backends
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)), patch.object(engine.finding_details, 'describe', side_effect=ValueError('synthetic parser failure')):
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.json'),), policy=m.ScanPolicy.git(), limits=m.ScanLimits(30, 1))
+            self.assertEqual(report.counts.findings, 1)
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.BLOCK)
+            self.assertEqual(report.results[0].findings[0].severity, m.FindingSeverity.BLOCK)
+        finally:
+            service.close()

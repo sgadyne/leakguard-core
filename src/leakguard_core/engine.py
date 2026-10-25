@@ -953,6 +953,17 @@ class ScanService:
             issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, source, omission_id=omission))
         if omitted and not any(issue.omission_id == omitted for issue in issues):
             issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, source, omission_id=omitted))
+        finding_admission_stopped = False
+        def admit_finding(part):
+            nonlocal finding_admission_stopped
+            stopped = cancel is not None and cancel()
+            code = m.ErrorCode.CANCELLED if stopped else m.ErrorCode.BUDGET_EXHAUSTED if time.monotonic() >= deadline else m.ErrorCode.DETECTOR_OUTPUT_LIMIT if len(findings) >= limits.max_findings else None
+            if code is not None:
+                issues.append(m.CoverageIssue(code, source, part.part_id, True))
+                finding_admission_stopped = True
+                return False
+            return True
+
         for part in extracted.parts:
             stopped = cancel is not None and cancel()
             if time.monotonic() >= deadline or stopped:
@@ -960,17 +971,25 @@ class ScanService:
                 break
             if materials is not None:
                 for observation in catalog.material_observations(materials, part.part_id, part.text):
+                    if not admit_finding(part):
+                        break
                     observations.append(observation)
                     findings.append(self._finding(snapshot, part, 'known-material-' + observation.kind, observation.line, observation.end_line, 'review' if observation.kind == 'license' else 'block', 'known-material'))
+            if finding_admission_stopped:
+                break
             if time.monotonic() >= deadline or (cancel and cancel()):
                 issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
                 break
             try:
                 detected = backends.detect(part.text, binary=self.binary, rules=self.rules, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), max_findings=limits.max_findings, cancel=cancel)
                 for item in detected:
+                    if not admit_finding(part):
+                        break
                     findings.append(self._finding(snapshot, part, item.rule, item.start_line, item.end_line, item.severity, 'gitleaks'))
             except Exception as error:
                 issues.append(m.CoverageIssue(self._error_code(getattr(error, 'code', 'detector-failed')), source, part.part_id, True))
+            if finding_admission_stopped:
+                break
             for instance in self._plugins:
                 stopped = cancel is not None and cancel()
                 if time.monotonic() >= deadline or stopped:
@@ -978,12 +997,14 @@ class ScanService:
                     break
                 try:
                     for item in plugins.detect([instance], part.text, source.path, part.part_id, format_id=part.format_id, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), limits=limits, cancel=cancel):
+                        if not admit_finding(part):
+                            break
                         findings.append(self._finding(snapshot, part, item.rule, item.line, item.line, item.severity, plugins.detector_id(instance)))
                 except Exception as error:
                     issues.append(m.CoverageIssue(self._error_code(getattr(error, 'code', 'detector-failed')), source, part.part_id, True))
-            if len(findings) > limits.max_findings:
-                findings = findings[:limits.max_findings]
-                issues.append(m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, source, part.part_id, True))
+                if finding_admission_stopped:
+                    break
+            if finding_admission_stopped:
                 break
         rank = {'block': 3, 'review': 2, 'info': 1}
         merged = {}
@@ -1016,11 +1037,20 @@ class ScanService:
         final_severity = detector_severity
         proof_id = None
         if detector_id == 'gitleaks':
-            described = finding_details.describe({'path': snapshot.source.path, 'part': part.part_id, 'rule': rule, 'line': first, 'end_line': last, 'severity': detector_severity}, snapshot.data if part.part_id == 'text' else None, snapshot.context.read)
-            final_severity = described['severity']
-            classification = described.get('classification', classification)
-            if final_severity == 'info':
-                proof_id = snapshot.context.identity
+            try:
+                described = finding_details.describe({'path': snapshot.source.path, 'part': part.part_id, 'rule': rule, 'line': first, 'end_line': last, 'severity': detector_severity}, snapshot.data if part.part_id == 'text' else None, snapshot.context.read)
+                final_severity = described['severity']
+                classification = described.get('classification', classification)
+                m.FindingSeverity(final_severity)
+                m.FindingClassification(classification)
+                if final_severity == 'info':
+                    proof_id = snapshot.context.identity
+            except Exception:
+                # Failure to establish an exemption cannot discard the detector's
+                # original candidate or reduce its configured severity.
+                final_severity = detector_severity
+                classification = 'heuristic' if rule == 'generic-api-key' else 'credential-candidate'
+                proof_id = None
         identity = [snapshot.source.kind.value, snapshot.source.path, snapshot.source.repository, snapshot.source.commit, snapshot.source.index_tree_oid, snapshot.content.digest, part.part_id, first, last, rule, detector_id]
         finding_id = hashlib.sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
         return m.FindingRecord(finding_id, snapshot.source, part.part_id, first, last, rule, detector_id, m.DetectorSeverity(detector_severity), m.FindingSeverity(final_severity), m.FindingClassification(classification), proof_id)
