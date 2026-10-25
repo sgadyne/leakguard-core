@@ -485,20 +485,26 @@ class ScanService:
     def __init__(self, config, *, state_dir=None, store=None):
         from . import scan_policy
         from .scan_store import MemoryScanStore, SQLiteScanStore
-        self.config = dict(config.to_mapping() if hasattr(config, 'to_mapping') else config)
+        from .settings import validate
+        self.config = validate(config.to_mapping() if hasattr(config, 'to_mapping') else dict(config))
         self.binary = self.config.get('gitleaks_executable') or shutil.which('gitleaks') or 'gitleaks'
         self.rules = self.config.get('gitleaks_config') or ROOT / 'rules.toml'
         self.state_dir = pathlib.Path(state_dir) if state_dir is not None else None
         self.store = store if store is not None else (SQLiteScanStore(self.state_dir, config=self.config) if self.state_dir is not None else MemoryScanStore(config=self.config))
         self._owns_store = store is None
         self._closed = False
-        self._plugins = plugins.load(self.config.get('plugins', []))
-        if self.config.get('script_checks'):
-            self._plugins.extend(plugins.load_scripts(self.config['script_checks']))
-        self._runtime, self._cache_eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()))
-        # Until a verifiable plugin dependency closure is available, execution is
-        # supported and persistent semantic reuse is deliberately disabled.
-        self._cache_eligible = self._cache_eligible and not self._plugins
+        try:
+            self._plugins = plugins.load(self.config.get('plugins', []))
+            if self.config.get('script_checks'):
+                self._plugins.extend(plugins.load_scripts(self.config['script_checks']))
+            self._runtime, self._cache_eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()))
+            # Until a verifiable plugin dependency closure is available, execution is
+            # supported and persistent semantic reuse is deliberately disabled.
+            self._cache_eligible = self._cache_eligible and not self._plugins
+        except Exception:
+            if self._owns_store:
+                self.store.close()
+            raise
 
     def close(self):
         if not self._closed:
@@ -524,6 +530,7 @@ class ScanService:
                     break
                 path = pending.pop()
                 if self._excluded(path):
+                    state['issues'].append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, m.SourceRef(m.SourceKind.FILESYSTEM, str(path.absolute())), omission_id='operator-exclusion'))
                     continue
                 if path.is_dir() and not path.is_symlink():
                     try:
@@ -536,6 +543,7 @@ class ScanService:
                                 admitted += 1
                                 child = pathlib.Path(entry.path)
                                 if self._excluded(child):
+                                    state['issues'].append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, m.SourceRef(m.SourceKind.FILESYSTEM, str(child.absolute())), omission_id='operator-exclusion'))
                                     continue
                                 if entry.is_dir(follow_symlinks=False):
                                     pending.append(child)
@@ -637,11 +645,11 @@ class ScanService:
                 result = m.ScanResult(source, snapshot.content if snapshot else None, m.RuntimeIdentity(policy_id, self._runtime, snapshot.context.identity if snapshot else 'unavailable', False), m.ScanOutcome.ERROR, m.CoverageState.INCOMPLETE, (), (m.CoverageIssue(code, source, required=True),), when)
             if finding_count + len(result.findings) > limits.max_findings:
                 remaining = max(0, limits.max_findings - finding_count)
-                result = replace(result, findings=result.findings[:remaining], coverage=m.CoverageState.INCOMPLETE, issues=result.issues + (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, result.source, required=True),), last_verified_at=None)
+                result = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, findings=result.findings[:remaining], coverage=m.CoverageState.INCOMPLETE, issues=result.issues + (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, result.source, required=True),), last_verified_at=None)
                 cache_key = None
             size = len(_result_json(result).encode('utf-8'))
             if report_bytes + size > limits.max_report_bytes:
-                result = replace(result, findings=(), coverage=m.CoverageState.INCOMPLETE, issues=result.issues + (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, result.source, required=True),), last_verified_at=None)
+                result = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, findings=(), coverage=m.CoverageState.INCOMPLETE, issues=result.issues + (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, result.source, required=True),), last_verified_at=None)
                 cache_key = None
                 enumeration_complete = False
             report_bytes += len(_result_json(result).encode('utf-8'))
@@ -663,12 +671,12 @@ class ScanService:
         if current_runtime != self._runtime:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
-            results = [replace(r, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
+            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
         for index, snapshot in enumerate(snapshots):
             if snapshot is not None and (time.monotonic() >= deadline or not snapshot.valid()):
                 result = results[index]
                 code = m.ErrorCode.BUDGET_EXHAUSTED if time.monotonic() >= deadline else m.ErrorCode.INPUT_CHANGED
-                results[index] = replace(result, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, result.source, required=True),))
+                results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, result.source, required=True),))
         # Publication is after validation; no slow detector runs under a write lock.
         for result, (generation, cache_key) in zip(results, reservations):
             try:
@@ -755,9 +763,9 @@ class ScanService:
         if not snapshot.valid():
             issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, source, required=True))
         coverage = m.CoverageState.INCOMPLETE if any(issue.required for issue in issues) else m.CoverageState.OMITTED if issues else m.CoverageState.COMPLETE
-        outcome = m.ScanOutcome.SCANNED if extracted.disposition == 'extracted' else m.ScanOutcome.SKIPPED
+        outcome = m.ScanOutcome.SCANNED if extracted.parts else m.ScanOutcome.SKIPPED
         # A document's declared nontext omissions are not eligible negatives.
-        result = m.ScanResult(source, snapshot.content, identity, outcome, coverage, tuple(merged.values()), tuple(issues), when, when if extracted.disposition == 'extracted' else None, dt.datetime.now(dt.timezone.utc) if coverage is m.CoverageState.COMPLETE else None)
+        result = m.ScanResult(source, snapshot.content, identity, outcome, coverage, tuple(merged.values()), tuple(issues), when, when if extracted.parts else None, dt.datetime.now(dt.timezone.utc) if coverage is m.CoverageState.COMPLETE else None)
         return result, cache_key
 
     def _omission(self, policy, path, format_id):
@@ -813,7 +821,11 @@ def run():
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(encoding='utf-8', errors='backslashreplace')
-    return main()
+    try:
+        return main()
+    except Exception:
+        print('LeakGuard could not complete the operation (operation-failed).', file=sys.stderr)
+        return 2
 
 
 if __name__ == '__main__':

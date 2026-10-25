@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
 import re
-import subprocess
-import tempfile
 import time
 
 from . import models as m
@@ -17,20 +15,21 @@ MAX_DOCUMENT_BLOBS = 100
 
 def git_output(repo, *args, maximum=16_000_000, timeout=45, check=True):
     """Bound parent memory and never forward Git stderr or object contents."""
+    from ._supervision import run_worker, WorkerError, worker_environment
+    import os
+    keys = ('GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM',
+            'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES')
+    environment = worker_environment({key: os.environ[key] for key in keys if key in os.environ})
+    environment['GIT_TERMINAL_PROMPT'] = '0'
     try:
-        with tempfile.TemporaryFile() as output:
-            process = subprocess.run(['git', *args], cwd=repo, stdout=output, stderr=subprocess.DEVNULL, timeout=max(0.001, timeout))
-            output.seek(0)
-            data = output.read(maximum + 1)
-        if len(data) > maximum:
-            raise AcquisitionError('git-range-incomplete')
+        process = run_worker(['git', *args], b'', cwd=repo, env=environment,
+                             max_output_bytes=maximum, memory_bytes=None, timeout=max(0.001, timeout))
         if process.returncode and check:
             raise AcquisitionError('git-range-incomplete')
-        return process.returncode, data
-    except subprocess.TimeoutExpired:
-        raise AcquisitionError('budget-exhausted') from None
-    except OSError:
-        raise AcquisitionError('git-range-incomplete') from None
+        return process.returncode, process.stdout
+    except WorkerError as error:
+        raise AcquisitionError('budget-exhausted' if error.code == 'worker-timeout' else 'git-range-incomplete') from None
+
 
 
 class GitInputs:
