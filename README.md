@@ -73,6 +73,9 @@ operator configuration or create state. Select a config with
 `ScanConfig.from_mapping()` or `ScanConfig.from_file()` and open the scanner
 explicitly. For durable observations, inject a `ScanStore`; otherwise an API
 scanner uses private temporary work without a persistent catalog or cache.
+Injected stores are trusted application code and must honor the service's
+monotonic deadline contract; see [compatibility notes](COMPATIBILITY.md) for the
+`set_deadline()` and empty-Git-report repository requirements.
 
 ## Detection policy
 

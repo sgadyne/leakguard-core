@@ -39,6 +39,15 @@ Audit directory enumeration is bounded per step. An unusually large or
 continuously changing directory may remain pending indefinitely, in which case
 the audit cycle remains incomplete and does not establish a complete inventory.
 
+An injected store is trusted application code. A conforming full store implements
+`set_deadline(deadline)` with an absolute `time.monotonic()` deadline and clears
+it with `None`; the service propagates budgets when this capability is available
+but cannot preempt a custom store that ignores them. SQLite bounds busy waits and
+SQL execution, while the in-memory store tracks deadlines per calling thread.
+Store implementations must also accept `record_report(report, repository=...)`
+and preserve the explicit repository identity, including for empty Git reports
+with no result sources.
+
 The temporary `engine.scan_file()` and `engine.scan_blob()` compatibility wrappers
 remain for existing internal callers. Their legacy return shapes are not the new
 contract. Legacy cache status `unchanged` maps to the typed `reused` outcome only
