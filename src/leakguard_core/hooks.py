@@ -2,7 +2,8 @@
 import json
 import os
 import pathlib
-import shutil
+import stat
+import tempfile
 import subprocess
 import sys
 
@@ -18,21 +19,84 @@ def quote(value):
     return "'" + str(value).replace('\\', '/').replace("'", "'\"'\"'") + "'"
 
 
+def _read_hook(path, maximum=1_000_000):
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+        raise RuntimeError('hook-target-nonregular')
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError('hook-target-changed')
+        chunks = []
+        total = 0
+        while total <= maximum:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        after = os.fstat(descriptor)
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if total > maximum or identity(opened) != identity(after):
+            raise RuntimeError('hook-target-changed')
+        return b''.join(chunks), before
+    finally:
+        os.close(descriptor)
+
+
+def _write_descriptor(descriptor, content):
+    remaining = memoryview(content)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError('hook-write-failed')
+        remaining = remaining[written:]
+
+
 def install_at(hooks):
+    hooks = pathlib.Path(hooks)
     hooks.mkdir(parents=True, exist_ok=True)
     changes = []
     for kind in ['pre-commit', 'pre-push']:
         target = hooks / kind
-        marker = '# local-leakguard-managed'
-        if target.exists() and marker not in target.read_text(encoding='utf-8', errors='replace'):
+        marker = b'# local-leakguard-managed'
+        previous = _read_hook(target)
+        mode = stat.S_IMODE(previous[1].st_mode) if previous else 0o644
+        if previous and marker not in previous[0]:
             backup = hooks / (kind + '.before-leakguard')
-            if backup.exists():
-                raise RuntimeError('An existing hook backup needs review: ' + str(backup))
-            shutil.copy2(target, backup)
-        text = '#!/bin/sh\n' + marker + '\nexec ' + quote(PYTHON) + ' ' + '-X utf8 -m leakguard_core' + ' hook ' + kind + ' "$@"\n'
-        target.write_text(text, encoding='utf-8', newline='\n')
-        if os.name != 'nt':
-            target.chmod(target.stat().st_mode | 0o111)
+            # Exclusive creation never follows an existing backup link.
+            descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            try:
+                _write_descriptor(descriptor, previous[0])
+                if os.name != 'nt':
+                    os.fchmod(descriptor, mode)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        text = '#!/bin/sh\n' + marker.decode('ascii') + '\nexec ' + quote(PYTHON) + ' -X utf8 -m leakguard_core hook ' + kind + ' "$@"\n'
+        descriptor, temporary = tempfile.mkstemp(prefix='.' + kind + '.leakguard-', dir=hooks)
+        try:
+            _write_descriptor(descriptor, text.encode('utf-8'))
+            if os.name != 'nt':
+                os.fchmod(descriptor, mode | 0o111)
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            # Replacement breaks a hardlink and replaces a link itself, never
+            # opening an existing target for writing or chmodding its referent.
+            os.replace(temporary, target)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
         changes.append(kind)
     return changes
 

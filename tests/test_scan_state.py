@@ -817,3 +817,42 @@ class ReconciliationFailureTests(unittest.TestCase):
                     self.assertIsNone(store.cycles['audit:synthetic']['completed'])
                 finally:
                     service.close()
+
+
+class HookReplacementTests(unittest.TestCase):
+    @unittest.skipIf(os.name == 'nt', 'POSIX link and mode semantics')
+    def test_symlink_target_is_rejected_and_original_is_unchanged(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-hook-link-') as folder:
+            root = Path(folder)
+            target = root / 'original'; target.write_bytes(b'#!/bin/sh\nexit 7\n')
+            directory = root / 'hooks'; directory.mkdir()
+            (directory / 'pre-commit').symlink_to(target)
+            with self.assertRaises(RuntimeError):
+                hooks.install_at(directory)
+            self.assertEqual(target.read_bytes(), b'#!/bin/sh\nexit 7\n')
+            self.assertTrue((directory / 'pre-commit').is_symlink())
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX link and mode semantics')
+    def test_hardlink_is_replaced_atomically_and_upgrade_keeps_backup(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-hook-hardlink-') as folder:
+            root = Path(folder)
+            original = root / 'original'; original.write_bytes(b'#!/bin/sh\nexit 7\n'); original.chmod(0o640)
+            directory = root / 'hooks'; directory.mkdir()
+            os.link(original, directory / 'pre-commit')
+            hooks.install_at(directory)
+            self.assertEqual(original.read_bytes(), b'#!/bin/sh\nexit 7\n')
+            self.assertEqual(original.stat().st_mode & 0o777, 0o640)
+            self.assertEqual((directory / 'pre-commit').stat().st_mode & 0o777, 0o751)
+            self.assertEqual((directory / 'pre-commit.before-leakguard').read_bytes(), original.read_bytes())
+            before = (directory / 'pre-commit').read_bytes()
+            hooks.install_at(directory)
+            self.assertEqual((directory / 'pre-commit').read_bytes(), before)
+            self.assertEqual((directory / 'pre-commit.before-leakguard').read_bytes(), original.read_bytes())
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX FIFO semantics')
+    def test_fifo_is_rejected_without_opening(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-hook-fifo-') as folder:
+            directory = Path(folder)
+            os.mkfifo(directory / 'pre-commit')
+            with self.assertRaises(RuntimeError):
+                hooks.install_at(directory)
