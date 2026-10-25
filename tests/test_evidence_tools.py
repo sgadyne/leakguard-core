@@ -90,6 +90,17 @@ class SafeInputTests(unittest.TestCase):
 
 
 class BenchmarkAggregationTests(unittest.TestCase):
+    def test_file_curve_honors_requested_repetitions_at_every_size(self):
+        cases = list(benchmark_scan._file_curve_cases(3))
+        self.assertEqual(len(cases), 4 * 2 * 3)
+        for count in (1, 10, 50, 200):
+            for content_kind in ("clean", "positive"):
+                rows = [case for case in cases
+                        if case[0] == count and case[1] == content_kind]
+                self.assertEqual(rows, [
+                    (count, content_kind, repetition) for repetition in range(3)
+                ])
+
     def test_benchmark_module_uses_its_copied_tool_root(self):
         self.assertEqual(Path(benchmark_scan.__file__).resolve(), BENCHMARK.resolve())
         self.assertEqual(benchmark_scan.ROOT.resolve(), ROOT.resolve())

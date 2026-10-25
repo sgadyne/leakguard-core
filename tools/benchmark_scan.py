@@ -435,6 +435,14 @@ def _aggregate_checks(benchmarks: list[dict], part_curve: list[dict],
     }, identity_cases)
 
 
+def _file_curve_cases(repetitions: int):
+    """Yield every requested clean/positive file-count repetition."""
+    for count in (1, 10, 50, 200):
+        for content_kind in ("clean", "positive"):
+            for repetition in range(repetitions):
+                yield count, content_kind, repetition
+
+
 def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                   repetitions: int, seed: int, input_root: Path) -> dict:
     from leakguard_core import engine, models
@@ -458,41 +466,38 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
         str(rng.getrandbits(256)).encode("ascii")).hexdigest()[:8]
     benchmarks = []
     try:
-        for count in (1, 10, 50, 200):
-            case_repetitions = repetitions if count < 200 else 1
-            for content_kind in ("clean", "positive"):
-                for repetition in range(case_repetitions):
-                    case_root = input_root / f"files-{count}-{content_kind}-{repetition}"
-                    case_root.mkdir(mode=0o700)
-                    paths = []
-                    for index in range(count):
-                        path = case_root / f"fixture-{index:03d}.txt"
-                        if content_kind == "positive":
-                            text = f'# fixture {index}\nclient_secret = "{marker}-{index:03d}"\n'
-                        else:
-                            text = f"ordinary synthetic content for fixture {index}.\n"
-                        path.write_text(text, encoding="utf-8")
-                        paths.append(models.FileInput(path))
-                    measurements = {}
-                    normalized = {}
-                    warm_reused = 0
-                    for mode, use_cache in (("cold", True), ("warm", True), ("uncached", False)):
-                        row, findings, report = _measure(service, paths, use_cache=use_cache)
-                        measurements[mode] = row
-                        normalized[mode] = findings
-                        if mode == "warm":
-                            warm_reused = sum(result.outcome is models.ScanOutcome.REUSED
-                                              for result in report.results)
-                    equivalence = {
-                        "warm_matches_cold": normalized["warm"] == normalized["cold"],
-                        "uncached_matches_cold": normalized["uncached"] == normalized["cold"],
-                    }
-                    benchmarks.append({
-                        "files": count, "content": content_kind, "repetition": repetition,
-                        "repetitions_for_file_count": case_repetitions,
-                        "measurements": measurements, "warm_reused_results": warm_reused,
-                        "equivalence": equivalence,
-                    })
+        for count, content_kind, repetition in _file_curve_cases(repetitions):
+            case_root = input_root / f"files-{count}-{content_kind}-{repetition}"
+            case_root.mkdir(mode=0o700)
+            paths = []
+            for index in range(count):
+                path = case_root / f"fixture-{index:03d}.txt"
+                if content_kind == "positive":
+                    text = f'# fixture {index}\nclient_secret = "{marker}-{index:03d}"\n'
+                else:
+                    text = f"ordinary synthetic content for fixture {index}.\n"
+                path.write_text(text, encoding="utf-8")
+                paths.append(models.FileInput(path))
+            measurements = {}
+            normalized = {}
+            warm_reused = 0
+            for mode, use_cache in (("cold", True), ("warm", True), ("uncached", False)):
+                row, findings, report = _measure(service, paths, use_cache=use_cache)
+                measurements[mode] = row
+                normalized[mode] = findings
+                if mode == "warm":
+                    warm_reused = sum(result.outcome is models.ScanOutcome.REUSED
+                                      for result in report.results)
+            equivalence = {
+                "warm_matches_cold": normalized["warm"] == normalized["cold"],
+                "uncached_matches_cold": normalized["uncached"] == normalized["cold"],
+            }
+            benchmarks.append({
+                "files": count, "content": content_kind, "repetition": repetition,
+                "repetitions_for_file_count": repetitions,
+                "measurements": measurements, "warm_reused_results": warm_reused,
+                "equivalence": equivalence,
+            })
 
         part_curve = []
         for count in (1, 5, 20):
