@@ -259,7 +259,7 @@ class IntegrationTests(unittest.TestCase):
         command(self.repo, 'add', 'numerical').check_returncode()
         return folder
 
-    def typed_index_report(self):
+    def typed_git_report(self, request):
         from leakguard_core import models
         with tempfile.TemporaryDirectory(prefix='leakguard-typed-git-state-') as state:
             service = guard.ScanService({
@@ -269,18 +269,27 @@ class IntegrationTests(unittest.TestCase):
             try:
                 return service.scan_git(
                     self.repo,
-                    request=models.GitRequest(models.GitRequestKind.INDEX),
+                    request=request,
                     limits=models.ScanLimits(45, 100),
                 )
             finally:
                 service.close()
 
+    def typed_index_report(self):
+        from leakguard_core import models
+        return self.typed_git_report(models.GitRequest(models.GitRequestKind.INDEX))
+
     def test_staged_ast_metadata_uses_index_source_and_keeps_hex_keys_blocking(self):
         folder = self.seed_ast_manifest()
         (folder / 'scope.py').write_text('print("different unstaged source")\n')
+        from leakguard_core import models
+        verified_report = self.typed_index_report()
+        verified = [finding for result in verified_report.results for finding in result.findings
+                    if finding.classification is models.FindingClassification.VERIFIED_FUNCTION_AST_SHA256]
+        self.assertEqual(len(verified), 2)
+        self.assertTrue(all(finding.proof_id for finding in verified))
         result = command(self.repo, 'commit', '-m', 'test: allow verified AST metadata')
         self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
-        self.assertIn(b'2 verified metadata', result.stderr)
         manifest = json.loads((folder / 'origins.json').read_text())
         manifest['api_key'] = HEX_FIXTURE
         (folder / 'origins.json').write_text(json.dumps(manifest, indent=2))
@@ -289,7 +298,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'numerical/origins.json', result.stderr)
         self.assertIn(b'generic-api-key', result.stderr)
-        self.assertIn(b'[value redacted]', result.stderr)
+        self.assertIn(b'values are redacted', result.stderr)
         self.assertNotIn(manifest['api_key'].encode(), result.stderr + result.stdout)
 
     def test_pre_push_verifies_metadata_against_historical_source(self):
@@ -303,8 +312,16 @@ class IntegrationTests(unittest.TestCase):
         payload = f'refs/heads/main {head} refs/heads/main {self.base}\n'.encode()
         result = subprocess.run([sys.executable, str(guard.ROOT / 'leakguard.py'), 'hook', 'pre-push', 'origin', 'local-fixture'], input=payload, cwd=self.repo, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
-        self.assertIn(b'2 verified metadata', result.stderr)
         self.assertIn(revision[:12].encode(), result.stderr)
+        from leakguard_core import models
+        typed = self.typed_git_report(models.GitRequest(models.GitRequestKind.PUSH, (
+            models.RefUpdate('refs/heads/main', head, 'refs/heads/main', self.base),
+        )))
+        historical_proof = [finding for result in typed.results for finding in result.findings
+                            if result.source.commit == revision
+                            and finding.classification is models.FindingClassification.VERIFIED_FUNCTION_AST_SHA256]
+        self.assertEqual(len(historical_proof), 2)
+        self.assertTrue(all(finding.proof_id for finding in historical_proof))
 
     def test_ast_metadata_with_wrong_hash_or_wrong_context_stays_blocked(self):
         from leakguard_core import models
@@ -337,7 +354,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(b'LeakGuard blocked', result.stderr)
         self.assertIn(b'numerical/origins.json:4', result.stderr)
         self.assertIn(b'generic-api-key', result.stderr)
-        self.assertIn(b'[value redacted]', result.stderr)
+        self.assertIn(b'values are redacted', result.stderr)
 
     def test_plugin_mode_preserves_metadata_proof_and_real_key_blocking(self):
         module = self.repo / 'noop_fixture.py'
@@ -367,8 +384,16 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(b'literal-client-secret', result.stderr)
         self.assertIn(head[:12].encode(), result.stderr)
-        self.assertIn(b'office-word-1', result.stderr)
         self.assertNotIn(SYNTHETIC.encode(), result.stdout + result.stderr)
+        from leakguard_core import models
+        typed = self.typed_git_report(models.GitRequest(models.GitRequestKind.PUSH, (
+            models.RefUpdate('refs/heads/main', head, 'refs/heads/main', self.base),
+        )))
+        findings = [finding for result in typed.results for finding in result.findings
+                    if result.source.commit == head and result.source.path == 'notes.docx']
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].part_id, 'office-word-1')
+        self.assertEqual(findings[0].severity, models.FindingSeverity.BLOCK)
 
     def test_report_does_not_contain_secret_values(self):
         connection = guard.db()
@@ -386,8 +411,8 @@ class IntegrationTests(unittest.TestCase):
         with patch.dict(guard.CONFIG['audit_scopes'], {scope: str(self.repo)}):
             guard.audit(scope, budget=20, max_files=1)
             guard.audit(scope, budget=20, max_files=10)
-        cached = connection.execute('SELECT path FROM cache WHERE path LIKE ?', (str(self.repo) + '%',)).fetchall()
-        self.assertEqual({pathlib.Path(row[0]).name for row in cached}, {'app.py', 'second.py'})
+        scans = connection.execute('SELECT path FROM input_scans WHERE path LIKE ?', (str(self.repo) + '%',)).fetchall()
+        self.assertEqual({pathlib.Path(row[0]).name for row in scans}, {'app.py', 'second.py'})
         connection.execute('DELETE FROM cycles WHERE scope=?', (scope,)); connection.commit(); connection.close()
 
 

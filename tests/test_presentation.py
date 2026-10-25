@@ -29,7 +29,7 @@ class PresentationTests(unittest.TestCase):
         self.assertIn('settings.json:5', output)
         self.assertIn('[aaaaaaaaaaaa]', output)
         self.assertIn('generic-api-key', output)
-        self.assertIn('[value redacted]', output)
+        self.assertIn('values are redacted', output)
         self.assertNotIn('api_key', output)
         self.assertNotIn('Possible API key/token', output)
         self.assertNotIn(fixture_value, output)
