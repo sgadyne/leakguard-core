@@ -76,6 +76,9 @@ def main(argv=None):
     summary.add_argument('--state', choices=['current', 'history'], default='current')
     summary.add_argument('--format', choices=['text', 'json'], default='text')
     summary.add_argument('--legacy-archive', action='store_true', help='Read the pre-0.2 report archive')
+    summary.add_argument('--limit', type=_page_limit,
+                         help='Maximum indexed findings to return (1..10000; default: 1000)')
+    summary.add_argument('--cursor', help='Opaque continuation token from a previous findings page')
     register = commands.add_parser('register-material'); register.add_argument('name'); register.add_argument('--source', required=True); register.add_argument('--field', required=True); register.add_argument('--format', choices=['json', 'python-assignment'], default='json'); register.add_argument('--kind', choices=['credential', 'license'], default='credential')
     share = commands.add_parser('add-share'); share.add_argument('name'); share.add_argument('root'); share.add_argument('--alias', action='append', default=[])
     companion = commands.add_parser('add-companion'); companion.add_argument('name'); companion.add_argument('root')
@@ -106,6 +109,9 @@ def main(argv=None):
             return 2
     if args.command == 'report' and not args.legacy_archive:
         return _typed_findings_report(args)
+    if args.command == 'report' and args.legacy_archive and (args.cursor is not None or args.limit is not None):
+        print('LeakGuard: pagination-unavailable-for-legacy-archive', file=sys.stderr)
+        return 2
     from . import engine as guard
 
     conn = guard.db()
@@ -181,8 +187,13 @@ def _typed_findings_report(args):
     try:
         store = _open_scan_store()
         profile = None if args.profile == 'all' else args.profile
-        rows = store.query_findings(state=args.state, profile=profile)
-        result = presentation.findings_report_to_dict(args.state, args.profile, rows)
+        page = store.query_findings_page(
+            state=args.state, profile=profile, limit=args.limit or 1000, cursor=args.cursor,
+        )
+        result = presentation.findings_page_report_to_dict(
+            args.state, args.profile, page.rows,
+            has_more=page.has_more, next_cursor=page.next_cursor,
+        )
         if args.format == 'json':
             print(json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(',', ':')))
         else:
@@ -267,6 +278,16 @@ def _report_state_error(error):
         print(f'LeakGuard: configuration-invalid{suffix}', file=sys.stderr)
     else:
         print('LeakGuard: state-failed', file=sys.stderr)
+
+
+def _page_limit(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError('limit must be an integer from 1 to 10000') from None
+    if parsed < 1 or parsed > 10000:
+        raise argparse.ArgumentTypeError('limit must be an integer from 1 to 10000')
+    return parsed
 
 
 if __name__ == '__main__':

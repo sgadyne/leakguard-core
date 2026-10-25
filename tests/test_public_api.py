@@ -223,9 +223,9 @@ class PublicApiTests(unittest.TestCase):
                 self.closed = False
                 self.query = None
 
-            def query_findings(self, *, state, profile):
-                self.query = (state, profile)
-                return (row,)
+            def query_findings_page(self, *, state, profile, limit, cursor):
+                self.query = (state, profile, limit, cursor)
+                return type("Page", (), {"rows": (row,), "has_more": False, "next_cursor": None})()
 
             def close(self):
                 self.closed = True
@@ -238,9 +238,15 @@ class PublicApiTests(unittest.TestCase):
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     code = manage.main(["report", "general", "--state", state, "--format", "json"])
             self.assertEqual(code, 0)
-            self.assertEqual(store.query, (state, "general"))
+            self.assertEqual(store.query, (state, "general", 1000, None))
             payload = json.loads(stdout.getvalue())
-            self.assertEqual(set(payload), {"schema_version", "report_type", "state", "profile", "count", "findings"})
+            self.assertEqual(set(payload), {
+                "schema_version", "report_type", "state", "profile", "page_count",
+                "has_more", "next_cursor", "findings",
+            })
+            self.assertEqual((payload["schema_version"], payload["report_type"]), (2, "findings-page"))
+            self.assertEqual((payload["page_count"], payload["has_more"], payload["next_cursor"]), (1, False, None))
+            self.assertNotIn("count", payload)
             self.assertNotIn("PRIVATE-VALUE", stdout.getvalue())
             self.assertNotIn("PRIVATE-SOURCE", stdout.getvalue())
             self.assertNotIn("policy_id", payload["findings"][0])
@@ -253,6 +259,78 @@ class PublicApiTests(unittest.TestCase):
         text = presentation.render_findings_report(clean)
         self.assertNotIn("PRIVATE-VALUE", text)
         self.assertNotIn("PASS", text)
+
+    def test_manage_page_cursor_is_forwarded_and_envelope_preserves_store_order(self):
+        stamp = "2026-10-25T18:00:00Z"
+        def finding(path, identifier):
+            return {
+                "id": identifier * 64,
+                "source": {"kind": "filesystem", "path": path, "repository": None,
+                           "commit": None, "blob_oid": None, "index_tree_oid": None},
+                "part_id": "text", "start_line": 1, "end_line": 1, "rule": "fixture-rule",
+                "detector_id": "builtin", "detector_severity": "review", "severity": "review",
+                "classification": "credential-candidate", "state": "active",
+                "first_seen": stamp, "last_seen": stamp, "last_verified": stamp,
+                "resolved_at": None, "state_reason": "verified-present",
+            }
+
+        rows = (finding("z.txt", "a"), finding("a.txt", "b"))
+        class FakeStore:
+            closed = False
+            query = None
+
+            def query_findings_page(self, *, state, profile, limit, cursor):
+                self.query = (state, profile, limit, cursor)
+                return type("Page", (), {
+                    "rows": rows, "has_more": True, "next_cursor": "v1.YWJj",
+                })()
+
+            def close(self):
+                self.closed = True
+
+        store = FakeStore()
+        stdout = __import__("io").StringIO()
+        stderr = __import__("io").StringIO()
+        with patch("leakguard_core.manage._open_scan_store", return_value=store), \
+             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = manage.main([
+                "report", "all", "--state", "history", "--format", "json",
+                "--limit", "2", "--cursor", "v1.previous",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(store.query, ("history", None, 2, "v1.previous"))
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["page_count"], 2)
+        self.assertTrue(payload["has_more"])
+        self.assertEqual(payload["next_cursor"], "v1.YWJj")
+        self.assertEqual([item["source"]["path"] for item in payload["findings"]], ["z.txt", "a.txt"])
+        self.assertNotIn("total", payload)
+        rendered = presentation.render_findings_report(payload)
+        self.assertIn("2 observations in this page", rendered)
+        self.assertIn("--cursor v1.YWJj", rendered)
+        self.assertTrue(store.closed)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_findings_page_serializer_rejects_inconsistent_or_unbounded_continuation(self):
+        with self.assertRaises(ValueError):
+            presentation.findings_page_report_to_dict(
+                "current", "all", (), has_more=True, next_cursor=None,
+            )
+        with self.assertRaises(ValueError):
+            presentation.findings_page_report_to_dict(
+                "current", "all", (), has_more=True, next_cursor="private path",
+            )
+        page = presentation.findings_page_report_to_dict(
+            "current", "all", (), has_more=False, next_cursor=None,
+        )
+        self.assertEqual(page["page_count"], 0)
+        self.assertFalse(page["has_more"])
+        self.assertIsNone(page["next_cursor"])
+        with self.assertRaises(TypeError):
+            presentation.render_findings_report({
+                **page, "schema_version": True,
+            })
 
     def test_manage_explain_reads_indexed_typed_report(self):
         report = _report()

@@ -158,7 +158,7 @@ def render_scan_report(report: ScanReport, report_path=None, limit=20):
 
 
 def findings_report_to_dict(state, profile, rows):
-    """Build the closed public shape for current/history store queries."""
+    """Compatibility schema-1 envelope for direct, already bounded rows."""
     if state not in {"current", "history"}:
         raise ValueError("invalid finding state")
     if profile not in {"general", "companion", "all"}:
@@ -179,16 +179,66 @@ def findings_report_to_dict(state, profile, rows):
     }
 
 
+def findings_page_report_to_dict(state, profile, rows, *, has_more, next_cursor):
+    """Serialize one bounded indexed page; the envelope version is independent of ScanReport."""
+    if state not in {"current", "history"}:
+        raise ValueError("invalid finding state")
+    if profile not in {"general", "companion", "all"}:
+        raise ValueError("invalid finding profile")
+    if type(rows) not in {tuple, list}:
+        raise TypeError("finding rows must be a tuple or list")
+    if type(has_more) is not bool:
+        raise TypeError("has_more must be a boolean")
+    if has_more:
+        if not isinstance(next_cursor, str) or re.fullmatch(r"[A-Za-z0-9._~-]{1,4096}", next_cursor) is None:
+            raise ValueError("invalid continuation cursor")
+    elif next_cursor is not None:
+        raise ValueError("cursor must be absent at the end of a page")
+    # Preserve the indexed store's cursor order. Sorting here could skip or repeat rows.
+    findings = [_public_finding_row(row) for row in rows]
+    return {
+        "schema_version": 2,
+        "report_type": "findings-page",
+        "state": state,
+        "profile": profile,
+        "page_count": len(findings),
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "findings": findings,
+    }
+
+
 def render_findings_report(report, limit=50):
     """Render a closed findings report without claiming a scan was clean."""
-    expected = {"schema_version", "report_type", "state", "profile", "count", "findings"}
-    if type(report) is not dict or set(report) != expected or report["report_type"] != "findings":
+    old_expected = {"schema_version", "report_type", "state", "profile", "count", "findings"}
+    page_expected = {"schema_version", "report_type", "state", "profile", "page_count", "has_more", "next_cursor", "findings"}
+    if type(report) is not dict:
         raise TypeError("report must be a public findings report")
-    findings = report["findings"]
-    if type(findings) is not list or report["count"] != len(findings):
+    version = report.get("schema_version")
+    if type(version) is not int or version not in {1, 2}:
+        raise TypeError("report must be a public findings report")
+    is_page = version == 2 and report.get("report_type") == "findings-page"
+    expected = page_expected if is_page else old_expected
+    if set(report) != expected or report["report_type"] != ("findings-page" if is_page else "findings"):
+        raise TypeError("report must be a public findings report")
+    if report["state"] not in {"current", "history"} or report["profile"] not in {"general", "companion", "all"}:
         raise ValueError("invalid findings report")
+    findings = report["findings"]
+    count_key = "page_count" if is_page else "count"
+    if type(findings) is not list or type(report[count_key]) is not int or report[count_key] != len(findings):
+        raise ValueError("invalid findings report")
+    if is_page:
+        cursor = report["next_cursor"]
+        if type(report["has_more"]) is not bool:
+            raise ValueError("invalid findings report")
+        if report["has_more"]:
+            if not isinstance(cursor, str) or re.fullmatch(r"[A-Za-z0-9._~-]{1,4096}", cursor) is None:
+                raise ValueError("invalid findings report")
+        elif cursor is not None:
+            raise ValueError("invalid findings report")
     lines = [
-        f"LeakGuard findings ({report['state']}, profile={report['profile']}): {report['count']} observations"
+        f"LeakGuard findings ({report['state']}, profile={report['profile']}): "
+        f"{report[count_key]} observations" + (" in this page" if is_page else "")
     ]
     for finding in findings[:limit]:
         source = finding["source"]
@@ -204,6 +254,8 @@ def render_findings_report(report, limit=50):
         )
     if len(findings) > limit:
         lines.append(f"  ... {len(findings) - limit} more observations in the structured report")
+    if is_page and report["has_more"]:
+        lines.append(f"More results are available. Continue with --cursor {report['next_cursor']}")
     return "\n".join(lines)
 
 

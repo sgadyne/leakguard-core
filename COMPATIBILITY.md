@@ -69,9 +69,17 @@ renders the indexed latest typed report for the selected/current repository;
 schema-1 report file.
 `manage report PROFILE` defaults to indexed current active and unknown findings,
 with `--state history` for prior observations. Both current/history views include
-timestamps and use a closed redacted JSON schema with `--format json`. Successful
-reads return 0 even when reports contain blocking findings; read or state failures
-return 2. The query path opens the store without initializing detectors.
+timestamps. The indexed query is bounded and paginated: `--limit` accepts 1 to
+10,000 and defaults to 1,000; pass a returned `next_cursor` with `--cursor` to
+continue. JSON uses the closed redacted `findings-page` envelope with
+`schema_version: 2`, `page_count`, `has_more`, `next_cursor` and `findings`. This
+envelope version is independent of ScanReport schema version 1. It reports the
+page size, not a total count. The store preserves cursor order; pagination does
+not promise a snapshot while concurrent scans change the indexed observations.
+Successful reads return 0 even when reports contain blocking findings; read or
+state failures return 2. The query path opens the store without initializing
+detectors. `--legacy-archive` retains the older archive reader and does not accept
+page cursors.
 Current findings describe the latest observed state, not confirmed filesystem
 absence. An observed delete or rename makes prior evidence unknown rather than
 resolving it; notifications can be lost, and this release exposes no explicit
