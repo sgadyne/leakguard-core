@@ -28,10 +28,13 @@ class PresentationTests(unittest.TestCase):
         output = presentation.render(report)
         self.assertIn('settings.json:5', output)
         self.assertIn('[aaaaaaaaaaaa]', output)
-        self.assertIn('api_key', output)
+        self.assertIn('generic-api-key', output)
         self.assertIn('[value redacted]', output)
+        self.assertNotIn('api_key', output)
+        self.assertNotIn('Possible API key/token', output)
         self.assertNotIn(fixture_value, output)
         self.assertNotIn(fixture_value, json.dumps(presentation.sanitized_report(report)))
+        self.assertNotIn('Possible API key/token', json.dumps(presentation.sanitized_report(report)))
 
     def test_report_lookup_stays_with_the_requested_repo(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-test-', dir=pathlib.Path(tempfile.gettempdir())) as folder:

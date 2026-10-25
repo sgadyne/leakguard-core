@@ -134,6 +134,22 @@ class IntegrationTests(unittest.TestCase):
         command(self.repo, 'add', 'numerical').check_returncode()
         return folder
 
+    def typed_index_report(self):
+        from leakguard_core import models
+        with tempfile.TemporaryDirectory(prefix='leakguard-typed-git-state-') as state:
+            service = guard.ScanService({
+                'gitleaks_executable': str(guard.EXE),
+                'gitleaks_config': str(guard.RULES),
+            }, state_dir=pathlib.Path(state))
+            try:
+                return service.scan_git(
+                    self.repo,
+                    request=models.GitRequest(models.GitRequestKind.INDEX),
+                    limits=models.ScanLimits(45, 100),
+                )
+            finally:
+                service.close()
+
     def test_staged_ast_metadata_uses_index_source_and_keeps_hex_keys_blocking(self):
         folder = self.seed_ast_manifest()
         (folder / 'scope.py').write_text('print("different unstaged source")\n')
@@ -146,7 +162,8 @@ class IntegrationTests(unittest.TestCase):
         command(self.repo, 'add', 'numerical/origins.json').check_returncode()
         result = command(self.repo, 'commit', '-m', 'test: reject key inside metadata file')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'api_key', result.stderr)
+        self.assertIn(b'numerical/origins.json', result.stderr)
+        self.assertIn(b'generic-api-key', result.stderr)
         self.assertIn(b'[value redacted]', result.stderr)
         self.assertNotIn(manifest['api_key'].encode(), result.stderr + result.stdout)
 
@@ -165,15 +182,37 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(revision[:12].encode(), result.stderr)
 
     def test_ast_metadata_with_wrong_hash_or_wrong_context_stays_blocked(self):
+        from leakguard_core import models
         folder = self.seed_ast_manifest()
         manifest = json.loads((folder / 'origins.json').read_text())
         manifest['scope.py']['function_ast_sha256']['token'] = HEX_FIXTURE
         (folder / 'origins.json').write_text(json.dumps(manifest, indent=2))
         command(self.repo, 'add', 'numerical/origins.json').check_returncode()
+
+        typed = self.typed_index_report()
+        records = [(result, finding) for result in typed.results for finding in result.findings
+                   if result.source.path == 'numerical/origins.json']
+        self.assertEqual(typed.decision.verdict, models.DecisionVerdict.BLOCK)
+        self.assertEqual(len(records), 2)
+        rejected = next(finding for _result, finding in records if finding.start_line == 4)
+        self.assertEqual(rejected.source.kind, models.SourceKind.GIT_INDEX)
+        self.assertEqual((rejected.start_line, rejected.end_line), (4, 4))
+        self.assertEqual(rejected.rule, 'generic-api-key')
+        self.assertEqual(rejected.severity, models.FindingSeverity.BLOCK)
+        self.assertEqual(rejected.classification, models.FindingClassification.HEURISTIC)
+        self.assertIsNone(rejected.proof_id)
+        verified = next(finding for _result, finding in records if finding.start_line == 9)
+        self.assertEqual((verified.start_line, verified.end_line), (9, 9))
+        self.assertEqual(verified.severity, models.FindingSeverity.INFO)
+        self.assertEqual(verified.classification, models.FindingClassification.VERIFIED_FUNCTION_AST_SHA256)
+        self.assertIsNotNone(verified.proof_id)
+
         result = command(self.repo, 'commit', '-m', 'test: reject unverified AST-shaped token')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'LeakGuard blocked', result.stderr)
-        self.assertIn(b'function_ast_sha256.token', result.stderr)
+        self.assertIn(b'numerical/origins.json:4', result.stderr)
+        self.assertIn(b'generic-api-key', result.stderr)
+        self.assertIn(b'[value redacted]', result.stderr)
 
     def test_plugin_mode_preserves_metadata_proof_and_real_key_blocking(self):
         module = self.repo / 'noop_fixture.py'
