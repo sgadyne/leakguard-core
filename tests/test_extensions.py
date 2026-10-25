@@ -7,7 +7,7 @@ import os
 import subprocess
 from unittest.mock import patch
 
-from leakguard_core import engine as guard, plugins
+from leakguard_core import engine as guard, plugins, extraction, models
 from test_integration import SYNTHETIC
 
 
@@ -52,6 +52,45 @@ class ExtensionTests(unittest.TestCase):
             self.assertTrue(any(code.endswith('unsupported-format') for code in issue_codes))
             self.assertTrue(any(code.endswith('policy-omission') for code in issue_codes))
             self.assertGreater(report['findings_count'], 0)
+
+    def test_late_nul_is_explicit_binary_omission_and_required_mode_is_incomplete(self):
+        # Place the NUL exactly after the former sniff prefix so the entire
+        # admitted buffer must participate in binary classification.
+        payload = b'A' * 8192 + b'\x00'
+        extracted = extraction.extract(payload, 'opaque-unusual.bin')
+        self.assertEqual((extracted.format_id, extracted.disposition, extracted.issues),
+                         ('binary', 'unsupported', ('unsupported-format',)))
+
+        with tempfile.TemporaryDirectory(prefix='leakguard-late-nul-') as folder:
+            root = pathlib.Path(folder)
+            state = root / 'state'
+            source = models.BytesInput(payload, 'opaque-unusual.bin')
+            service = guard.ScanService({'gitleaks_executable': str(guard.EXE)}, state_dir=state)
+            try:
+                optional = service.scan(
+                    [source], policy=models.ScanPolicy.inventory(),
+                    limits=models.ScanLimits(30, 1), use_cache=False,
+                )
+                optional_result = optional.results[0]
+                optional_codes = {issue.code.value for issue in optional_result.issues}
+                self.assertEqual(optional_result.coverage, models.CoverageState.OMITTED)
+                self.assertIn('unsupported-format', optional_codes)
+                self.assertTrue(any(issue.omission_id == 'unsupported-binary'
+                                    for issue in optional_result.issues))
+                self.assertEqual(optional.decision.verdict, models.DecisionVerdict.ALLOW_WITH_OMISSIONS)
+
+                strict = service.scan(
+                    [source], policy=models.ScanPolicy.inventory(required_formats=('all',)),
+                    limits=models.ScanLimits(30, 1), use_cache=False,
+                )
+                strict_result = strict.results[0]
+                self.assertEqual(strict_result.coverage, models.CoverageState.INCOMPLETE)
+                self.assertTrue(any(issue.code is models.ErrorCode.UNSUPPORTED_FORMAT and issue.required
+                                    for issue in strict_result.issues))
+                self.assertFalse(strict.coverage.required_complete)
+                self.assertEqual(strict.decision.verdict, models.DecisionVerdict.INCOMPLETE)
+            finally:
+                service.close()
 
     def test_plugins_cannot_return_values_or_waive_findings(self):
         class Bad:
