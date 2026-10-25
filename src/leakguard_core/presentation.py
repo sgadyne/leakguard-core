@@ -1,6 +1,8 @@
 """Compact terminal/chat summaries of sanitized reports; never read source values."""
+import base64
 import collections
 import datetime
+import hashlib
 import json
 import ntpath
 import pathlib
@@ -201,7 +203,7 @@ def findings_page_report_to_dict(state, profile, rows, *, has_more, next_cursor)
     if type(has_more) is not bool:
         raise TypeError("has_more must be a boolean")
     if has_more:
-        if not isinstance(next_cursor, str) or re.fullmatch(r"[A-Za-z0-9._~-]{1,1024}", next_cursor) is None:
+        if not _valid_findings_cursor(next_cursor, state, profile):
             raise ValueError("invalid continuation cursor")
     elif next_cursor is not None:
         raise ValueError("cursor must be absent at the end of a page")
@@ -252,7 +254,7 @@ def render_findings_report(report, limit=50):
         if type(report["has_more"]) is not bool:
             raise ValueError("invalid findings report")
         if report["has_more"]:
-            if not isinstance(cursor, str) or re.fullmatch(r"[A-Za-z0-9._~-]{1,1024}", cursor) is None:
+            if not _valid_findings_cursor(cursor, report["state"], report["profile"]):
                 raise ValueError("invalid findings report")
         elif cursor is not None:
             raise ValueError("invalid findings report")
@@ -383,6 +385,39 @@ def _validate_public_finding(finding):
     if normalized != finding:
         raise ValueError("invalid findings report")
     return normalized
+
+
+def _valid_findings_cursor(cursor, state, profile):
+    """Accept only the store's opaque, filter-bound cursor representation."""
+    if type(cursor) is not str or len(cursor) > MAX_FINDINGS_CURSOR_LENGTH or not cursor.startswith("lg1."):
+        return False
+    encoded = cursor[4:]
+    if not encoded or re.fullmatch(r"[A-Za-z0-9_-]+", encoded) is None:
+        return False
+    try:
+        raw = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+        payload = json.loads(raw.decode("utf-8"))
+        filtered_profile = None if profile == "all" else profile
+        expected_filter = hashlib.sha256(
+            json.dumps([state, filtered_profile], separators=(",", ":")).encode()
+        ).hexdigest()
+        if (type(payload) is not list or len(payload) != 3 or type(payload[0]) is not int or
+                payload[0] != 1 or payload[1] != expected_filter):
+            return False
+        position = payload[2]
+        if state == "current":
+            if (type(position) is not list or len(position) != 2 or
+                    any(type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                        for value in position)):
+                return False
+        elif type(position) is not int or position < 0:
+            return False
+        canonical = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+        return cursor == "lg1." + canonical
+    except (ValueError, TypeError, UnicodeError):
+        return False
 
 
 def _public_timestamp(value, allow_none=False):

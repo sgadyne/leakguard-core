@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import sqlite3
+import stat
 import subprocess
 import sys
 
@@ -262,10 +263,25 @@ def _repository_argument(value):
 
 
 def _read_explicit_report(path):
-    with path.open('rb') as stream:
-        raw = stream.read(MAX_EXPLICIT_REPORT_BYTES + 1)
-    if len(raw) > MAX_EXPLICIT_REPORT_BYTES:
-        raise ValueError('report exceeds the configured read bound')
+    flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_EXPLICIT_REPORT_BYTES:
+            raise ValueError('report is not a bounded regular file')
+        chunks = []
+        size = 0
+        while size <= MAX_EXPLICIT_REPORT_BYTES:
+            chunk = os.read(descriptor, min(1_048_576, MAX_EXPLICIT_REPORT_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > MAX_EXPLICIT_REPORT_BYTES:
+            raise ValueError('report exceeds the configured read bound')
+        raw = b''.join(chunks)
+    finally:
+        os.close(descriptor)
     return json.loads(raw.decode('utf-8-sig'), object_pairs_hook=_unique_json_object)
 
 

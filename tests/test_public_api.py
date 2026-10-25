@@ -1,8 +1,10 @@
 """Public API contract, import, serialization and CLI adapter checks."""
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import os
 from dataclasses import replace
@@ -81,7 +83,7 @@ def _report(*, verdict=DecisionVerdict.ALLOW, severity=FindingSeverity.REVIEW):
     )
 
 
-def _run_explicit_report(path, cwd):
+def _run_explicit_report(path, cwd, *, timeout=30):
     environment = dict(os.environ)
     source = str(Path(__file__).resolve().parents[1] / "src")
     existing = environment.get("PYTHONPATH")
@@ -90,8 +92,20 @@ def _run_explicit_report(path, cwd):
     environment["LEAKGUARD_STATE_DIR"] = str(Path(cwd) / "unused-state")
     return subprocess.run(
         [sys.executable, "-m", "leakguard_core.manage", "explain", "--report", str(path), "--format", "json"],
-        cwd=cwd, env=environment, capture_output=True, text=True, timeout=30, check=False,
+        cwd=cwd, env=environment, capture_output=True, text=True, timeout=timeout, check=False,
     )
+
+
+def _finding_cursor(state, profile, position):
+    filtered_profile = None if profile == "all" else profile
+    filter_hash = hashlib.sha256(
+        json.dumps([state, filtered_profile], separators=(",", ":")).encode()
+    ).hexdigest()
+    payload = [1, filter_hash, position]
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+    return "lg1." + encoded
 
 
 class PublicApiTests(unittest.TestCase):
@@ -296,6 +310,7 @@ class PublicApiTests(unittest.TestCase):
             }
 
         rows = (finding("z.txt", "a"), finding("a.txt", "b"))
+        next_cursor = _finding_cursor("history", "all", 7)
         class FakeStore:
             closed = False
             query = None
@@ -303,7 +318,7 @@ class PublicApiTests(unittest.TestCase):
             def query_findings_page(self, *, state, profile, limit, cursor):
                 self.query = (state, profile, limit, cursor)
                 return type("Page", (), {
-                    "rows": rows, "has_more": True, "next_cursor": "v1.YWJj",
+                    "rows": rows, "has_more": True, "next_cursor": next_cursor,
                 })()
 
             def close(self):
@@ -316,20 +331,20 @@ class PublicApiTests(unittest.TestCase):
              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = manage.main([
                 "report", "all", "--state", "history", "--format", "json",
-                "--limit", "2", "--cursor", "v1.previous",
+                "--limit", "2", "--cursor", _finding_cursor("history", "all", 5),
             ])
         self.assertEqual(code, 0)
-        self.assertEqual(store.query, ("history", None, 2, "v1.previous"))
+        self.assertEqual(store.query, ("history", None, 2, _finding_cursor("history", "all", 5)))
         payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["page_count"], 2)
         self.assertTrue(payload["has_more"])
-        self.assertEqual(payload["next_cursor"], "v1.YWJj")
+        self.assertEqual(payload["next_cursor"], next_cursor)
         self.assertEqual([item["source"]["path"] for item in payload["findings"]], ["z.txt", "a.txt"])
         self.assertNotIn("total", payload)
         rendered = presentation.render_findings_report(payload)
         self.assertIn("2 observations in this page", rendered)
-        self.assertIn("--cursor v1.YWJj", rendered)
+        self.assertIn("--cursor " + next_cursor, rendered)
         self.assertTrue(store.closed)
         self.assertEqual(stderr.getvalue(), "")
 
@@ -342,6 +357,15 @@ class PublicApiTests(unittest.TestCase):
             presentation.findings_page_report_to_dict(
                 "current", "all", (), has_more=True, next_cursor="private path",
             )
+        with self.assertRaises(ValueError):
+            presentation.findings_page_report_to_dict(
+                "current", "all", (), has_more=True, next_cursor="PRIVATE-MATERIAL",
+            )
+        valid_cursor = _finding_cursor("current", "all", ["a" * 64, "b" * 64])
+        cursor_page = presentation.findings_page_report_to_dict(
+            "current", "all", (), has_more=True, next_cursor=valid_cursor,
+        )
+        self.assertEqual(cursor_page["next_cursor"], valid_cursor)
         page = presentation.findings_page_report_to_dict(
             "current", "all", (), has_more=False, next_cursor=None,
         )
@@ -564,6 +588,16 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "LeakGuard: invalid-report\n")
         self.assertNotIn(marker, result.stdout + result.stderr)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO behavior is POSIX-specific")
+    def test_explicit_report_subprocess_rejects_fifo_without_blocking(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-report-fifo-") as directory:
+            path = Path(directory) / "report.fifo"
+            os.mkfifo(path)
+            result = _run_explicit_report(path, directory, timeout=5)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "LeakGuard: invalid-report\n")
 
     def test_manage_module_propagates_explicit_report_failure_exit_code(self):
         with tempfile.TemporaryDirectory(prefix="leakguard-test-manage-exit-") as directory:
