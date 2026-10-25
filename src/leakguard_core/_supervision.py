@@ -10,6 +10,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Callable, Mapping, Sequence
@@ -39,14 +40,24 @@ def worker_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]
     return env
 
 
-def _resource_setup(memory_bytes: int | None):
-    import resource
+# Python preexec_fn can deadlock in a multithreaded embedding application before
+# Popen returns. Apply limits in a fresh isolated interpreter, then exec fixed
+# argv in the same process/session. No extension/input code runs before limits.
+# https://docs.python.org/3/library/subprocess.html#popen-constructor
+_POSIX_LAUNCH = '''import os, resource, sys
+try:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    if memory_bytes is not None:
-        # RLIMIT_AS is available and exercised on supported POSIX parser workers.
-        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
-    # Parser/extension stdout is capped in the parent; don't permit large files.
-    resource.setrlimit(resource.RLIMIT_FSIZE, (80_000_000, 80_000_000))
+    memory = int(sys.argv[1])
+    if memory:
+        resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (80000000, 80000000))
+except BaseException:
+    os._exit(126)
+try:
+    os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
+except BaseException:
+    os._exit(127)
+'''
 
 
 def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
@@ -76,12 +87,13 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
         except Exception:
             raise WorkerError('resource-bound-unavailable') from None
     try:
+        command = ([sys.executable, '-I', '-S', '-c', _POSIX_LAUNCH,
+                    str(memory_bytes or 0), *argv] if os.name == 'posix' else list(argv))
         process = subprocess.Popen(
-            list(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, cwd=cwd, env=dict(env) if env is not None else worker_environment(),
             start_new_session=os.name == 'posix',
             creationflags=(0x00000004 | 0x00000200) if os.name == 'nt' else 0,
-            preexec_fn=(lambda: _resource_setup(memory_bytes)) if os.name == 'posix' else None,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         if job is not None:
@@ -175,4 +187,8 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
         raise WorkerError(failure)
     if overflow.is_set() or not reader_done.is_set() or not writer_done.is_set():
         raise WorkerError('worker-output-limit')
+    if os.name == 'posix' and process.returncode == 126:
+        raise WorkerError('resource-bound-unavailable')
+    if os.name == 'posix' and process.returncode == 127:
+        raise WorkerError('worker-start-failed')
     return WorkerResult(bytes(output), process.returncode)
