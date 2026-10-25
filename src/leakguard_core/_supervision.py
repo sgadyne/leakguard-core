@@ -32,7 +32,8 @@ def worker_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]
     keep = ('PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL')
     env = {key: os.environ[key] for key in keep if key in os.environ}
     env.update(PYTHONIOENCODING='utf-8', PYTHONUTF8='1', PYTHONNOUSERSITE='1',
-               OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1')
+               OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1',
+               GOMAXPROCS='1', GOMEMLIMIT='384MiB')
     if extra:
         env.update(extra)
     return env
