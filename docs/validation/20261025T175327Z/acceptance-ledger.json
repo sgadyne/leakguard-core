@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "run_id": "20261025T175327Z",
-  "updated_utc": "2026-10-25T21:25:34.771281+00:00",
+  "updated_utc": "2026-10-25T21:30:30.331475+00:00",
   "implementation_validation_commit": "9111c9caa7426148d2412244be00542ac2989bde",
   "implementation_validation_tree": "0474c80494fddb24a833adbd1481d55612d415df",
   "production_core_subtree": "9d3597b34f0471645869b77c396d3136dfd5dc1a",
@@ -144,5 +144,6 @@
   "no_real_data_scans": true,
   "no_release": true,
   "no_optimization_accepted": true,
-  "process_containment_scope": "Tested Linux POSIX worker limits; Go managed-heap target is not a hard address-space limit; native Windows Job Objects unverified."
+  "process_containment_scope": "Tested Linux POSIX worker limits; Go managed-heap target is not a hard address-space limit; native Windows Job Objects unverified.",
+  "native_ci_availability": "native-ci-availability.json"
 }

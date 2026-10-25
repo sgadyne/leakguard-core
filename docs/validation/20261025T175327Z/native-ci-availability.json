@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "checked_utc": "2026-10-25T21:30:30.330923+00:00",
+  "check_scope": "Read-only availability check; no remote repository read/write or workflow dispatch.",
+  "connected_github_tool_available": false,
+  "gh_cli_available": true,
+  "gh_authentication_succeeded": true,
+  "credentials_or_account_details_recorded": false,
+  "prepared_remotes": "Local clone and source bundle only.",
+  "source_documented_project_github_target": null,
+  "source_documented_github_links": "Third-party dependency license links only.",
+  "native_ci_dispatched": false,
+  "reason": "No authoritative GitHub repository target is provided by the prepared remotes or source documentation. Shared-host authentication alone does not identify the intended repository.",
+  "native_platform_results": {
+    "macOS": "unverified",
+    "Windows": "unverified"
+  }
+}

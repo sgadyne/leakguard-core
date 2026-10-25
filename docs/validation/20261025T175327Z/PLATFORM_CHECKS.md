@@ -281,3 +281,9 @@ nested directories.
   native receipt has been inspected.
 
 No native macOS or Windows source/wheel receipt is attached to this handoff yet.
+
+A [read-only CI availability check](native-ci-availability.json) found existing
+GitHub authentication, but the prepared remotes are local clone/bundle paths and
+the source identifies no GitHub repository target. No remote workflow was
+dispatched. Authentication alone does not identify the intended destination; use
+these native commands or an explicitly identified repository for follow-up.
