@@ -326,6 +326,29 @@ class FinalGitAcceptanceTests(unittest.TestCase):
         absent = subprocess.run(['git', '--git-dir=' + str(bare), 'rev-parse', '--verify', 'refs/heads/synthetic-root'], capture_output=True)
         self.assertNotEqual(absent.returncode, 0)
 
+    def test_installed_pre_push_preserves_backup_arguments_stdin_and_failure(self):
+        from leakguard_core import hooks
+        (self.repo / 'candidate.txt').write_text('ordinary clean content\n')
+        self.git('add', 'candidate.txt')
+        self.git('commit', '--no-verify', '-qm', 'synthetic clean root')
+        head = self.git('rev-parse', 'HEAD').decode().strip()
+        self.git('config', 'core.hooksPath', '.git/hooks')
+        directory = self.repo / '.git' / 'hooks'; directory.mkdir(exist_ok=True)
+        (directory / 'pre-push').write_text('#!/bin/sh\nprintf "%s\\n" "$1" "$2" > .chained-args\ncat > .chained-input\nexit 7\n')
+        hooks.install_at(directory)
+        bare = self.repo / 'explicit-private-remote.git'
+        made = subprocess.run(['git', '-c', 'init.templateDir=', 'init', '--bare', '-q', str(bare)], capture_output=True)
+        self.assertEqual(made.returncode, 0)
+        pushed = subprocess.run(['git', 'push', str(bare), 'HEAD:refs/heads/synthetic-clean'], cwd=self.repo, capture_output=True)
+        self.assertNotEqual(pushed.returncode, 0)
+        arguments = (self.repo / '.chained-args').read_text().splitlines()
+        self.assertEqual([Path(value).resolve() for value in arguments], [bare.resolve(), bare.resolve()])
+        fields = (self.repo / '.chained-input').read_text().split()
+        self.assertEqual(len(fields), 4)
+        self.assertEqual(fields[1:], [head, 'refs/heads/synthetic-clean', '0' * len(head)])
+        absent = subprocess.run(['git', '--git-dir=' + str(bare), 'rev-parse', '--verify', 'refs/heads/synthetic-clean'], capture_output=True)
+        self.assertNotEqual(absent.returncode, 0)
+
     def test_actual_production_commit_count_bound_fails_closed(self):
         from leakguard_core import models as m
         from leakguard_core.git_scanning import MAX_COMMITS
