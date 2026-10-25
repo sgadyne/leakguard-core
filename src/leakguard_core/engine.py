@@ -1174,7 +1174,7 @@ class ScanService:
                     if not admit_finding(part):
                         break
                     observations.append(observation)
-                    findings.append(self._finding(snapshot, part, 'known-material-' + observation.kind, observation.line, observation.end_line, 'review' if observation.kind == 'license' else 'block', 'known-material'))
+                    findings.append(self._finding(snapshot, part, 'known-material-' + observation.kind, observation.line, observation.end_line, 'review' if observation.kind == 'license' else 'block', 'known-material', mode=policy.mode))
             if finding_admission_stopped:
                 break
             if time.monotonic() >= deadline or (cancel and cancel()):
@@ -1185,7 +1185,7 @@ class ScanService:
                 for item in detected:
                     if not admit_finding(part):
                         break
-                    findings.append(self._finding(snapshot, part, item.rule, item.start_line, item.end_line, item.severity, 'gitleaks'))
+                    findings.append(self._finding(snapshot, part, item.rule, item.start_line, item.end_line, item.severity, 'gitleaks', mode=policy.mode))
             except Exception as error:
                 issues.append(m.CoverageIssue(self._error_code(getattr(error, 'code', 'detector-failed')), source, part.part_id, True))
             if finding_admission_stopped:
@@ -1199,7 +1199,7 @@ class ScanService:
                     for item in plugins.detect([instance], part.text, source.path, part.part_id, format_id=part.format_id, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), limits=limits, cancel=cancel):
                         if not admit_finding(part):
                             break
-                        findings.append(self._finding(snapshot, part, item.rule, item.line, item.line, item.severity, plugins.detector_id(instance)))
+                        findings.append(self._finding(snapshot, part, item.rule, item.line, item.line, item.severity, plugins.detector_id(instance), mode=policy.mode))
                 except Exception as error:
                     issues.append(m.CoverageIssue(self._error_code(getattr(error, 'code', 'detector-failed')), source, part.part_id, True))
                 if finding_admission_stopped:
@@ -1228,17 +1228,19 @@ class ScanService:
                 return omission.id
         return None
 
-    def _finding(self, snapshot, part, rule, first, last, severity, detector_id):
+    def _finding(self, snapshot, part, rule, first, last, severity, detector_id, *, mode=None):
         from . import models as m
         if isinstance(first, bool) or isinstance(last, bool) or not 1 <= first <= last <= part.text.count('\n') + 1:
             raise ValueError('detector-output-invalid')
-        detector_severity = 'review' if rule in self.config.get('review_only_rules', ()) else severity
+        detector_severity = severity
+        inventory_review = mode is m.ScanMode.INVENTORY and detector_id == 'gitleaks' and rule in self.config.get('review_only_rules', ())
+        effective_severity = 'review' if inventory_review else severity
         classification = 'heuristic' if rule == 'generic-api-key' else 'credential-candidate'
-        final_severity = detector_severity
+        final_severity = effective_severity
         proof_id = None
         if detector_id == 'gitleaks':
             try:
-                described = finding_details.describe({'path': snapshot.source.path, 'part': part.part_id, 'rule': rule, 'line': first, 'end_line': last, 'severity': detector_severity}, snapshot.data if part.part_id == 'text' else None, snapshot.context.read)
+                described = finding_details.describe({'path': snapshot.source.path, 'part': part.part_id, 'rule': rule, 'line': first, 'end_line': last, 'severity': effective_severity}, snapshot.data if part.part_id == 'text' else None, snapshot.context.read)
                 final_severity = described['severity']
                 classification = described.get('classification', classification)
                 m.FindingSeverity(final_severity)
@@ -1248,7 +1250,7 @@ class ScanService:
             except Exception:
                 # Failure to establish an exemption cannot discard the detector's
                 # original candidate or reduce its configured severity.
-                final_severity = detector_severity
+                final_severity = effective_severity
                 classification = 'heuristic' if rule == 'generic-api-key' else 'credential-candidate'
                 proof_id = None
         identity = [snapshot.source.kind.value, snapshot.source.path, snapshot.source.repository, snapshot.source.commit, snapshot.source.index_tree_oid, snapshot.content.digest, part.part_id, first, last, rule, detector_id]

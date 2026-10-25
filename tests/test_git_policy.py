@@ -256,3 +256,46 @@ class GitContextEnvironmentTests(unittest.TestCase):
             with self.assertRaises(AcquisitionError) as failure:
                 repository_root(Path(folder), deadline=__import__('time').monotonic() + 5, cancel=lambda: True)
             self.assertEqual(failure.exception.code, 'cancelled')
+
+
+class InventoryRulePolicyTests(unittest.TestCase):
+    setUp = GitSnapshotTests.setUp
+    tearDown = GitSnapshotTests.tearDown
+    git = GitSnapshotTests.git
+
+    def test_companion_review_rule_cannot_downgrade_actual_index_credential(self):
+        from leakguard_core import models as m
+        candidate = self.repo / 'candidate.txt'
+        candidate.write_text('client_secret = "SyntheticOnlyInventoryRuleM7kQ2vR9"\n')
+        self.git('add', '.')
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE), 'review_only_rules': ['literal-client-secret'], 'audit_scopes': {'local': str(self.repo)}, 'profiles': {'companion': {'sources': ['local']}}})
+        try:
+            report = service.scan_git(self.repo, request=m.GitRequest(m.GitRequestKind.INDEX), limits=m.ScanLimits(30, 10))
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.BLOCK)
+            matching = [f for r in report.results for f in r.findings if f.rule == 'literal-client-secret']
+            self.assertEqual(len(matching), 1)
+            self.assertEqual((matching[0].detector_severity, matching[0].severity), (m.DetectorSeverity.BLOCK, m.FindingSeverity.BLOCK))
+            inventory = service.scan((m.FileInput(candidate),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10), use_cache=False)
+            finding = inventory.results[0].findings[0]
+            self.assertEqual((finding.detector_severity, finding.severity), (m.DetectorSeverity.BLOCK, m.FindingSeverity.REVIEW))
+        finally:
+            service.close()
+
+    def test_explicit_git_mode_for_bytes_and_plugin_blocks_keeps_native_severity(self):
+        from leakguard_core import models as m, backends, plugins
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE), 'review_only_rules': ['literal-client-secret']})
+        try:
+            with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-client-secret', 1, 1),)):
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.git(), limits=m.ScanLimits(30, 1), use_cache=False)
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.BLOCK)
+            service._plugins = [object()]
+            service._cache_eligible = False
+            for policy in (m.ScanPolicy.inventory(), m.ScanPolicy.git()):
+                with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-client-secret', 1, 1),)), patch.object(plugins, 'detect', return_value=(plugins.Finding('literal-client-secret', 1, 'block'),)):
+                    report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=policy, limits=m.ScanLimits(30, 1), use_cache=False)
+                finding = report.results[0].findings[0]
+                self.assertEqual((finding.detector_severity, finding.severity), (m.DetectorSeverity.BLOCK, m.FindingSeverity.BLOCK))
+                if policy.mode is m.ScanMode.INVENTORY:
+                    self.assertEqual(finding.detector_id, 'plugin-legacy')
+        finally:
+            service.close()
