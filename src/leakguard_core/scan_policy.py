@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 import hashlib
 import importlib.metadata
+import importlib.machinery
 import json
 import os
 from pathlib import Path
@@ -84,7 +85,78 @@ def _distribution_identity(name):
             'requires': sorted(requirements)}, complete
 
 
-def runtime_identity(config=None, binary=None, plugin_specs=()):
+def _module_artifacts(name):
+    """Locate explicitly configured module bytes without importing parent code."""
+    search = list(sys.path)
+    artifacts = []
+    prefix = []
+    try:
+        for component in name.split('.'):
+            prefix.append(component)
+            spec = importlib.machinery.PathFinder.find_spec('.'.join(prefix), search)
+            if spec is None:
+                return [('unavailable', 'unavailable')]
+            if spec.origin and spec.origin not in {'built-in', 'frozen'}:
+                artifacts.append(('.'.join(prefix), _file_identity(spec.origin)))
+            search = list(spec.submodule_search_locations or ())
+        # Local/editable packages have no verified distribution closure. Hash
+        # their own Python implementation as identity, while reuse stays disabled.
+        if search:
+            count = 0
+            for directory in search:
+                for path in sorted(Path(directory).rglob('*.py')):
+                    count += 1
+                    if count > 10_000:
+                        return artifacts + [('closure', 'unavailable')]
+                    artifacts.append((str(path.relative_to(directory)), _file_identity(path)))
+        return artifacts
+    except (ImportError, AttributeError, OSError, ValueError):
+        return [('unavailable', 'unavailable')]
+
+
+def _dependency_closure(names):
+    # Requirement markers must be evaluated rather than interpreting development
+    # extras as runtime dependencies. packaging is a small maintained dependency.
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:
+        Requirement = None
+    pending = list(dict.fromkeys(names)); seen = set(); closure = []; complete = True
+    while pending:
+        name = pending.pop()
+        key = re.sub('[-_.]+', '-', name).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(seen) > 1000:
+            return closure, False
+        identity, valid = _distribution_identity(name)
+        closure.append(identity); complete = complete and valid
+        for raw in identity.get('requires', ()):
+            if Requirement is None:
+                complete = False
+                continue
+            try:
+                requirement = Requirement(raw)
+                marker = requirement.marker
+                active = marker is None or marker.evaluate({'extra': ''})
+                # Parsers can use installed optional backends without an explicit
+                # extra at invocation. Include their installed-or-missing state,
+                # excluding build/documentation/test-only requirements.
+                if marker is not None and not active and 'extra' in str(marker):
+                    extras = set(re.findall(r"extra == ['\"]([^'\"]+)['\"]", str(marker)))
+                    runtime_extras = extras - {'dev', 'docs', 'doc', 'test', 'tests', 'testing', 'lint'}
+                    active = any(marker.evaluate({'extra': extra}) for extra in runtime_extras)
+                    if not extras:
+                        complete = False
+                if active:
+                    pending.append(requirement.name)
+            except Exception:
+                complete = False
+    return sorted(closure, key=lambda item: item['name'].lower()), complete
+
+
+def runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manifests=()):
     """Hash actual behavior-bearing bytes; unknown extension closure disables reuse."""
     config = config or {}
     root = Path(__file__).resolve().parent
@@ -94,32 +166,35 @@ def runtime_identity(config=None, binary=None, plugin_specs=()):
     if executable and not Path(executable).is_file():
         executable = shutil.which(str(executable))
     binary_id = _file_identity(executable) if executable else 'unavailable'
-    parsers = []; complete = binary_id != 'unavailable'
-    for name in ('pypdf', 'olefile'):
-        identity, verified = _distribution_identity(name)
-        parsers.append(identity); complete = complete and verified
-        # Conservative base dependency closure. Optional extra requirements are
-        # fingerprinted with their installed-or-missing state as well.
-        for requirement in identity.get('requires', ()):
-            match = re.match(r'([A-Za-z0-9_.-]+)', requirement)
-            if not match:
-                complete = False; continue
-            dependency, valid = _distribution_identity(match.group(1))
-            parsers.append(dependency); complete = complete and valid
-            # Dependencies of dependencies need a complete manifest. Keep scans
-            # executable but uncacheable rather than claim an incomplete closure.
-            if dependency.get('requires'):
-                complete = False
-    rules = config.get('gitleaks_config') or root / 'rules.toml'
-    value = {'abi': 'leakguard-runtime-1', 'core': core,
+    specs = list(plugin_specs or config.get('plugins', ()))
+    dependencies = ['pypdf', 'olefile']
+    module_artifacts = []
+    try:
+        distributions = importlib.metadata.packages_distributions() if specs else {}
+    except Exception:
+        distributions = {}
+    for spec in specs:
+        module = spec['module']
+        module_artifacts.append((module, _module_artifacts(module)))
+        dependencies.extend(distributions.get(module.split('.')[0], ()))
+    manifests = []
+    for manifest in plugin_manifests:
+        if manifest is not None:
+            manifests.append(asdict(manifest))
+            dependencies.extend(item.name for item in manifest.dependencies)
+    for script in config.get('script_checks', ()):
+        dependencies.extend(script.get('dependencies', ()))
+    closure, complete = _dependency_closure(dependencies)
+    value = {'abi': 'leakguard-runtime-2', 'core': core,
              'python': [sys.implementation.name, platform.python_version(), _file_identity(sys.executable)],
              'platform': [platform.system(), platform.machine()], 'gitleaks': binary_id,
-             'rules': _file_identity(rules), 'parsers': parsers,
-             'plugins': list(plugin_specs or config.get('plugins', ())),
+             'rules': _file_identity(config.get('gitleaks_config') or root / 'rules.toml'),
+             'dependencies': closure, 'plugins': specs, 'plugin_artifacts': module_artifacts,
+             'manifests': manifests,
              'scripts': [{'spec': spec, 'artifacts': [(index, _file_identity(value)) for index, value in enumerate(spec['argv']) if Path(value).is_file()]} for spec in config.get('script_checks', ())]}
-    if value['plugins'] or value['scripts'] or config.get('credential_store'):
+    if specs or value['scripts'] or config.get('credential_store'):
         complete = False
-    return _digest(value), complete and value['rules'] != 'unavailable'
+    return _digest(value), complete and binary_id != 'unavailable' and value['rules'] != 'unavailable'
 
 
 def evaluate(results, *, policy, policy_id, enumeration_complete=True, issues=(),

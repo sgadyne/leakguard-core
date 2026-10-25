@@ -56,8 +56,8 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
                cwd: str | os.PathLike | None = None,
                cancel: Callable[[], bool] | None = None) -> WorkerResult:
     """Execute fixed argv with bounded output, timeout, and owned group cleanup."""
-    if (not argv or any(type(x) is not str or not x or '\x00' in x for x in argv)
-            or type(data) is not bytes or len(data) > max_input_bytes
+    if (isinstance(argv, (str, bytes)) or not argv or any(type(x) is not str or not x or '\x00' in x for x in argv)
+            or type(data) is not bytes or type(max_input_bytes) is not int or max_input_bytes <= 0 or len(data) > max_input_bytes
             or not isinstance(timeout, (float, int)) or isinstance(timeout, bool)
             or not math.isfinite(timeout) or timeout <= 0
             or type(max_output_bytes) is not int or max_output_bytes <= 0):
@@ -126,7 +126,6 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
     except BaseException:
         failure = 'cancelled'
-        raise
     finally:
         # Kill the group even after the direct child exits: descendants can retain
         # pipes or continue working after their parent has returned a response.
