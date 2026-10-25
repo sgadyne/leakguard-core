@@ -232,6 +232,74 @@ class BackendIsolationTests(unittest.TestCase):
                         self.assertNotIn(str(root), stdout.getvalue() + stderr.getvalue())
                     worker.assert_not_called()
 
+    def test_top_level_rules_are_snapshotted_before_worker_launch(self):
+        """Mutating the selected TOML after admission cannot change worker rules."""
+        with tempfile.TemporaryDirectory(prefix='leakguard-rule-snapshot-race-') as temporary:
+            root = Path(temporary)
+            top_config, extension, extension_bytes = _write_two_level_rules(root)
+            original_top = top_config.read_bytes()
+            replacement = (
+                'title = "synthetic no-detection replacement"\n'
+                '[extend]\nuseDefault = false\n'
+                '[[rules]]\n'
+                'id = "synthetic-never-matches"\n'
+                'description = "Synthetic nonmatching replacement rule"\n'
+                'regex = "NEVER_MATCH_FOR_LEAKGUARD"\n'
+                'keywords = ["NEVER_MATCH_FOR_LEAKGUARD"]\n'
+            ).encode('utf-8')
+            replacement_config = root / 'replacement.toml'
+            replacement_config.write_bytes(replacement)
+            self.assertFalse(
+                _raw_stdin_report(self.binary, replacement_config, root, TEXT),
+                'the replacement config must not detect the synthetic input',
+            )
+
+            original_cwd = Path.cwd()
+            captured = {}
+            real_run_worker = backends.run_worker
+            try:
+                os.chdir(root)
+
+                def mutate_original_before_launch(argv, data, **kwargs):
+                    config_argument = Path(argv[argv.index('--config') + 1]).resolve()
+                    worker_cwd = Path(kwargs['cwd']).resolve()
+                    stage_root = next(
+                        path for path in (worker_cwd, *worker_cwd.parents)
+                        if path.name.startswith('leakguard-backend-')
+                    )
+                    staged_files = tuple(path for path in stage_root.rglob('*') if path.is_file())
+                    staged_bytes = tuple(path.read_bytes() for path in staged_files)
+                    captured.update(
+                        config_argument=config_argument,
+                        config_bytes=config_argument.read_bytes() if config_argument.is_file() else None,
+                        worker_cwd=worker_cwd,
+                        stage_root=stage_root,
+                        staged_files=staged_files,
+                        staged_bytes=staged_bytes,
+                    )
+                    top_config.write_bytes(replacement)
+                    return real_run_worker(argv, data, **kwargs)
+
+                with patch.object(backends, 'run_worker', side_effect=mutate_original_before_launch):
+                    findings = backends.detect(TEXT, binary=self.binary, rules=top_config)
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertIn(
+                'synthetic-extended-credential', {item.rule for item in findings},
+                'the worker must use the rule snapshot admitted before the source config changed',
+            )
+            self.assertNotEqual(captured['config_argument'], top_config.resolve())
+            self.assertTrue(captured['config_argument'].is_relative_to(captured['stage_root']))
+            self.assertFalse(captured['config_argument'].is_relative_to(captured['worker_cwd']))
+            self.assertEqual(captured['config_bytes'], original_top)
+            self.assertIn(original_top, captured['staged_bytes'])
+            self.assertIn(extension_bytes, captured['staged_bytes'])
+            self.assertNotIn(TEXT.encode('utf-8'), b'\n'.join(captured['staged_bytes']))
+            self.assertNotIn(SYNTHETIC.encode('utf-8'), b'\n'.join(captured['staged_bytes']))
+            self.assertFalse(captured['stage_root'].exists(), 'private top and inherited rule snapshots must be removed')
+            self.assertFalse(any(path.exists() for path in captured['staged_files']))
+
     def test_relative_extended_rule_change_invalidates_persistent_runtime_identity(self):
         """Hash two levels of relative rules and disable reuse for inheritance."""
         with tempfile.TemporaryDirectory(prefix='leakguard-extended-rules-') as temporary:
