@@ -190,6 +190,22 @@ class PublicApiTests(unittest.TestCase):
         })
         self.assertEqual(json.loads(report.to_json()), payload)
 
+    def test_typed_scan_summary_does_not_claim_a_git_operation_was_blocked(self):
+        text = presentation.render(_report(
+            verdict=DecisionVerdict.BLOCK, severity=FindingSeverity.BLOCK,
+        ))
+        self.assertIn("BLOCKING FINDINGS", text)
+        self.assertIn("Blocking findings are present", text)
+        self.assertNotIn("blocked this Git operation", text)
+
+    def test_typed_scan_summary_does_not_claim_a_git_operation_was_blocked(self):
+        text = presentation.render(_report(
+            verdict=DecisionVerdict.BLOCK, severity=FindingSeverity.BLOCK,
+        ))
+        self.assertIn("BLOCKING FINDINGS", text)
+        self.assertIn("Blocking findings are present", text)
+        self.assertNotIn("blocked this Git operation", text)
+
     def test_report_json_preserves_surrogateescaped_paths_as_utf8_safe_json(self):
         report = _report()
         invalid_path = "bad-" + bytes([0xff]).decode("utf-8", "surrogateescape") + ".txt"

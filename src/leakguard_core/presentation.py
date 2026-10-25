@@ -112,7 +112,7 @@ def render_scan_report(report: ScanReport, report_path=None, limit=20):
     verdict_titles = {
         DecisionVerdict.ALLOW: "ALLOW",
         DecisionVerdict.ALLOW_WITH_OMISSIONS: "ALLOW WITH OMISSIONS",
-        DecisionVerdict.BLOCK: "BLOCKED",
+        DecisionVerdict.BLOCK: "BLOCKING FINDINGS",
         DecisionVerdict.INCOMPLETE: "INCOMPLETE",
     }
     counts = report.counts
@@ -157,7 +157,7 @@ def render_scan_report(report: ScanReport, report_path=None, limit=20):
     if report_path:
         lines.append("Report: " + clean(report_path))
     if report.decision.verdict is DecisionVerdict.BLOCK:
-        lines.append("LeakGuard blocked this Git operation; finding values remain redacted.")
+        lines.append("Blocking findings are present; finding values remain redacted.")
     return '\n'.join(lines)
 
 
