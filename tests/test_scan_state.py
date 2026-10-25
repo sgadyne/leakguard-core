@@ -233,3 +233,80 @@ class ProofBudgetTests(unittest.TestCase):
         self.assertTrue(validate())
         data['module.py'] = b'changed synthetic bytes'
         self.assertFalse(validate())
+
+
+class QueueTests(unittest.TestCase):
+    make_result = StoreLifecycleTests.make_result
+    def test_expired_cycle_cannot_complete_work_or_resolve_newer_observation(self):
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-lease-') as folder:
+                store = store_type(folder) if store_type is SQLiteScanStore else store_type()
+                positive = self.make_result()
+                try:
+                    old = store.acquire_cycle('synthetic', None, lease_seconds=60)
+                    store.enqueue_work(old, ((positive.source.path, 'file', 0),))
+                    old_claim = store.claim_work(old)
+                    old_generation = store.reserve(positive.source)
+                    self.assertIsNone(store.acquire_cycle('synthetic', None, lease_seconds=60))
+                    if store_type is MemoryScanStore:
+                        store.cycles['synthetic']['lease_until'] = 0
+                    else:
+                        store.conn.execute('UPDATE audit_cycles SET lease_until=0'); store.conn.commit()
+                    new = store.acquire_cycle('synthetic', None, lease_seconds=60)
+                    new_claim = store.claim_work(new)
+                    store.record_result(positive, generation=store.reserve(positive.source), work=new_claim)
+                    store.record_result(self.make_result(findings=False), generation=old_generation, work=old_claim)
+                    self.assertEqual(store.query_findings()[0]['state'], 'active')
+                    self.assertTrue(store.cycle_status(new)['complete'])
+                    store.release_cycle(old)
+                    self.assertTrue(store.lease_valid(new))
+                    store.release_cycle(new)
+                finally:
+                    store.close()
+
+    def test_typed_audit_resumes_file_and_directory_budgets_without_mirror(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-audit-') as folder:
+                root = Path(folder)
+                corpus = root / 'corpus'; corpus.mkdir()
+                (corpus / 'one.txt').write_text('one')
+                (corpus / 'two.txt').write_text('two')
+                config = {'audit_scopes': {'synthetic': str(corpus)}, 'gitleaks_executable': str(engine.EXE)}
+                store = store_type(root / 'store', config=config) if store_type is SQLiteScanStore else store_type(config=config)
+                service = engine.ScanService(config, state_dir=root / 'forbidden-mirror', store=store)
+                try:
+                    with patch.object(backends, 'detect', return_value=()):
+                        partial_dir = service.audit('synthetic', limits=m.ScanLimits(30, 10, max_directory_entries=1))
+                        self.assertEqual(partial_dir.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                        self.assertGreater(partial_dir.coverage.pending_directories, 0)
+                        partial_files = service.audit('synthetic', limits=m.ScanLimits(30, 1))
+                        self.assertEqual(partial_files.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                        final = service.audit('synthetic', limits=m.ScanLimits(30, 10))
+                    self.assertTrue(final.coverage.enumeration_complete)
+                    self.assertEqual(final.coverage.pending_files, 0)
+                    self.assertEqual(final.coverage.pending_directories, 0)
+                    self.assertEqual(final.decision.verdict, m.DecisionVerdict.ALLOW)
+                    self.assertFalse((root / 'forbidden-mirror').exists())
+                finally:
+                    service.close(); store.close()
+
+    def test_failed_directory_stays_pending_and_never_completes_cycle(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore
+        with tempfile.TemporaryDirectory(prefix='leakguard-enumerate-') as folder:
+            root = Path(folder)
+            store = MemoryScanStore()
+            service = engine.ScanService({'audit_scopes': {'synthetic': str(root)}, 'gitleaks_executable': str(engine.EXE)}, store=store)
+            try:
+                for _ in range(3):
+                    with patch('os.scandir', side_effect=PermissionError()), patch.object(backends, 'detect', return_value=()):
+                        report = service.audit('synthetic', limits=m.ScanLimits(30, 10))
+                    self.assertFalse(report.coverage.enumeration_complete)
+                    self.assertEqual(report.coverage.pending_directories, 1)
+                    self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                self.assertTrue(next(iter(store.work.values()))['failed'])
+            finally:
+                service.close()

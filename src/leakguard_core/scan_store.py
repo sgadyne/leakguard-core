@@ -5,7 +5,7 @@ an ephemeral scanner and as a reference for application-owned encrypted stores.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -30,12 +30,26 @@ def source_key(source: m.SourceRef, scope: str = '') -> str:
     return hashlib.sha256(json.dumps(value, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest()
 
 
+@dataclass(frozen=True)
+class WorkLease:
+    scope: str
+    generation: int
+    owner: str
+
+
+@dataclass(frozen=True)
+class WorkClaim:
+    lease: WorkLease
+    path: str
+    kind: str
+
+
 @runtime_checkable
 class ScanStore(Protocol):
     def reserve(self, source: m.SourceRef, *, scope: str = '') -> int: ...
     def get_cached(self, cache_key: str) -> m.ScanResult | None: ...
     def record_result(self, result: m.ScanResult, *, generation: int,
-                      cache_key: str | None = None, scope: str = '') -> str: ...
+                      cache_key: str | None = None, scope: str = '', work: WorkClaim | None = None) -> str: ...
     def record_report(self, report: m.ScanReport) -> None: ...
     def latest_report(self, repository: str | None = None) -> m.ScanReport | None: ...
     def query_findings(self, *, state: str = 'current', profile: str | None = None) -> tuple[dict, ...]: ...
@@ -52,6 +66,9 @@ class MemoryScanStore:
         self.reports = []
         self.states = {}
         self.current = {}
+        self.cycles = {}
+        self.work = {}
+        self.locations = {}
 
     def reserve(self, source, *, scope=''):
         key = source_key(source, scope)
@@ -63,13 +80,13 @@ class MemoryScanStore:
         entry = self.cache.get(cache_key)
         return replace(self.results[entry], reused_from=self.results[entry].reused_from or entry) if entry else None
 
-    def record_result(self, result, *, generation, cache_key=None, scope=''):
+    def record_result(self, result, *, generation, cache_key=None, scope='', work=None):
         if type(result) is not m.ScanResult:
             raise StateError()
         scan_id = uuid.uuid4().hex
         self.results[scan_id] = result
         key = source_key(result.source, scope)
-        if self.generations.get(key) != generation:
+        if self.generations.get(key) != generation or work is not None and not self.lease_valid(work.lease):
             return scan_id
         if result.coverage is m.CoverageState.COMPLETE and result.identity.cache_eligible and cache_key:
             self.cache[cache_key] = scan_id
@@ -78,6 +95,9 @@ class MemoryScanStore:
             comparable = prior is not None and prior.identity.policy_id == result.identity.policy_id and prior.identity.runtime_id == result.identity.runtime_id
             _transition(self.states, key, result, comparable)
             self.current[key] = result
+            if result.content:
+                self.locations[result.source.path] = {'size': result.content.size_bytes, 'digest': result.content.digest, 'present': True}
+        self._finish_work(work, result)
         return scan_id
 
     def record_report(self, report):
@@ -103,6 +123,101 @@ class MemoryScanStore:
 
     def close(self):
         pass
+
+    def acquire_cycle(self, scope, root, *, lease_seconds):
+        import time
+        now = time.time()
+        current = self.cycles.get(scope)
+        if current and current['owner'] and current['lease_until'] > now:
+            return None
+        fresh = current is None or current['completed'] is not None
+        generation = (current['generation'] + 1) if current and fresh else current['generation'] if current else 1
+        owner = uuid.uuid4().hex
+        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None}
+        self.cycles[scope] = cycle
+        lease = WorkLease(scope, generation, owner)
+        for key, work in self.work.items():
+            if key[:2] == (scope, generation):
+                work['claimed'] = None
+        if fresh and root is not None:
+            self.enqueue_work(lease, ((str(root), 'directory', 10),))
+        return lease
+
+    def lease_valid(self, lease):
+        import time
+        cycle = self.cycles.get(lease.scope)
+        return bool(cycle and cycle['generation'] == lease.generation and cycle['owner'] == lease.owner and cycle['lease_until'] > time.time())
+
+    def enqueue_work(self, lease, entries, *, refresh=False):
+        if not self.lease_valid(lease):
+            raise StateError()
+        for path, kind, priority in entries:
+            key = (lease.scope, lease.generation, path, kind)
+            if refresh or key not in self.work:
+                self.work[key] = {'priority': priority, 'attempts': 0, 'failed': False, 'done': False, 'claimed': None}
+
+    def claim_work(self, lease):
+        if not self.lease_valid(lease):
+            raise StateError()
+        pending = [(key, row) for key, row in self.work.items() if key[:2] == (lease.scope, lease.generation) and not row['done'] and not row['failed'] and row['claimed'] is None]
+        if not pending:
+            return None
+        key, row = min(pending, key=lambda item: (item[1]['priority'], item[0][3] != 'file', item[0][2]))
+        row['claimed'] = lease.owner
+        return WorkClaim(lease, key[2], key[3])
+
+    def finish_directory(self, claim, *, success):
+        if not self.lease_valid(claim.lease):
+            raise StateError()
+        row = self.work[(claim.lease.scope, claim.lease.generation, claim.path, claim.kind)]
+        row['done'] = success is True
+        if success is False:
+            row['attempts'] += 1
+            row['failed'] = row['attempts'] >= 3
+
+    def _finish_work(self, work, result):
+        if work is None:
+            return
+        row = self.work[(work.lease.scope, work.lease.generation, work.path, work.kind)]
+        row['done'] = result.coverage is not m.CoverageState.INCOMPLETE
+        if not row['done']:
+            row['attempts'] += 1
+            row['failed'] = row['attempts'] >= 3
+
+    def cycle_status(self, lease):
+        pending = [(key, row) for key, row in self.work.items() if key[:2] == (lease.scope, lease.generation) and not row['done']]
+        return {'complete': not pending, 'pending_files': sum(key[3] == 'file' for key, _ in pending), 'pending_directories': sum(key[3] == 'directory' for key, _ in pending), 'failed': sum(row['failed'] for _, row in pending), 'cycle_id': str(lease.generation)}
+
+    def release_cycle(self, lease):
+        if not self.lease_valid(lease):
+            return
+        status = self.cycle_status(lease)
+        cycle = self.cycles[lease.scope]
+        cycle['owner'] = None
+        cycle['lease_until'] = 0
+        if status['complete']:
+            cycle['completed'] = datetime.now(timezone.utc).isoformat()
+        for key, row in self.work.items():
+            if key[:2] == (lease.scope, lease.generation):
+                row['claimed'] = None
+
+    def invalidate_scope(self, root, *, reason='source-unavailable'):
+        from pathlib import Path
+        root = Path(root).absolute()
+        for row in self.states.values():
+            path = Path(row['source']['path']).absolute()
+            if root == path or root in path.parents:
+                row.update(state='unknown', resolved_at=None, state_reason=reason)
+
+    def record_metadata(self, path, size):
+        self.locations[path] = {'size': size, 'digest': None, 'present': True}
+
+    def record_event(self, path, kind, *, old_path=None, when=None):
+        if kind not in {'changed', 'created', 'deleted', 'renamed'}:
+            raise StateError()
+        for row in self.states.values():
+            if row['source']['path'] in {path, old_path}:
+                row.update(state='unknown', resolved_at=None, state_reason='source-event')
 
 
 def _source_data(source):
@@ -215,7 +330,7 @@ CREATE TABLE IF NOT EXISTS finding_state(input_key TEXT,finding_id TEXT,state TE
 CREATE INDEX IF NOT EXISTS finding_state_query ON finding_state(state,path,rule);
 CREATE TABLE IF NOT EXISTS scan_cache(cache_key TEXT PRIMARY KEY,scan_id TEXT NOT NULL REFERENCES input_scans(scan_id));
 CREATE TABLE IF NOT EXISTS audit_cycles(scope TEXT PRIMARY KEY,generation INTEGER,started TEXT,completed TEXT,failed INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_until REAL);
-CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,generation,path,kind));
+CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,PRIMARY KEY(scope,generation,path,kind));
 '''
 
 
@@ -258,6 +373,7 @@ def open_database(state_dir):
             'cache': [('policy', 'TEXT'), ('digest', 'TEXT'), ('payload', 'TEXT'), ('executed_at', 'TEXT')],
             'directories': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
             'files': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
+            'audit_work': [('done', 'INTEGER NOT NULL DEFAULT 0'), ('claimed', 'TEXT')],
         }.items():
             present = {row[1] for row in conn.execute('PRAGMA table_info(' + table + ')')}
             for column, declaration in additions:
@@ -318,7 +434,7 @@ class SQLiteScanStore:
                 raise StateError() from None
         return None
 
-    def record_result(self, result, *, generation, cache_key=None, scope=''):
+    def record_result(self, result, *, generation, cache_key=None, scope='', work=None):
         if type(result) is not m.ScanResult:
             raise StateError()
         key = source_key(result.source, scope)
@@ -330,7 +446,7 @@ class SQLiteScanStore:
                 for finding in result.findings:
                     self.conn.execute('INSERT INTO scan_findings VALUES(?,?,?)', (scan_id, finding.id, json.dumps(_finding_data(finding), separators=(',', ':'))))
                 previous = self.conn.execute('SELECT generation,policy_id,runtime_id FROM current_inputs WHERE input_key=?', (key,)).fetchone()
-                if not previous or previous[0] != generation:
+                if not previous or previous[0] != generation or work is not None and not self._lease_valid(work.lease):
                     return scan_id
                 if complete and result.identity.cache_eligible and cache_key:
                     self.conn.execute('INSERT OR REPLACE INTO scan_cache VALUES(?,?)', (cache_key, scan_id))
@@ -341,6 +457,7 @@ class SQLiteScanStore:
                     for (_, finding_id), row in states.items():
                         self.conn.execute('INSERT OR REPLACE INTO finding_state VALUES(?,?,?,?,?,?)', (key, finding_id, row['state'], row['rule'], result.source.path, json.dumps(row, separators=(',', ':'))))
                     self._record_location(result)
+                self._finish_work(work, result)
                 self.conn.execute('UPDATE current_inputs SET latest_attempt_id=?,last_complete_scan_id=CASE WHEN ? THEN ? ELSE last_complete_scan_id END,current_state=?,state_reason=?,policy_id=?,runtime_id=? WHERE input_key=? AND generation=?', (scan_id, complete, scan_id, 'verified' if complete else 'unknown', 'complete-content-scan' if complete else 'incomplete-scan', result.identity.policy_id, result.identity.runtime_id, key, generation))
             return scan_id
         except Exception as error:
@@ -389,3 +506,107 @@ class SQLiteScanStore:
 
     def close(self):
         self.conn.close()
+
+    def _lease_valid(self, lease):
+        import time
+        row = self.conn.execute('SELECT generation,owner,lease_until FROM audit_cycles WHERE scope=?', (lease.scope,)).fetchone()
+        return bool(row and row[0] == lease.generation and row[1] == lease.owner and row[2] > time.time())
+
+    def lease_valid(self, lease):
+        return self._lease_valid(lease)
+
+    def acquire_cycle(self, scope, root, *, lease_seconds):
+        import time
+        try:
+            self.conn.execute('BEGIN IMMEDIATE')
+            now = time.time()
+            row = self.conn.execute('SELECT generation,completed,owner,lease_until FROM audit_cycles WHERE scope=?', (scope,)).fetchone()
+            if row and row[2] and row[3] > now:
+                self.conn.rollback()
+                return None
+            fresh = not row or row[1] is not None
+            generation = row[0] + 1 if row and fresh else row[0] if row else 1
+            owner = uuid.uuid4().hex
+            self.conn.execute('INSERT INTO audit_cycles(scope,generation,started,completed,failed,owner,lease_until) VALUES(?,?,?,NULL,0,?,?) ON CONFLICT(scope) DO UPDATE SET generation=excluded.generation,started=CASE WHEN ? THEN excluded.started ELSE started END,completed=NULL,owner=excluded.owner,lease_until=excluded.lease_until', (scope, generation, datetime.now(timezone.utc).isoformat(), owner, now + lease_seconds, fresh))
+            self.conn.execute('UPDATE audit_work SET claimed=NULL WHERE scope=? AND generation=?', (scope, generation))
+            if fresh and root is not None:
+                self.conn.execute('INSERT OR IGNORE INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,10)', (scope, generation, str(root), 'directory'))
+            self.conn.commit()
+            return WorkLease(scope, generation, owner)
+        except Exception:
+            self.conn.rollback()
+            raise StateError() from None
+
+    def enqueue_work(self, lease, entries, *, refresh=False):
+        entries = tuple(entries)
+        if len(entries) > 1000:
+            raise StateError()
+        with self.conn:
+            if not self._lease_valid(lease):
+                raise StateError()
+            self.conn.executemany('INSERT INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,?) ON CONFLICT(scope,generation,path,kind) DO UPDATE SET done=CASE WHEN ? THEN 0 ELSE done END,attempts=CASE WHEN ? THEN 0 ELSE attempts END,failed=CASE WHEN ? THEN 0 ELSE failed END,claimed=CASE WHEN ? THEN NULL ELSE claimed END', ((lease.scope, lease.generation, path, kind, priority, refresh, refresh, refresh, refresh) for path, kind, priority in entries))
+
+    def claim_work(self, lease):
+        try:
+            self.conn.execute('BEGIN IMMEDIATE')
+            if not self._lease_valid(lease):
+                raise StateError()
+            row = self.conn.execute("SELECT path,kind FROM audit_work WHERE scope=? AND generation=? AND done=0 AND failed=0 AND claimed IS NULL ORDER BY priority,CASE kind WHEN 'file' THEN 0 ELSE 1 END,path LIMIT 1", (lease.scope, lease.generation)).fetchone()
+            if row:
+                self.conn.execute('UPDATE audit_work SET claimed=? WHERE scope=? AND generation=? AND path=? AND kind=?', (lease.owner, lease.scope, lease.generation, row[0], row[1]))
+            self.conn.commit()
+            return WorkClaim(lease, row[0], row[1]) if row else None
+        except Exception:
+            self.conn.rollback()
+            raise StateError() from None
+
+    def finish_directory(self, claim, *, success):
+        with self.conn:
+            if not self._lease_valid(claim.lease):
+                raise StateError()
+            self.conn.execute('UPDATE audit_work SET done=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (success is True, success is False, success is False, claim.lease.scope, claim.lease.generation, claim.path, claim.kind, claim.lease.owner))
+
+    def _finish_work(self, work, result):
+        if work is None:
+            return
+        complete = result.coverage is not m.CoverageState.INCOMPLETE
+        self.conn.execute('UPDATE audit_work SET done=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (complete, not complete, not complete, work.lease.scope, work.lease.generation, work.path, work.kind, work.lease.owner))
+
+    def cycle_status(self, lease):
+        rows = self.conn.execute('SELECT kind,count(*),sum(failed) FROM audit_work WHERE scope=? AND generation=? AND done=0 GROUP BY kind', (lease.scope, lease.generation)).fetchall()
+        counts = {kind: count for kind, count, _ in rows}
+        return {'complete': not rows, 'pending_files': counts.get('file', 0), 'pending_directories': counts.get('directory', 0), 'failed': sum(failed for _, _, failed in rows), 'cycle_id': str(lease.generation)}
+
+    def release_cycle(self, lease):
+        with self.conn:
+            if not self._lease_valid(lease):
+                return
+            status = self.cycle_status(lease)
+            self.conn.execute('UPDATE audit_cycles SET completed=?,failed=?,owner=NULL,lease_until=0 WHERE scope=? AND generation=? AND owner=?', (datetime.now(timezone.utc).isoformat() if status['complete'] else None, status['failed'] > 0, lease.scope, lease.generation, lease.owner))
+            self.conn.execute('UPDATE audit_work SET claimed=NULL WHERE scope=? AND generation=?', (lease.scope, lease.generation))
+
+    def invalidate_scope(self, root, *, reason='source-unavailable'):
+        from pathlib import Path
+        root = Path(root).absolute()
+        with self.conn:
+            for key, identity, payload in self.conn.execute("SELECT input_key,finding_id,payload FROM finding_state WHERE state IN ('active','unknown')").fetchall():
+                row = json.loads(payload)
+                path = Path(row['source']['path']).absolute()
+                if path == root or root in path.parents:
+                    row.update(state='unknown', resolved_at=None, state_reason=reason)
+                    self.conn.execute('UPDATE finding_state SET state=?,payload=? WHERE input_key=? AND finding_id=?', ('unknown', json.dumps(row, separators=(',', ':')), key, identity))
+
+    def record_metadata(self, path, size):
+        from . import catalog
+        catalog.metadata_only(self.conn, path, size, self.config)
+
+    def record_event(self, path, kind, *, old_path=None, when=None):
+        if kind not in {'changed', 'created', 'deleted', 'renamed'}:
+            raise StateError()
+        from . import catalog
+        catalog.event(self.conn, path, kind, self.config, old_path=old_path, when=when)
+        with self.conn:
+            for key, identity, payload in self.conn.execute('SELECT input_key,finding_id,payload FROM finding_state WHERE path=? OR path=?', (path, old_path)).fetchall():
+                row = json.loads(payload)
+                row.update(state='unknown', resolved_at=None, state_reason='source-event')
+                self.conn.execute('UPDATE finding_state SET state=?,payload=? WHERE input_key=? AND finding_id=?', ('unknown', json.dumps(row, separators=(',', ':')), key, identity))

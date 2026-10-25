@@ -576,7 +576,159 @@ class ScanService:
         session = git_scanning.GitInputs(pathlib.Path(repo), request, limits=limits, cancel=cancel)
         return self._run(session, policy=m.ScanPolicy.git(), limits=limits, use_cache=False, cancel=cancel, enumeration=session.status, final_check=session.valid)
 
-    def _run(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None):
+    def audit(self, scope, *, limits, use_cache=True, cancel=None):
+        from .settings import ConfigurationError
+        if scope not in self.config.get('audit_scopes', {}):
+            raise ConfigurationError('audit_scopes')
+        root = pathlib.Path(self.config['audit_scopes'][scope]).absolute()
+        return self._work_batch('audit:' + scope, root, limits=limits, use_cache=use_cache, cancel=cancel)
+
+    def drain(self, *, limits, use_cache=False, cancel=None):
+        return self._work_batch('watch', None, limits=limits, use_cache=use_cache, cancel=cancel, ingest=True)
+
+    def _work_batch(self, scope, root, *, limits, use_cache, cancel, ingest=False):
+        from . import models as m
+        from .scan_store import StateError
+        issues = []
+        lease = None
+        claims = {}
+        deadline = time.monotonic() + limits.deadline_seconds
+        enumerated = 0
+        required_methods = ('acquire_cycle', 'claim_work', 'enqueue_work', 'finish_directory', 'cycle_status', 'lease_valid', 'release_cycle', 'invalidate_scope', 'record_event')
+        if any(not hasattr(self.store, name) for name in required_methods):
+            return self._run((), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=False, cancel=cancel, enumeration=lambda: {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)})
+        if root is not None and not root.is_dir():
+            self.store.invalidate_scope(root)
+            return self._run((), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=False, cancel=cancel, enumeration=lambda: {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, m.SourceRef(m.SourceKind.FILESYSTEM, str(root)), required=True),)})
+        try:
+            lease = self.store.acquire_cycle(scope, root, lease_seconds=limits.deadline_seconds + 30)
+        except Exception:
+            lease = None
+        if lease is None:
+            return self._run((), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=False, cancel=cancel, enumeration=lambda: {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)})
+        try:
+            if ingest:
+                issues.extend(self._ingest_queue(lease))
+            elif root is not None:
+                preferred = self.config.get('priority_paths', {}).get(scope.removeprefix('audit:'), ())
+                self.store.enqueue_work(lease, ((str(pathlib.Path(path).absolute()), 'directory', 0) for path in preferred[:1000]))
+
+            def work_inputs():
+                nonlocal enumerated
+                while time.monotonic() < deadline and not (cancel and cancel()):
+                    claim = self.store.claim_work(lease)
+                    if claim is None:
+                        return
+                    path = pathlib.Path(claim.path)
+                    if self._excluded(path):
+                        issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), omission_id='operator-exclusion'))
+                        self.store.finish_directory(claim, success=True)
+                        continue
+                    if claim.kind == 'file':
+                        claims[str(path.absolute())] = claim
+                        yield m.FileInput(path)
+                        continue
+                    entries_batch = []
+                    exhausted = True
+                    try:
+                        with os.scandir(path) as entries:
+                            for entry in entries:
+                                if time.monotonic() >= deadline or enumerated >= limits.max_directory_entries or (cancel and cancel()):
+                                    exhausted = False
+                                    break
+                                enumerated += 1
+                                child = pathlib.Path(entry.path)
+                                if self._excluded(child):
+                                    issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, m.SourceRef(m.SourceKind.FILESYSTEM, str(child)), omission_id='operator-exclusion'))
+                                    continue
+                                kind = 'directory' if entry.is_dir(follow_symlinks=False) else 'file'
+                                entries_batch.append((str(child.absolute()), kind, 100 if kind == 'file' else 101))
+                                if len(entries_batch) >= 256:
+                                    self.store.enqueue_work(lease, entries_batch)
+                                    entries_batch.clear()
+                        if entries_batch:
+                            self.store.enqueue_work(lease, entries_batch)
+                        self.store.finish_directory(claim, success=True if exhausted else None)
+                        if not exhausted:
+                            issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+                            return
+                    except OSError:
+                        self.store.finish_directory(claim, success=False)
+                        self.store.invalidate_scope(path)
+                        issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
+                issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+
+            def status():
+                metadata = self.store.cycle_status(lease)
+                if metadata.get('failed'):
+                    issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
+                return {**metadata, 'complete': metadata['complete'] and not any(issue.required for issue in issues), 'issues': tuple(issues)}
+            return self._run(work_inputs(), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=use_cache, cancel=cancel, enumeration=status, final_check=lambda: self.store.lease_valid(lease), work_claims=claims)
+        finally:
+            self.store.release_cycle(lease)
+
+    def _ingest_queue(self, lease):
+        from . import models as m
+        from .scan_store import SQLiteScanStore
+        from .sources import _bounded_file, AcquisitionError
+        issues = []
+        # This is a bounded import of the legacy notification spool into the
+        # default store. Injected stores receive work through their own queue API.
+        if not self._owns_store or not isinstance(self.store, SQLiteScanStore) or self.state_dir is None:
+            return issues
+        queue = self.state_dir / 'queue'
+        if not queue.is_dir():
+            return issues
+        imported = 0
+        try:
+            with os.scandir(queue) as entries:
+                for entry in entries:
+                    if imported >= 20:
+                        issues.append(m.CoverageIssue(m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+                        break
+                    if not entry.name.endswith('.json') or entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                        continue
+                    imported += 1
+                    try:
+                        batch = json.loads(_bounded_file(pathlib.Path(entry.path), 1_000_000).decode('utf-8-sig'))
+                        values = batch if type(batch) is list else [batch]
+                        if len(values) > 10_000:
+                            raise ValueError()
+                        events = []
+                        for value in values:
+                            if type(value) is str:
+                                value = {'path': value, 'kind': 'changed'}
+                            if (type(value) is not dict or not {'path'} <= set(value) <= {'path', 'kind', 'old_path', 'observed'}
+                                    or type(value['path']) is not str or not 0 < len(value['path']) <= 4096
+                                    or value.get('kind', 'changed') not in {'created', 'changed', 'renamed', 'deleted'}
+                                    or value.get('old_path') is not None and (type(value['old_path']) is not str or len(value['old_path']) > 4096)):
+                                raise ValueError()
+                            events.append(value)
+                        pending = []
+                        for event in events:
+                            path = str(pathlib.Path(event['path']).absolute())
+                            if self._excluded(path):
+                                continue
+                            kind = event.get('kind', 'changed')
+                            self.store.record_event(path, kind, old_path=event.get('old_path'))
+                            if kind != 'deleted':
+                                try:
+                                    target = pathlib.Path(path)
+                                    if target.is_file() and not target.is_symlink() and hasattr(self.store, 'record_metadata'):
+                                        self.store.record_metadata(path, target.stat().st_size)
+                                except OSError:
+                                    pass
+                                pending.append((path, 'file', 0))
+                        for offset in range(0, len(pending), 1000):
+                            self.store.enqueue_work(lease, pending[offset:offset + 1000], refresh=True)
+                        pathlib.Path(entry.path).unlink()
+                    except (ValueError, UnicodeError, OSError, AcquisitionError):
+                        issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
+        except OSError:
+            issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
+        return issues
+
+    def _run(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None):
         from dataclasses import replace
         from . import models as m, scan_policy
         from .sources import SnapshotInput, acquire_file, acquire_bytes, AcquisitionError
@@ -662,12 +814,10 @@ class ScanService:
                 break
         if hasattr(iterator, 'close'):
             iterator.close()
-        metadata = enumeration() if enumeration else {}
-        enumeration_complete = enumeration_complete and metadata.get('complete', True)
-        run_issues.extend(metadata.get('issues', ()))
         if final_check is not None and not final_check():
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, required=True))
+            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, r.source, required=True),)) for r in results]
         current_runtime, _ = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()))
         if current_runtime != self._runtime:
             enumeration_complete = False
@@ -681,10 +831,17 @@ class ScanService:
         # Publication is after validation; no slow detector runs under a write lock.
         for result, (generation, cache_key) in zip(results, reservations):
             try:
-                self.store.record_result(result, generation=generation, cache_key=cache_key if result.coverage is m.CoverageState.COMPLETE else None)
+                kwargs = {'work': work_claims.get(result.source.path)} if work_claims is not None else {}
+                self.store.record_result(result, generation=generation, cache_key=cache_key if result.coverage is m.CoverageState.COMPLETE else None, **kwargs)
             except Exception:
                 run_issues.append(m.CoverageIssue(m.ErrorCode.STATE_FAILED, result.source, required=True))
                 enumeration_complete = False
+        try:
+            metadata = enumeration() if enumeration else {}
+        except Exception:
+            metadata = {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)}
+        enumeration_complete = enumeration_complete and metadata.get('complete', True)
+        run_issues.extend(metadata.get('issues', ()))
         coverage, decision = scan_policy.evaluate(tuple(results), policy=policy, policy_id=policy_id, enumeration_complete=enumeration_complete, issues=tuple(run_issues), pending_files=metadata.get('pending_files'), pending_directories=metadata.get('pending_directories'), cycle_id=metadata.get('cycle_id'))
         report = m.ScanReport(1, uuid.uuid4().hex, started, dt.datetime.now(dt.timezone.utc), policy_id, tuple(results), coverage, decision, tuple(run_issues))
         try:
