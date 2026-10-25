@@ -34,7 +34,7 @@ def load():
     path = pathlib.Path(name).expanduser().resolve() if name else None
     if path:
         try:
-            config = validate(json.loads(path.read_text(encoding='utf-8-sig')))
+            config = read_config(path)
         except (OSError, ValueError, TypeError):
             raise ConfigurationError('configuration') from None
     return config, path
@@ -156,3 +156,22 @@ def validate(mapping):
 
 
 normalize_config = validate
+
+
+def read_config(path):
+    """Explicit bounded JSON configuration read, shared by Git and public API."""
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ConfigurationError()
+            value[key] = item
+        return value
+    try:
+        with pathlib.Path(path).open('rb') as stream:
+            raw = stream.read(1_000_001)
+        if len(raw) > 1_000_000:
+            raise ConfigurationError()
+        return validate(json.loads(raw.decode('utf-8-sig'), object_pairs_hook=unique))
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
+        raise ConfigurationError() from None
