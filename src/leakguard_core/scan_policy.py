@@ -22,7 +22,7 @@ from .models import (CoverageSummary, CoverageState, DecisionVerdict, ErrorCode,
 
 class RuntimeIdentityError(RuntimeError):
     def __init__(self, code='budget-exhausted'):
-        self.code = code if code in {'budget-exhausted', 'cancelled'} else 'budget-exhausted'
+        self.code = code if code in {'budget-exhausted', 'cancelled', 'source-unavailable'} else 'budget-exhausted'
         super().__init__(self.code)
 
 
@@ -243,6 +243,8 @@ def runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manife
     try:
         budget.check()
         return _runtime_identity(config, binary, plugin_specs, plugin_manifests=plugin_manifests)
+    except (OSError, ValueError, TypeError):
+        raise RuntimeIdentityError('source-unavailable') from None
     finally:
         _IDENTITY_BUDGET.reset(token)
 
