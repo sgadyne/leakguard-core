@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from leakguard_core import backends, engine, scan_policy
+from leakguard_core import backends, engine, hooks, scan_policy
 
 
 SYNTHETIC = 'SyntheticOnly~M7kQ2vR9xL4nD8pS6aH3zB5cF1eG'
@@ -107,6 +107,72 @@ class BackendIsolationTests(unittest.TestCase):
             'literal-client-secret', {finding.rule for finding in findings},
             'caller-controlled .gitleaksignore must not waive a required scan',
         )
+
+    @unittest.skipIf(os.name == 'nt', 'the installed POSIX hook wrapper requires executable mode bits')
+    def test_installed_pre_commit_hook_blocks_ignore_fingerprint_from_stdin(self):
+        """Git must execute the installed hook and block despite its CWD ignore file."""
+        with tempfile.TemporaryDirectory(prefix='leakguard-hook-ignore-') as temporary:
+            root = Path(temporary)
+            repo = root / 'repo'
+            repo.mkdir()
+            home = root / 'home'
+            home.mkdir()
+            state = root / 'private-state'
+            global_config = root / 'empty-global-gitconfig'
+            source_root = Path(backends.__file__).resolve().parents[1]
+            env = _minimal_environment()
+            env.update({
+                'HOME': str(home),
+                'XDG_CONFIG_HOME': str(root / 'xdg'),
+                'GIT_CONFIG_GLOBAL': str(global_config),
+                'GIT_CONFIG_NOSYSTEM': '1',
+                'GIT_TERMINAL_PROMPT': '0',
+                'LEAKGUARD_GITLEAKS': str(self.binary),
+                'LEAKGUARD_STATE_DIR': str(state),
+                'PYTHONPATH': str(source_root),
+            })
+
+            def git(*args, check=False):
+                return subprocess.run(
+                    ['git', *args], cwd=repo, env=env,
+                    capture_output=True, timeout=30, check=check,
+                )
+
+            initialized = git('-c', 'init.templateDir=', 'init', '-q')
+            self.assertEqual(initialized.returncode, 0, 'disposable Git repo must initialize')
+            for key, value in (
+                ('user.name', 'LeakGuard synthetic fixture'),
+                ('user.email', 'synthetic@example.invalid'),
+                ('commit.gpgsign', 'false'),
+            ):
+                configured = git('config', key, value)
+                self.assertEqual(configured.returncode, 0)
+
+            baseline = _raw_stdin_report(self.binary, self.rules, repo, TEXT)
+            self.assertTrue(baseline, 'the pinned config must detect the staged synthetic credential')
+            fingerprint = baseline[0].get('Fingerprint')
+            self.assertIs(type(fingerprint), str)
+            self.assertTrue(fingerprint)
+            (repo / '.gitleaksignore').write_text(fingerprint + '\n', encoding='utf-8')
+
+            candidate = repo / 'synthetic-candidate.txt'
+            candidate.write_text(TEXT, encoding='utf-8')
+            staged = git('add', candidate.name)
+            self.assertEqual(staged.returncode, 0)
+
+            hooks.install_at(repo / '.git' / 'hooks')
+            installed_hook = repo / '.git' / 'hooks' / 'pre-commit'
+            self.assertTrue(installed_hook.is_file())
+            self.assertTrue(installed_hook.stat().st_mode & 0o111)
+
+            result = git('commit', '-m', 'test: block a staged synthetic credential')
+
+            self.assertEqual(result.returncode, 1, result.stderr.decode('utf-8', errors='replace'))
+            self.assertIn(b'literal-client-secret', result.stderr)
+            self.assertNotIn(SYNTHETIC.encode('utf-8'), result.stdout + result.stderr)
+            head = git('rev-parse', '--verify', 'HEAD')
+            self.assertNotEqual(head.returncode, 0, 'the hook must prevent Git from creating the commit')
+            self.assertTrue(state.is_dir(), 'the hook used only the explicitly private fixture state')
 
     def test_relative_extended_rule_change_invalidates_persistent_runtime_identity(self):
         """Hash two levels of relative rules and disable reuse for inheritance."""
