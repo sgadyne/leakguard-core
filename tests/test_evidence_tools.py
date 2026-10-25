@@ -84,6 +84,11 @@ class SafeInputTests(unittest.TestCase):
 
 
 class BenchmarkAggregationTests(unittest.TestCase):
+    def test_benchmark_module_uses_its_copied_tool_root(self):
+        self.assertEqual(Path(benchmark_scan.__file__).resolve(), BENCHMARK.resolve())
+        self.assertEqual(benchmark_scan.ROOT.resolve(), ROOT.resolve())
+        self.assertIn(str(benchmark_scan.ROOT / "src"), sys.path)
+
     def test_report_aggregation_uses_backend_metric_and_case_local_identities(self):
         def case(files, policy_id):
             rows = {}

@@ -293,6 +293,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     _command([*pip_install[:-2], "--target", str(target_site), "--no-deps",
               *map(str, example_wheels)], cwd=work, env=install_env,
              stage="example-wheel-install")
+    # pip --python re-executes pip under target_python, so dependency markers
+    # use the requested target runtime rather than the builder interpreter.
     check_env = dict(install_env, PYTHONPATH=str(target_site))
     _command([sys.executable, "-m", "pip", "--python", str(target_python), "check"], cwd=work, env=check_env,
              stage="dependency-check")
@@ -303,6 +305,12 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copy2(ROOT / "tools" / "_safe_inputs.py",
                  installed_tests / "tests" / "_safe_inputs.py")
+    installed_tools = installed_tests / "tools"
+    installed_tools.mkdir(mode=0o700)
+    shutil.copy2(ROOT / "tools" / "_safe_inputs.py",
+                 installed_tools / "_safe_inputs.py")
+    shutil.copy2(ROOT / "tools" / "benchmark_scan.py",
+                 installed_tools / "benchmark_scan.py")
     (installed_tests / "state").mkdir(mode=0o700)
     test_env = _environment(config=config, state=installed_tests / "state", gitleaks=gitleaks,
                              global_gitconfig=installed_tests / "gitconfig", base=target_environment)
