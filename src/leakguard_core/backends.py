@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import tempfile
+import time
 
 from ._supervision import WorkerError, run_worker, worker_environment
 
@@ -30,18 +32,36 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
            max_findings=100_000, cancel=None) -> tuple[BackendFinding, ...]:
     if type(text) is not str or type(max_findings) is not int or max_findings <= 0:
         raise BackendError('detector-output-invalid')
-    executable = str(binary or os.environ.get('LEAKGUARD_GITLEAKS') or shutil.which('gitleaks') or 'gitleaks')
-    rule_path = str(rules or Path(__file__).with_name('rules.toml'))
+    started = time.monotonic()
+    def check_budget():
+        if cancel is not None and cancel():
+            raise BackendError('cancelled')
+        if time.monotonic() - started >= timeout:
+            raise BackendError('detector-timeout')
+    selected = str(binary or os.environ.get('LEAKGUARD_GITLEAKS') or shutil.which('gitleaks') or 'gitleaks')
+    executable = str(Path(shutil.which(selected) or selected).absolute())
+    rule_path = str(Path(rules or Path(__file__).with_name('rules.toml')).absolute())
     command = [executable, 'stdin', '--config', rule_path, '--redact=100',
                '--ignore-gitleaks-allow', '--no-banner', '--no-color', '--log-level', 'fatal',
                '--report-format', 'json', '--report-path', '-', '--timeout', str(max(1, math.ceil(timeout)))]
     try:
-        process = run_worker(command, text.encode('utf-8'), timeout=timeout,
-                             max_input_bytes=80_000_000,
-                             max_output_bytes=min(64_000_000, max(1_048_576, max_findings * 4096)),
-                             # Go reserves a large virtual arena; applying RLIMIT_AS
-                             # would prevent startup. ILMR bounds test-job memory.
-                             memory_bytes=None, env=worker_environment(), cancel=cancel)
+        from ._rules import inspect, stage, RuleConfigError
+        closure = inspect(rule_path, check=check_budget)
+        with tempfile.TemporaryDirectory(prefix='leakguard-backend-') as scratch:
+            # stdin still reads CWD/.gitleaksignore in the pinned backend. Keep
+            # repository content out of its policy context while preserving
+            # explicitly configured relative rule inheritance in private files.
+            directory = stage(closure, scratch)
+            check_budget()
+            process = run_worker(command, text.encode('utf-8'), timeout=max(0.001, timeout - (time.monotonic() - started)),
+                                 max_input_bytes=80_000_000,
+                                 max_output_bytes=min(64_000_000, max(1_048_576, max_findings * 4096)),
+                                 # Go reserves a large virtual arena; applying
+                                 # RLIMIT_AS would prevent startup.
+                                 memory_bytes=None, env=worker_environment(),
+                                 cwd=directory, cancel=cancel)
+    except RuleConfigError:
+        raise BackendError('configuration-invalid') from None
     except WorkerError as error:
         code = {'worker-timeout': 'detector-timeout', 'worker-output-limit': 'detector-output-limit',
                 'cancelled': 'cancelled'}.get(error.code, 'detector-failed')

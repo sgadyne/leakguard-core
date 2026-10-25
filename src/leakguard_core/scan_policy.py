@@ -281,10 +281,19 @@ def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manif
         _check_budget()
         dependencies.extend(script.get('dependencies', ()))
     closure, complete = _dependency_closure(dependencies)
+    rules_path = config.get('gitleaks_config') or root / 'rules.toml'
+    from ._rules import inspect, RuleConfigError
+    try:
+        rule_closure = inspect(rules_path, check=_check_budget)
+        rule_artifacts = rule_closure.identity
+        complete = complete and not rule_closure.external
+    except RuleConfigError:
+        rule_artifacts = [('unavailable', 'unavailable')]
+        complete = False
     value = {'abi': 'leakguard-runtime-2', 'core': core,
              'python': [sys.implementation.name, platform.python_version(), _file_identity(sys.executable)],
              'platform': [platform.system(), platform.machine()], 'gitleaks': binary_id,
-             'rules': _file_identity(config.get('gitleaks_config') or root / 'rules.toml'),
+             'rules': _file_identity(rules_path), 'rule_closure': rule_artifacts,
              'dependencies': closure, 'plugins': specs, 'plugin_artifacts': module_artifacts,
              'manifests': manifests,
              'scripts': [{'spec': spec, 'artifacts': [(index, _file_identity(value)) for index, value in enumerate(spec['argv']) if Path(value).is_file()]} for spec in config.get('script_checks', ())]}
