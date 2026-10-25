@@ -1229,3 +1229,61 @@ class DirectoryValidationPagingTests(unittest.TestCase):
                 self.assertTrue(any(issue.code is m.ErrorCode.SOURCE_UNAVAILABLE for issue in report.issues))
             finally:
                 service.close()
+
+
+class FinalStateAcceptanceTests(unittest.TestCase):
+    def test_two_sqlite_connections_publish_only_newest_reserved_generation(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from dataclasses import replace
+        import threading
+        from leakguard_core.scan_store import SQLiteScanStore
+        with tempfile.TemporaryDirectory(prefix='leakguard-final-concurrency-') as folder:
+            initial = SQLiteScanStore(folder); initial.close()
+            base = StoreLifecycleTests.make_result(self)
+            gate = threading.Barrier(2)
+            def publish(number):
+                store = SQLiteScanStore(folder)
+                try:
+                    finding = replace(base.findings[0], id=str(number) * 64)
+                    result = replace(base, findings=(finding,))
+                    generation = store.reserve(result.source)
+                    gate.wait(timeout=5)
+                    store.record_result(result, generation=generation)
+                    return generation, finding.id
+                finally:
+                    store.close()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(publish, number) for number in (1, 2)]
+                expected = max(future.result(timeout=10) for future in futures)[1]
+            store = SQLiteScanStore(folder)
+            try:
+                self.assertEqual([row['id'] for row in store.query_findings()], [expected])
+                self.assertEqual(store.query_findings()[0]['state'], 'active')
+                self.assertEqual(len(store.query_findings(state='history')), 2)
+            finally:
+                store.close()
+
+    def test_actual_timeout_and_offline_root_do_not_resolve_prior_evidence(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-final-lifecycle-') as folder:
+                root = Path(folder)
+                corpus = root / 'corpus'; corpus.mkdir()
+                candidate = corpus / 'candidate.txt'; candidate.write_text('synthetic')
+                store = store_type(root / 'state') if store_type is SQLiteScanStore else store_type()
+                service = engine.ScanService({'gitleaks_executable': str(engine.EXE), 'audit_scopes': {'synthetic': str(corpus)}}, store=store)
+                try:
+                    with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                        service.scan((m.FileInput(candidate),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1), use_cache=False)
+                    with patch.object(backends, 'detect', side_effect=backends.BackendError('detector-timeout')):
+                        timeout = service.scan((m.FileInput(candidate),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1), use_cache=False)
+                    self.assertEqual(timeout.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                    self.assertEqual(store.query_findings()[0]['state'], 'unknown')
+                    corpus.rename(root / 'offline-corpus')
+                    offline = service.audit('synthetic', limits=m.ScanLimits(30, 1))
+                    self.assertEqual(offline.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                    self.assertEqual(store.query_findings()[0]['state'], 'unknown')
+                    self.assertTrue(any(issue.code is m.ErrorCode.SOURCE_UNAVAILABLE for issue in offline.issues))
+                finally:
+                    service.close(); store.close()

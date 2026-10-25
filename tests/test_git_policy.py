@@ -299,3 +299,49 @@ class InventoryRulePolicyTests(unittest.TestCase):
                     self.assertEqual(finding.detector_id, 'plugin-legacy')
         finally:
             service.close()
+
+
+class FinalGitAcceptanceTests(unittest.TestCase):
+    setUp = GitSnapshotTests.setUp
+    tearDown = GitSnapshotTests.tearDown
+    git = GitSnapshotTests.git
+
+    def test_installed_pre_push_rejects_secret_in_actual_orphan_root(self):
+        from leakguard_core import hooks
+        marker = 'SyntheticOnlyOrphanRootM7kQ2vR9xL4nD8'
+        (self.repo / 'candidate.txt').write_text('client_secret = "' + marker + '"\n')
+        self.git('add', 'candidate.txt')
+        self.git('commit', '--no-verify', '-qm', 'synthetic orphan root')
+        self.git('config', 'core.hooksPath', '.git/hooks')
+        hooks.install_at(self.repo / '.git' / 'hooks')
+        if __import__('os').name != 'nt':
+            self.assertTrue((self.repo / '.git' / 'hooks' / 'pre-push').stat().st_mode & 0o111)
+        bare = self.repo / 'explicit-private-remote.git'
+        made = subprocess.run(['git', '-c', 'init.templateDir=', 'init', '--bare', '-q', str(bare)], capture_output=True)
+        self.assertEqual(made.returncode, 0)
+        pushed = subprocess.run(['git', 'push', str(bare), 'HEAD:refs/heads/synthetic-root'], cwd=self.repo, capture_output=True)
+        self.assertNotEqual(pushed.returncode, 0)
+        self.assertIn(b'LeakGuard blocked', pushed.stderr)
+        self.assertNotIn(marker.encode(), pushed.stdout + pushed.stderr)
+        absent = subprocess.run(['git', '--git-dir=' + str(bare), 'rev-parse', '--verify', 'refs/heads/synthetic-root'], capture_output=True)
+        self.assertNotEqual(absent.returncode, 0)
+
+    def test_actual_production_commit_count_bound_fails_closed(self):
+        from leakguard_core import models as m
+        from leakguard_core.git_scanning import MAX_COMMITS
+        chunks = []
+        for number in range(MAX_COMMITS + 1):
+            message = ('synthetic bounded history ' + str(number)).encode()
+            chunks.append(b'commit refs/heads/synthetic-bound\ncommitter Synthetic <synthetic@example.invalid> 1700000000 +0000\ndata ' + str(len(message)).encode() + b'\n' + message + b'\n\n')
+        imported = subprocess.run(['git', 'fast-import', '--quiet'], cwd=self.repo, input=b''.join(chunks) + b'done\n', capture_output=True)
+        self.assertEqual(imported.returncode, 0)
+        head = self.git('rev-parse', 'refs/heads/synthetic-bound').decode().strip()
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            request = m.GitRequest(m.GitRequestKind.PUSH, (m.RefUpdate('refs/heads/synthetic-bound', head, 'refs/heads/synthetic-bound', '0' * len(head)),))
+            report = service.scan_git(self.repo, request=request, limits=m.ScanLimits(30, 10))
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+            self.assertTrue(any(issue.code is m.ErrorCode.GIT_RANGE_INCOMPLETE for issue in report.issues))
+            self.assertEqual(report.results, ())
+        finally:
+            service.close()
