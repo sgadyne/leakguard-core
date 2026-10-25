@@ -203,7 +203,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(b'literal-client-secret', result.stderr)
         self.assertIn(head[:12].encode(), result.stderr)
-        self.assertIn(b'word/document.xml', result.stderr)
+        self.assertIn(b'office-word-1', result.stderr)
         self.assertNotIn(SYNTHETIC.encode(), result.stdout + result.stderr)
 
     def test_report_does_not_contain_secret_values(self):

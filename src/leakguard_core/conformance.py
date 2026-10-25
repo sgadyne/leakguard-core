@@ -1,0 +1,369 @@
+"""Reusable, redacted conformance cases and reports for LeakGuard extensions.
+
+Case inputs are supplied by the extension author. Reports deliberately contain
+only static case/check identifiers and closed result codes; they never serialize
+case text, input bytes, options, plugin output, or exception messages.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+import hashlib
+import json
+import re
+from typing import Mapping, Sequence
+
+
+_TOKEN = re.compile(r"[a-z][a-z0-9-]{0,63}\Z", re.ASCII)
+_RULE = re.compile(r"[a-z][a-z0-9-]{0,79}\Z", re.ASCII)
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+_MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z", re.ASCII)
+_CONFORMANCE_TIMEOUT_SECONDS = 10.0
+_MAX_DETECTOR_TEXT_BYTES = 12_000_000
+_MAX_EXTRACTOR_INPUT_BYTES = 20_971_520
+_MAX_CASES = 1000
+_EXTRACTION_CODES = frozenset({
+    "input-limit", "unsupported-format", "format-mismatch", "ambiguous-format",
+    "decode-failed", "encrypted", "no-text", "dependency-unavailable", "extract-failed",
+    "extract-timeout", "extract-crashed", "extract-output-limit", "extract-part-limit",
+    "resource-bound-unavailable", "cancelled",
+})
+
+
+class ConformanceKind(str, Enum):
+    DETECTOR = "detector"
+    EXTRACTOR = "extractor"
+
+
+class ConformanceCode(str, Enum):
+    CASE_INVALID = "case-invalid"
+    CASE_MISMATCH = "case-mismatch"
+    COMPONENT_INVALID = "component-invalid"
+    DEPENDENCY_UNAVAILABLE = "dependency-unavailable"
+    PLUGIN_INVALID = "plugin-invalid"
+    PLUGIN_TIMEOUT = "plugin-timeout"
+    PLUGIN_CRASHED = "plugin-crashed"
+    DETECTOR_OUTPUT_INVALID = "detector-output-invalid"
+    EXTRACTOR_OUTPUT_INVALID = "extractor-output-invalid"
+    SETUP_FAILED = "setup-failed"
+
+
+def _token(value: str, label: str) -> None:
+    if type(value) is not str or not _TOKEN.fullmatch(value):
+        raise ValueError(label)
+
+
+@dataclass(frozen=True)
+class ExpectedFinding:
+    rule: str
+    start_line: int
+    end_line: int
+    severity: str
+
+    def __post_init__(self):
+        if type(self.rule) is not str or not _RULE.fullmatch(self.rule):
+            raise ValueError("case-invalid")
+        if type(self.start_line) is not int or type(self.end_line) is not int:
+            raise ValueError("case-invalid")
+        if self.start_line < 1 or self.end_line < self.start_line:
+            raise ValueError("case-invalid")
+        if type(self.severity) is not str or self.severity not in {"block", "review"}:
+            raise ValueError("case-invalid")
+
+
+@dataclass(frozen=True)
+class DetectorCase:
+    case_id: str
+    text: str
+    logical_path: str
+    format_id: str
+    part_id: str
+    expected_findings: tuple[ExpectedFinding, ...] = ()
+
+    def __post_init__(self):
+        _token(self.case_id, "case-invalid")
+        if (type(self.text) is not str or len(self.text.encode("utf-8")) > _MAX_DETECTOR_TEXT_BYTES
+                or type(self.logical_path) is not str or not self.logical_path
+                or len(self.logical_path) > 4096):
+            raise ValueError("case-invalid")
+        _token(self.format_id, "case-invalid")
+        _token(self.part_id, "case-invalid")
+        if type(self.expected_findings) is not tuple or any(
+            type(item) is not ExpectedFinding for item in self.expected_findings
+        ):
+            raise ValueError("case-invalid")
+
+
+@dataclass(frozen=True)
+class ExpectedPart:
+    part_id: str
+    text_sha256: str
+    line_count: int
+
+    def __post_init__(self):
+        _token(self.part_id, "case-invalid")
+        if type(self.text_sha256) is not str or not _SHA256.fullmatch(self.text_sha256):
+            raise ValueError("case-invalid")
+        if type(self.line_count) is not int or self.line_count < 0:
+            raise ValueError("case-invalid")
+
+    @classmethod
+    def from_text(cls, part_id: str, text: str) -> "ExpectedPart":
+        if type(text) is not str:
+            raise ValueError("case-invalid")
+        return cls(part_id, hashlib.sha256(text.encode("utf-8")).hexdigest(), _line_count(text))
+
+
+def _line_count(text: str) -> int:
+    # Empty text has no lines; a final newline does not create an extra line.
+    return 0 if not text else text.count("\n") + (0 if text.endswith("\n") else 1)
+
+
+@dataclass(frozen=True)
+class ExtractorCase:
+    case_id: str
+    data: bytes
+    logical_path: str
+    expected_format: str
+    expected_disposition: str
+    expected_parts: tuple[ExpectedPart, ...] = ()
+    expected_issues: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        _token(self.case_id, "case-invalid")
+        if (type(self.data) is not bytes or len(self.data) > _MAX_EXTRACTOR_INPUT_BYTES
+                or type(self.logical_path) is not str or not self.logical_path
+                or len(self.logical_path) > 4096):
+            raise ValueError("case-invalid")
+        _token(self.expected_format, "case-invalid")
+        if type(self.expected_disposition) is not str or self.expected_disposition not in {"extracted", "unsupported", "encrypted", "no-text", "error"}:
+            raise ValueError("case-invalid")
+        if type(self.expected_parts) is not tuple or len(self.expected_parts) > 1000 or any(
+            type(item) is not ExpectedPart for item in self.expected_parts
+        ):
+            raise ValueError("case-invalid")
+        if type(self.expected_issues) is not tuple or len(self.expected_issues) > 100 or any(
+            type(code) is not str or code not in _EXTRACTION_CODES for code in self.expected_issues
+        ):
+            raise ValueError("case-invalid")
+
+
+@dataclass(frozen=True)
+class ConformanceIssue:
+    check_id: str
+    code: ConformanceCode
+    case_id: str | None = None
+
+    def __post_init__(self):
+        _token(self.check_id, "case-invalid")
+        if type(self.code) is not ConformanceCode:
+            raise TypeError("code")
+        if self.case_id is not None:
+            _token(self.case_id, "case-invalid")
+
+
+@dataclass(frozen=True)
+class ConformanceReport:
+    component_id: str
+    kind: ConformanceKind
+    total_cases: int
+    passed_cases: int
+    failed_cases: int
+    skipped_cases: int
+    issues: tuple[ConformanceIssue, ...] = ()
+
+    def __post_init__(self):
+        _token(self.component_id, "component-invalid")
+        if type(self.kind) is not ConformanceKind:
+            raise TypeError("kind")
+        values = (self.total_cases, self.passed_cases, self.failed_cases, self.skipped_cases)
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError("case-invalid")
+        if self.total_cases != self.passed_cases + self.failed_cases + self.skipped_cases:
+            raise ValueError("case-invalid")
+        if type(self.issues) is not tuple or len(self.issues) > _MAX_CASES + 1 or any(type(issue) is not ConformanceIssue for issue in self.issues):
+            raise ValueError("case-invalid")
+
+    @property
+    def passed(self) -> bool:
+        return self.failed_cases == 0 and not self.issues
+
+    def to_dict(self) -> dict:
+        return {
+            "component_id": self.component_id,
+            "kind": self.kind.value,
+            "total_cases": self.total_cases,
+            "passed_cases": self.passed_cases,
+            "failed_cases": self.failed_cases,
+            "skipped_cases": self.skipped_cases,
+            "passed": self.passed,
+            "issues": [
+                {"check_id": item.check_id, "code": item.code.value, "case_id": item.case_id}
+                for item in self.issues
+            ],
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def check_detector(module: str, options: Mapping, cases: Sequence[DetectorCase]) -> ConformanceReport:
+    """Check an explicitly configured detector through the core plugin adapter.
+
+    Adapter execution is deliberately delegated to the core plugin worker; this
+    module never imports an extension or invokes extension code itself.
+    """
+    return _check_component(ConformanceKind.DETECTOR, module, options, cases)
+
+
+def check_extractor(module: str, options: Mapping, cases: Sequence[ExtractorCase]) -> ConformanceReport:
+    """Check an explicitly configured extractor through the core plugin adapter."""
+    return _check_component(ConformanceKind.EXTRACTOR, module, options, cases)
+
+
+def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases: Sequence) -> ConformanceReport:
+    # This thin bridge intentionally depends on the public core registry contract
+    # that owns supervised loading, manifest validation and output sanitization.
+    try:
+        if type(module) is not str or len(module) > 240 or not _MODULE.fullmatch(module):
+            raise ValueError
+        if not isinstance(options, Mapping) or any(type(key) is not str for key in options):
+            raise ValueError
+        if not isinstance(cases, Sequence) or isinstance(cases, (str, bytes)):
+            raise ValueError
+        normalized_cases = tuple(cases)
+        if len(normalized_cases) > _MAX_CASES:
+            raise ValueError
+        if not normalized_cases:
+            raise ValueError
+        expected_type = DetectorCase if kind is ConformanceKind.DETECTOR else ExtractorCase
+        if any(type(case) is not expected_type for case in normalized_cases):
+            raise ValueError
+        if len({case.case_id for case in normalized_cases}) != len(normalized_cases):
+            raise ValueError
+    except Exception:
+        return ConformanceReport(
+            component_id="invalid-component", kind=kind, total_cases=0,
+            passed_cases=0, failed_cases=0, skipped_cases=0,
+            issues=(ConformanceIssue("setup", ConformanceCode.COMPONENT_INVALID),),
+        )
+
+    try:
+        from . import plugins
+        try:
+            loaded = plugins.load([{"module": module, "options": dict(options)}])
+        except plugins.PluginError as error:
+            count = len(normalized_cases)
+            issue = _plugin_issue(error.code, "component-load", None, kind)
+            return ConformanceReport(
+                component_id="configured-component", kind=kind, total_cases=count,
+                passed_cases=0, failed_cases=count, skipped_cases=0, issues=(issue,),
+            )
+        if len(loaded) != 1:
+            raise ValueError
+        handle = loaded[0]
+        manifest = getattr(handle, "manifest", None)
+        component_id = manifest.id if manifest is not None else "legacy-plugin"
+        if manifest is not None and manifest.kind != kind.value:
+            count = len(normalized_cases)
+            return ConformanceReport(
+                component_id=component_id, kind=kind, total_cases=count,
+                passed_cases=0, failed_cases=count, skipped_cases=0,
+                issues=(ConformanceIssue("component-kind", ConformanceCode.COMPONENT_INVALID),),
+            )
+        if kind is ConformanceKind.DETECTOR:
+            return _check_detector_loaded(plugins, handle, component_id, normalized_cases)
+        return _check_extractor_loaded(plugins, handle, component_id, normalized_cases)
+    except Exception:
+        # Never surface an extension exception, option, input, or traceback.
+        count = len(normalized_cases)
+        return ConformanceReport(
+            component_id="configured-component", kind=kind, total_cases=count,
+            passed_cases=0, failed_cases=count, skipped_cases=0,
+            issues=(ConformanceIssue("setup", ConformanceCode.SETUP_FAILED),),
+        )
+
+
+def _plugin_issue(code: str, check_id: str, case_id: str | None,
+                  kind: ConformanceKind) -> ConformanceIssue:
+    if code == "plugin-timeout":
+        fixed = ConformanceCode.PLUGIN_TIMEOUT
+    elif code == "plugin-crashed":
+        fixed = ConformanceCode.PLUGIN_CRASHED
+    elif code == "resource-bound-unavailable":
+        fixed = ConformanceCode.DEPENDENCY_UNAVAILABLE
+    elif code in {"detector-output-invalid", "detector-output-limit"}:
+        fixed = ConformanceCode.DETECTOR_OUTPUT_INVALID
+    elif code in {"extract-output-limit", "extract-part-limit", "extractor-output-invalid"}:
+        fixed = ConformanceCode.EXTRACTOR_OUTPUT_INVALID
+    elif code == "plugin-invalid":
+        fixed = ConformanceCode.PLUGIN_INVALID
+    elif code == "cancelled":
+        fixed = ConformanceCode.SETUP_FAILED
+    else:
+        fixed = ConformanceCode.SETUP_FAILED
+    return ConformanceIssue(check_id, fixed, case_id)
+
+
+def _check_detector_loaded(plugins, handle, component_id: str,
+                          cases: tuple[DetectorCase, ...]) -> ConformanceReport:
+    issues = []
+    passed = 0
+    for case in cases:
+        try:
+            actual = tuple(plugins.detect(
+                [handle], case.text, case.logical_path, case.part_id,
+                format_id=case.format_id, timeout=_CONFORMANCE_TIMEOUT_SECONDS,
+            ))
+            actual_rows = tuple(sorted((item.rule, item.line, item.line, item.severity) for item in actual))
+            expected_rows = tuple(sorted(
+                (item.rule, item.start_line, item.end_line, item.severity)
+                for item in case.expected_findings
+            ))
+            if actual_rows == expected_rows:
+                passed += 1
+            else:
+                issues.append(ConformanceIssue("case-match", ConformanceCode.CASE_MISMATCH, case.case_id))
+        except plugins.PluginError as error:
+            issues.append(_plugin_issue(error.code, "case-run", case.case_id, ConformanceKind.DETECTOR))
+        except Exception:
+            issues.append(ConformanceIssue("case-run", ConformanceCode.SETUP_FAILED, case.case_id))
+    failed = len(cases) - passed
+    return ConformanceReport(component_id, ConformanceKind.DETECTOR, len(cases), passed, failed, 0,
+                             tuple(issues))
+
+
+def _check_extractor_loaded(plugins, handle, component_id: str,
+                            cases: tuple[ExtractorCase, ...]) -> ConformanceReport:
+    """Use the registry's disposition-aware helper, added with plugin SDK support."""
+    runner = getattr(plugins, "extract_component", None)
+    if not callable(runner):
+        return ConformanceReport(
+            component_id, ConformanceKind.EXTRACTOR, len(cases), 0, len(cases), 0,
+            (ConformanceIssue("extractor-api", ConformanceCode.SETUP_FAILED),),
+        )
+    from .extraction import ExtractionLimits
+    issues = []
+    passed = 0
+    for case in cases:
+        try:
+            result = runner(handle, case.data, case.logical_path,
+                            format_id=case.expected_format, limits=ExtractionLimits(),
+                            timeout=_CONFORMANCE_TIMEOUT_SECONDS)
+            parts = tuple(ExpectedPart.from_text(part.part_id, part.text) for part in result.parts)
+            matched = (
+                result.format_id == case.expected_format
+                and result.disposition == case.expected_disposition
+                and parts == case.expected_parts
+                and tuple(result.issues) == case.expected_issues
+            )
+            if matched:
+                passed += 1
+            else:
+                issues.append(ConformanceIssue("case-match", ConformanceCode.CASE_MISMATCH, case.case_id))
+        except Exception as error:
+            # Read only a fixed code attribute from core exceptions; never stringify.
+            code = getattr(error, "code", "setup-failed")
+            issues.append(_plugin_issue(code, "case-run", case.case_id, ConformanceKind.EXTRACTOR))
+    return ConformanceReport(component_id, ConformanceKind.EXTRACTOR, len(cases), passed,
+                             len(cases) - passed, 0, tuple(issues))
