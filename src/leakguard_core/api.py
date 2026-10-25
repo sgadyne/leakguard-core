@@ -69,13 +69,20 @@ class ScanConfig:
         if not isinstance(path, Path):
             raise ConfigurationError()
         try:
-            raw = path.read_text(encoding="utf-8-sig")
-            parsed = json.loads(raw, object_pairs_hook=_unique_object)
-        except Exception:
-            raise ConfigurationError("configuration") from None
-        if not isinstance(parsed, dict):
-            raise ConfigurationError("configuration")
-        return cls.from_mapping(parsed)
+            from . import settings
+
+            normalized = settings.read_config(path)
+            encoded = json.dumps(
+                normalized,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except Exception as error:
+            field_name = getattr(error, "field", "configuration")
+            raise ConfigurationError(field_name) from None
+        return cls(encoded)
 
     def to_mapping(self) -> dict[str, object]:
         """Return a fresh mutable copy for the service's private setup."""
@@ -262,15 +269,6 @@ def _validated_inputs(inputs: Iterable[FileInput | BytesInput]) -> Iterable[File
         if type(item) not in {FileInput, BytesInput}:
             raise TypeError("inputs must contain only FileInput or BytesInput values")
         yield item
-
-
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate configuration key")
-        result[key] = value
-    return result
 
 
 # Only static configuration keys may appear in the exception message.

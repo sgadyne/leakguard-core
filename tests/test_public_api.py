@@ -144,6 +144,20 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual(error.exception.code, "configuration-invalid")
             self.assertNotIn("PRIVATE-MARKER", str(error.exception))
 
+    def test_config_file_read_is_bounded_and_invalid_numeric_values_are_safe(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-test-public-") as directory:
+            path = Path(directory) / "oversize.json"
+            path.write_bytes(b" " * 1_000_001)
+            with self.assertRaises(ConfigurationError) as error:
+                ScanConfig.from_file(path)
+            self.assertEqual(error.exception.code, "configuration-invalid")
+            self.assertNotIn("1000001", str(error.exception))
+        with self.assertRaises(ConfigurationError) as error:
+            ScanConfig.from_mapping({"max_file_bytes": 2**100})
+        self.assertEqual(error.exception.code, "configuration-invalid")
+        self.assertEqual(error.exception.field, "max_file_bytes")
+        self.assertNotIn(str(2**100), str(error.exception))
+
     def test_report_serializer_is_closed_and_counts_derive_from_results(self):
         report = _report()
         payload = report_to_dict(report)
