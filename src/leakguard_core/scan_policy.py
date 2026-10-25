@@ -299,8 +299,11 @@ def evaluate(results, *, policy, policy_id, enumeration_complete=True, issues=()
              pending_files=None, pending_directories=None, cycle_id=None):
     results = tuple(results); issues = tuple(issues)
     all_issues = (*issues, *(issue for result in results for issue in result.issues))
+    if pending_directories is not None and pending_directories > 0:
+        enumeration_complete = False
     required_complete = enumeration_complete and not any(issue.required for issue in all_issues)
     required_complete = required_complete and not any(result.coverage is CoverageState.INCOMPLETE for result in results)
+    required_complete = required_complete and not (pending_files is not None and pending_files > 0)
     omission_count = sum(not issue.required and issue.omission_id is not None for issue in all_issues)
     omission_count += sum(result.coverage is CoverageState.OMITTED and not result.issues for result in results)
     coverage = CoverageSummary(bool(enumeration_complete), bool(required_complete), omission_count,
