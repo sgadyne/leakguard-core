@@ -21,6 +21,37 @@ class ExtractionFailure(Exception):
         super().__init__(code)
 
 
+def _office_text(root, *, properties=False):
+    """Keep adjacent formatting runs together and structural fields apart."""
+    if properties:
+        return '\n'.join(value for value in root.itertext() if value.strip())
+    chunks = []
+    text_nodes = {'t', 'instrText', 'delText'}
+    boundaries = {'p', 'tr', 'row', 'c', 'si'}
+
+    def visit(node):
+        name = node.tag.rsplit('}', 1)[-1]
+        if name in {'br', 'cr'}:
+            chunks.append('\n')
+        elif name == 'tab':
+            chunks.append('\t')
+        if node.text and (name in text_nodes or node.text.strip()):
+            chunks.append(node.text)
+            # Formulas, cached cell values and other individual XML fields are
+            # independent. Rich text's t/instrText/delText runs remain adjacent.
+            if name not in text_nodes:
+                chunks.append('\n')
+        for child in node:
+            visit(child)
+            if child.tail and child.tail.strip():
+                chunks.extend((child.tail, '\n'))
+        if name in boundaries:
+            chunks.append('\n')
+
+    visit(root)
+    return ''.join(chunks).rstrip('\n')
+
+
 def extract_document(data: bytes, format_id: str, limits: ExtractionLimits) -> ExtractionResult:
     parts = []; issues = []; total = 0
 
@@ -79,7 +110,7 @@ def extract_document(data: bytes, format_id: str, limits: ExtractionLimits) -> E
                     if b'<!DOCTYPE' in safe_xml or b'<!ENTITY' in safe_xml:
                         raise ExtractionFailure('extract-failed')
                     root = ET.fromstring(xml)
-                    text = '\n'.join(value for value in root.itertext() if value.strip())
+                    text = _office_text(root, properties=name.startswith('docProps/'))
                     if not text:
                         continue
                     if name.startswith('docProps/'):
