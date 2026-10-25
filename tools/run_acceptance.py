@@ -24,6 +24,11 @@ import uuid
 import venv
 import zipfile
 
+if __package__:
+    from ._safe_inputs import read_empty_json_object, source_identity
+else:
+    from _safe_inputs import read_empty_json_object, source_identity
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_INDEX = "https://pypi.org/simple"
@@ -56,21 +61,7 @@ def _write_exclusive(path: Path, payload: bytes) -> None:
 
 
 def _source_identity() -> tuple[str, str]:
-    def git(*args):
-        return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
-                              check=True, timeout=15).stdout
-    revision = git("rev-parse", "HEAD").decode("ascii").strip()
-    digest = hashlib.sha256(git("diff", "--binary", "HEAD"))
-    for relative in git("ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
-        if not relative:
-            continue
-        path = (ROOT / os.fsdecode(relative)).resolve()
-        if path.is_relative_to(ROOT) and path.is_file() and not path.is_symlink():
-            digest.update(relative + b"\0")
-            with path.open("rb") as stream:
-                while block := stream.read(1_048_576):
-                    digest.update(block)
-    return revision, digest.hexdigest()
+    return source_identity(ROOT)
 
 
 def _command(argv, *, cwd: Path, env: dict[str, str], stage: str,
@@ -102,6 +93,7 @@ def _environment(*, config: Path, state: Path, gitleaks: Path,
                  global_gitconfig: Path, base: dict[str, str] | None = None) -> dict[str, str]:
     env = dict(base if base is not None else os.environ)
     env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
     env.update({
         "LEAKGUARD_CONFIG": str(config),
         "LEAKGUARD_STATE_DIR": str(state),
@@ -211,6 +203,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     builder_site.mkdir(mode=0o700)
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONUSERBASE", None)
     env.update({"PIP_INDEX_URL": OFFICIAL_INDEX, "PIP_CONFIG_FILE": os.devnull,
                 "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_CACHE_DIR": str(work / "pip-cache"),
                 "PYTHONDONTWRITEBYTECODE": "1"})
@@ -246,6 +240,13 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
         members[artifact.name] = rows
     env_root = work / "installed-venv"
     target_python = Path(args.python).resolve(strict=True) if args.python else Path(sys.executable).resolve(strict=True)
+    target_version_probe = subprocess.run(
+        [str(target_python), "-c", "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')"],
+        cwd=work, env=env, capture_output=True, timeout=10, check=False,
+    )
+    if target_version_probe.returncode:
+        raise AcceptanceFailure("target-python-probe")
+    target_python_version = target_version_probe.stdout.decode("ascii").strip()
     _command([str(target_python), "-m", "venv", "--without-pip", str(env_root)], cwd=work, env=env,
              stage="target-venv-create")
     target = _python(env_root)
@@ -260,6 +261,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
         target_site = _site_packages(env_root)
         target_environment = _environment(config=config, state=work / "state", gitleaks=gitleaks,
                                           global_gitconfig=work / "gitconfig", base=env)
+        target_environment["PYTHONNOUSERSITE"] = "1"
+        installation_mode = "venv"
     else:
         # Some relocatable developer Python builds have a compiled `/install`
         # prefix and cannot start copied/symlinked venv interpreters. Install to
@@ -276,6 +279,7 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
                                           global_gitconfig=work / "gitconfig", base=env)
         target_environment["PYTHONUSERBASE"] = str(user_base)
         target_environment.pop("PYTHONNOUSERSITE", None)
+        installation_mode = "private-pythonuserbase-fallback"
     install_env = _environment(config=config, state=work / "state", gitleaks=gitleaks,
                                global_gitconfig=work / "gitconfig", base=env)
     (work / "state").mkdir(mode=0o700)
@@ -297,6 +301,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     installed_tests.mkdir(mode=0o700)
     shutil.copytree(ROOT / "tests", installed_tests / "tests",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy2(ROOT / "tools" / "_safe_inputs.py",
+                 installed_tests / "tests" / "_safe_inputs.py")
     (installed_tests / "state").mkdir(mode=0o700)
     test_env = _environment(config=config, state=installed_tests / "state", gitleaks=gitleaks,
                              global_gitconfig=installed_tests / "gitconfig", base=target_environment)
@@ -333,6 +339,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     if test_count < 100:
         raise AcceptanceFailure("installed-suite-count")
     return {"installed_origin": str(package_origin), "test_count": test_count,
+            "target_python_version": target_python_version,
+            "installation_mode": installation_mode,
             "conformance": conformance,
             "documents_extra": bool(args.documents_extra), "artifacts": members,
             "installed_dependencies": _installed_dependencies(target, installed_tests, test_env)}
@@ -370,9 +378,10 @@ def main(argv=None) -> int:
         config_input, backend_input = Path(args.config), Path(args.gitleaks)
         if config_input.is_symlink() or backend_input.is_symlink():
             raise AcceptanceFailure("preflight")
+        read_empty_json_object(config_input)
         config = config_input.resolve(strict=True)
         backend = backend_input.resolve(strict=True)
-        if json.loads(config.read_text(encoding="utf-8")) != {} or not backend.is_file() or not os.access(backend, os.X_OK):
+        if not backend.is_file() or not os.access(backend, os.X_OK):
             raise AcceptanceFailure("preflight")
         if output.is_symlink() or output.exists():
             raise AcceptanceFailure("receipt-path")
@@ -409,6 +418,17 @@ def main(argv=None) -> int:
             # Preserve build/install artifacts for review; the receipt records
             # their location without copying any source or test input values.
             result["work_directory"] = str(work)
+    try:
+        revision_after, patch_digest_after = _source_identity()
+        source_stable = (revision, patch_digest) == (revision_after, patch_digest_after)
+    except Exception:
+        revision_after, patch_digest_after, source_stable = "unknown", "unknown", False
+    if result.get("outcome") == "passed" and not source_stable:
+        result = {"outcome": "failed", "failed_stage": "source-changed-during-acceptance",
+                  "mode": args.mode}
+    result.update({"source_commit_after": revision_after,
+                   "patch_digest_after": patch_digest_after,
+                   "source_stable": source_stable})
     finished = dt.datetime.now(dt.timezone.utc)
     receipt = {
         "schema_version": 1, "run_id": uuid.uuid4().hex,

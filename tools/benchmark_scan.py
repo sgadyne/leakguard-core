@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import importlib.metadata
 import json
 import os
+import re
 from collections import Counter
 from pathlib import Path
 import platform
@@ -32,6 +34,10 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+if __package__:
+    from ._safe_inputs import read_empty_json_object, source_identity
+else:
+    from _safe_inputs import read_empty_json_object, source_identity
 BENCHMARK_DEADLINE_SECONDS = 180
 
 
@@ -45,14 +51,20 @@ def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _rss_bytes() -> int | None:
+def _rss_high_water_bytes() -> dict[str, int | None]:
     if resource is None:
-        return None
-    try:
-        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    except (AttributeError, OSError, ValueError):
-        return None
-    return int(value if sys.platform == "darwin" else value * 1024)
+        return {"parent_lifetime_high_water_bytes": None,
+                "children_lifetime_high_water_bytes": None}
+
+    def one(who):
+        try:
+            value = resource.getrusage(who).ru_maxrss
+        except (AttributeError, OSError, ValueError):
+            return None
+        return int(value if sys.platform == "darwin" else value * 1024)
+
+    return {"parent_lifetime_high_water_bytes": one(resource.RUSAGE_SELF),
+            "children_lifetime_high_water_bytes": one(resource.RUSAGE_CHILDREN)}
 
 
 def _exclusive_write(path: Path, data: bytes) -> None:
@@ -128,25 +140,42 @@ def _measure(service, sources, *, use_cache: bool) -> tuple[dict, tuple, object]
         launches += 1
         return original(*args, **kwargs)
 
+    statement_count = [0]
+    connection = getattr(getattr(service, "store", None), "conn", None)
+    trace_available = callable(getattr(connection, "set_trace_callback", None))
+    if trace_available:
+        connection.set_trace_callback(lambda _statement: statement_count.__setitem__(
+            0, statement_count[0] + 1))
     started = time.perf_counter()
-    with patch.object(backends, "run_worker", side_effect=counted):
-        report = service.scan(
-            sources, policy=models.ScanPolicy.inventory(),
-            limits=models.ScanLimits(BENCHMARK_DEADLINE_SECONDS, max(1, len(sources))),
-            use_cache=use_cache,
-        )
+    try:
+        with patch.object(backends, "run_worker", side_effect=counted):
+            report = service.scan(
+                sources, policy=models.ScanPolicy.inventory(),
+                limits=models.ScanLimits(BENCHMARK_DEADLINE_SECONDS, max(1, len(sources))),
+                use_cache=use_cache,
+            )
+    finally:
+        if trace_available:
+            connection.set_trace_callback(None)
     elapsed = time.perf_counter() - started
+    rss = _rss_high_water_bytes()
     row = {
-        "seconds": round(elapsed, 6), "worker_launches": launches,
+        "seconds": round(elapsed, 6), "backend_worker_launches": launches,
+        "sqlite_statement_count": statement_count[0] if trace_available else None,
+        "sqlite_statement_count_available": trace_available,
         "deadline_seconds": BENCHMARK_DEADLINE_SECONDS,
         "findings": sum(len(result.findings) for result in report.results),
         "results": len(report.results),
         "coverage_complete": all(result.coverage.value == "complete" for result in report.results),
+        "required_complete": report.coverage.required_complete,
+        "enumeration_complete": report.coverage.enumeration_complete,
+        "named_omissions": sorted({issue.omission_id for result in report.results
+                                    for issue in result.issues if issue.omission_id}),
         "outcomes": dict(Counter(result.outcome.value for result in report.results)),
         "coverage_states": dict(Counter(result.coverage.value for result in report.results)),
         "issue_codes": dict(Counter(issue.code.value for result in report.results for issue in result.issues)),
         "policy_verdict": report.decision.verdict.value,
-        "process_rss_high_water_bytes": _rss_bytes(),
+        **rss,
         "policy_id": report.policy_id,
         "runtime_id": next((result.identity.runtime_id for result in report.results), None),
     }
@@ -154,12 +183,97 @@ def _measure(service, sources, *, use_cache: bool) -> tuple[dict, tuple, object]
 
 
 def _validate_config(path: Path) -> Path:
-    if path.is_symlink():
-        raise BenchmarkFailure("config-invalid")
-    resolved = path.resolve(strict=True)
-    if json.loads(resolved.read_text(encoding="utf-8")) != {}:
+    try:
+        read_empty_json_object(path)
+        resolved = path.resolve(strict=True)
+    except (OSError, ValueError, RuntimeError):
         raise BenchmarkFailure("config-invalid")
     return resolved
+
+
+def _part_curve_coverage(report) -> dict:
+    from leakguard_core import models
+
+    issues = tuple(issue for result in report.results for issue in result.issues)
+    expected = ((models.ErrorCode.POLICY_OMISSION, "office-nontext", False),)
+    actual = tuple(sorted(((issue.code, issue.omission_id, issue.required)
+                           for issue in issues),
+                          key=lambda row: (row[0].value, row[1] or "", row[2])))
+    valid_result_states = all(result.coverage in {
+        models.CoverageState.COMPLETE, models.CoverageState.OMITTED,
+    } for result in report.results)
+    required_complete = (report.coverage.enumeration_complete
+                         and report.coverage.required_complete
+                         and not any(issue.required for issue in issues)
+                         and valid_result_states)
+    return {
+        "required_complete": required_complete,
+        "named_omissions": sorted(issue.omission_id for issue in issues if issue.omission_id),
+        "expected_nontext_omission_only": actual == expected,
+    }
+
+
+def _hook_latency_benchmark(*, root: Path, config: Path, backend: Path,
+                            repetitions: int, marker: str) -> list[dict]:
+    from leakguard_core import hooks
+
+    result = []
+    module_path = str(ROOT / "src")
+    for repetition in range(repetitions):
+        repository = root / f"hook-{repetition}"
+        repository.mkdir(mode=0o700)
+        git_env = dict(os.environ)
+        git_env.pop("PYTHONHOME", None)
+        git_env.pop("PYTHONPATH", None)
+        git_env.update({
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
+            "GIT_TERMINAL_PROMPT": "0",
+            "LEAKGUARD_CONFIG": str(config),
+            "LEAKGUARD_STATE_DIR": str(root / f"hook-state-{repetition}"),
+            "LEAKGUARD_GITLEAKS": str(backend),
+            "PYTHONPATH": module_path,
+        })
+
+        def git(*arguments, check=True):
+            return subprocess.run(["git", *arguments], cwd=repository, env=git_env,
+                                  capture_output=True, timeout=180, check=check)
+
+        git("-c", "init.templateDir=", "init", "-q")
+        git("config", "user.name", "Synthetic Benchmark")
+        git("config", "user.email", "benchmark@example.invalid")
+        git("config", "commit.gpgsign", "false")
+        git("config", "core.hooksPath", ".git/hooks")
+        (repository / "seed.txt").write_text("synthetic seed\n", encoding="utf-8")
+        git("add", "seed.txt")
+        git("commit", "--no-verify", "-qm", "synthetic seed")
+        hooks.install_at(repository / ".git" / "hooks")
+
+        clean = repository / "clean.txt"
+        clean.write_text("ordinary synthetic text\n", encoding="utf-8")
+        git("add", "clean.txt")
+        started = time.perf_counter()
+        clean_commit = git("commit", "-qm", "synthetic clean", check=False)
+        clean_seconds = time.perf_counter() - started
+
+        positive = repository / "positive.txt"
+        candidate = f'client_secret = "{marker}-{repetition:03d}"\n'
+        positive.write_text(candidate, encoding="utf-8")
+        git("add", "positive.txt")
+        started = time.perf_counter()
+        positive_commit = git("commit", "-qm", "synthetic positive", check=False)
+        positive_seconds = time.perf_counter() - started
+        combined = positive_commit.stdout + positive_commit.stderr
+        result.append({
+            "repetition": repetition,
+            "clean_seconds": round(clean_seconds, 6),
+            "clean_exit_code": clean_commit.returncode,
+            "positive_seconds": round(positive_seconds, 6),
+            "positive_exit_code": positive_commit.returncode,
+            "positive_blocked": positive_commit.returncode != 0 and b"LeakGuard blocked" in combined,
+            "positive_output_redacted": marker.encode("ascii") not in combined,
+        })
+    return result
 
 
 def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
@@ -172,10 +286,14 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
     if gitleaks.is_symlink() or not gitleaks.is_file() or not os.access(gitleaks, os.X_OK):
         raise BenchmarkFailure("backend-invalid")
     rules = Path(engine.RULES).resolve(strict=True)
+    service_open_started = time.perf_counter()
     service = engine.ScanService({
         "gitleaks_executable": str(gitleaks.resolve(strict=True)),
         "gitleaks_config": str(rules),
     }, state_dir=state)
+    service_open_seconds = time.perf_counter() - service_open_started
+    rules_digest = _sha(rules.read_bytes())
+    backend_digest = _sha(gitleaks.read_bytes())
     rng = random.Random(seed)
     marker = "SyntheticOnly~M7kQ2vR9xL4nD8pS6aH3zB5cF1eG-" + hashlib.sha256(
         str(rng.getrandbits(256)).encode("ascii")).hexdigest()[:8]
@@ -224,10 +342,20 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                 source = models.BytesInput(data, f"part-curve-{count}-{repetition}.docx")
                 row, _normalized_findings, report = _measure(service, [source], use_cache=False)
                 row["parts_requested"] = count
-                row["parts_detected"] = row["worker_launches"]
+                row["backend_worker_launches"] = row["backend_worker_launches"]
+                coverage = _part_curve_coverage(report)
+                row.update(coverage)
+                row["covered_text_surfaces"] = row["backend_worker_launches"]
+                row["covered_text_surfaces_complete"] = (
+                    row["required_complete"] and row["expected_nontext_omission_only"]
+                    and row["covered_text_surfaces"] == count
+                )
                 row["input_sha256"] = _sha(data)
-                row["coverage_complete"] = all(result.coverage.value == "complete" for result in report.results)
                 part_curve.append({"parts": count, "repetition": repetition, **row})
+        hook_rows = _hook_latency_benchmark(
+            root=input_root, config=config, backend=gitleaks,
+            repetitions=repetitions, marker=marker,
+        )
     finally:
         service.close()
 
@@ -243,14 +371,52 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
         not all(item["measurements"][mode]["coverage_complete"]
                 for mode in ("cold", "warm", "uncached"))
         for item in benchmarks
-    ) + sum(not item["coverage_complete"] or item["parts_detected"] != item["parts_requested"]
-            for item in part_curve)
+    ) + sum(not item["covered_text_surfaces_complete"] for item in part_curve)
+    hook_failures = sum(
+        item["clean_exit_code"] != 0 or not item["positive_blocked"]
+        or not item["positive_output_redacted"] for item in hook_rows
+    )
+    sample_report = next((item["measurements"]["cold"] for item in benchmarks), {})
+    version_result = subprocess.run([str(gitleaks), "version"], capture_output=True,
+                                    timeout=10, check=False)
+    version_text = version_result.stdout.decode("utf-8", "replace") if version_result.returncode == 0 else ""
+    version_match = re.search(r"\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b", version_text)
+    backend_version = version_match.group(0) if version_match else "unavailable"
+    dependencies = {}
+    for package in ("packaging", "pypdf", "olefile"):
+        try:
+            dependencies[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            dependencies[package] = "unavailable"
     return {
         "seed": seed, "repetitions": repetitions, "file_curve": benchmarks,
-        "part_curve": part_curve,
+        "part_curve": part_curve, "hook_latency": hook_rows,
+        "service_open_seconds": round(service_open_seconds, 6),
+        "backend_sha256": backend_digest, "backend_version": backend_version,
+        "rules_sha256": rules_digest, "installed_dependencies": dependencies,
+        "policy_id": sample_report.get("policy_id"),
+        "runtime_id": sample_report.get("runtime_id"),
+        "scan_identities_consistent": all(
+            (row["policy_id"], row["runtime_id"]) ==
+            (sample_report.get("policy_id"), sample_report.get("runtime_id"))
+            for item in benchmarks for row in item["measurements"].values()
+        ),
+        "metric_definitions": {
+            "backend_worker_launches": "Calls to leakguard_core.backends.run_worker only; excludes Git, parser and other subprocesses.",
+            "sqlite_statement_count": "SQLite trace callback count only; statement text and parameters are discarded.",
+            "parent_lifetime_high_water_bytes": "Parent process lifetime RSS high-water, not per-operation peak.",
+            "children_lifetime_high_water_bytes": "Cumulative child-process lifetime RSS high-water, not per-operation peak.",
+            "service_open_seconds": "ScanService constructor time, recorded separately from scan calls.",
+        },
         "checks": {"equivalence_failures": equivalence_failures,
                    "cache_reuse_failures": cache_failures,
-                   "coverage_failures": coverage_failures},
+                   "coverage_failures": coverage_failures,
+                   "installed_hook_failures": hook_failures,
+                   "scan_identity_failures": int(not all(
+                       (row["policy_id"], row["runtime_id"]) ==
+                       (sample_report.get("policy_id"), sample_report.get("runtime_id"))
+                       for item in benchmarks for row in item["measurements"].values()
+                   ))},
     }
 
 
@@ -290,23 +456,44 @@ def main(argv=None) -> int:
         finally:
             shutil.rmtree(input_root)
         failures = sum(details["checks"].values())
+        source_commit, source_digest = source_identity(ROOT)
+        backend_digest_after = _sha(backend.read_bytes())
+        backend_stable = backend_digest == backend_digest_after
+        if not backend_stable and failures == 0:
+            failures = 1
         result = {"outcome": "passed" if failures == 0 else "failed",
                   "failed_stage": None if failures == 0 else "benchmark-checks",
-                  "source_commit": subprocess.run(
-                      ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
-                      timeout=10, check=True).stdout.decode("ascii").strip(),
+                  "source_commit": source_commit, "source_digest": source_digest,
+                  "config_sha256": _sha(config.read_bytes()),
+                  "backend_sha256_after": backend_digest_after,
+                  "backend_stable": backend_stable,
                   "details": details}
     except BenchmarkFailure as error:
         result = {"outcome": "failed", "failed_stage": error.code}
     except Exception:
         result = {"outcome": "setup-failed", "failed_stage": "preflight"}
+    try:
+        source_commit_after, source_digest_after = source_identity(ROOT)
+        source_stable = (result.get("source_commit"), result.get("source_digest")) == (
+            source_commit_after, source_digest_after,
+        )
+    except Exception:
+        source_commit_after, source_digest_after, source_stable = "unknown", "unknown", False
+    if result.get("outcome") == "passed" and not source_stable:
+        result = {"outcome": "failed", "failed_stage": "source-changed-during-benchmark",
+                  "source_commit": result.get("source_commit"),
+                  "source_digest": result.get("source_digest")}
     receipt = {
         "schema_version": 1, "run_id": uuid.uuid4().hex,
         "host_label": platform.system().lower(), "python": sys.version.split()[0],
         "started_utc": started.isoformat(),
         "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "elapsed_seconds": round(time.monotonic() - monotonic, 3),
-        "gitleaks_identity": backend_digest, **result,
+        "gitleaks_identity": backend_digest,
+        "source_commit_after": source_commit_after,
+        "source_digest_after": source_digest_after,
+        "source_stable": source_stable,
+        **result,
     }
     try:
         _exclusive_write(output, (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8"))

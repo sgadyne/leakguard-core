@@ -8,8 +8,10 @@
    validation receipt.
 3. Run `tools/run_acceptance.py --mode wheel` for the supported Python versions,
    then repeat with `--documents-extra`. Each run uses a new isolated install,
-   verifies import origin outside the checkout, inspects the sdist and wheel,
-   executes plugin conformance checks, and runs the full suite.
+   records the target Python version and whether installation used a venv or
+   private Python user base, verifies import origin outside the checkout,
+   inspects the sdist and wheel, executes plugin conformance checks, and runs
+   the full suite.
 4. Review the archive member lists and digests recorded in each receipt. Confirm
    that `MANIFEST.in` includes public compatibility, release and validation
    documents plus the plugin example source and documentation. Keep receipts,

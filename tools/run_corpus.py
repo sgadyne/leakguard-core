@@ -19,6 +19,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "tests" / "fixtures" / "corpus_catalog.json"
 sys.path.insert(0, str(ROOT / "src"))
+from _safe_inputs import read_empty_json_object, source_identity
 
 
 def _sha(data: bytes) -> str:
@@ -45,26 +46,7 @@ def _exclusive_write(path: Path, data: bytes) -> None:
 
 
 def _source_identity() -> tuple[str, str]:
-    revision = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, check=True, timeout=5,
-    ).stdout.decode("ascii").strip()
-    patch = subprocess.run(
-        ["git", "diff", "--binary", "HEAD"], cwd=ROOT, capture_output=True, check=True, timeout=10,
-    ).stdout
-    hasher = hashlib.sha256(patch)
-    untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        cwd=ROOT, capture_output=True, check=True, timeout=5,
-    ).stdout
-    for relative in untracked.split(b"\0"):
-        if not relative:
-            continue
-        path = (ROOT / os.fsdecode(relative)).resolve()
-        if not path.is_relative_to(ROOT) or not path.is_file() or path.is_symlink():
-            continue
-        hasher.update(relative + b"\0")
-        hasher.update(path.read_bytes())
-    return revision, hasher.hexdigest()
+    return source_identity(ROOT)
 
 
 def _dependency_versions() -> dict[str, str]:
@@ -88,11 +70,8 @@ def _file_sha(path: Path) -> str:
 
 def _validate(args):
     config_input = Path(args.config)
-    if config_input.is_symlink():
-        raise ValueError
+    read_empty_json_object(config_input)
     config = config_input.resolve(strict=True)
-    if json.loads(config.read_text(encoding="utf-8")) != {}:
-        raise ValueError
     backend_input = Path(args.gitleaks)
     if backend_input.is_symlink():
         raise ValueError
@@ -148,6 +127,7 @@ def main(argv=None) -> int:
                    "declared_state": row["state"]} for row in catalog_data["cases"]]
         revision, patch_digest = _source_identity()
         environment = dict(os.environ)
+        environment.pop("PYTHONHOME", None)
         environment.update({
             "LEAKGUARD_CONFIG": str(config),
             "LEAKGUARD_STATE_DIR": str(state),
@@ -197,6 +177,13 @@ def main(argv=None) -> int:
         summary = None
         manifest_bytes = b""
 
+    try:
+        revision_after, patch_digest_after = _source_identity()
+        source_stable = (revision, patch_digest) == (revision_after, patch_digest_after)
+    except Exception:
+        revision_after, patch_digest_after, source_stable = "unknown", "unknown", False
+    if outcome == "passed" and not source_stable:
+        outcome, exit_code = "failed", 1
     finished = dt.datetime.now(dt.timezone.utc)
     receipt = {
         "run_id": uuid.uuid4().hex,
@@ -204,6 +191,9 @@ def main(argv=None) -> int:
         "host_label": platform.system().lower(),
         "source_commit": revision,
         "patch_digest": patch_digest,
+        "source_commit_after": revision_after,
+        "patch_digest_after": patch_digest_after,
+        "source_stable": source_stable,
         "input_manifest_digest": _sha(manifest_bytes),
         "python": sys.version.split()[0],
         "dependency_lock_digest": _sha(_json({"python": sys.version.split()[0], "packages": _dependency_versions()})),
