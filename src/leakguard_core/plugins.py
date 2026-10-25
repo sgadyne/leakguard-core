@@ -15,6 +15,7 @@ import sys
 from typing import Protocol
 
 from ._supervision import WorkerError, run_worker, worker_environment
+from ._python import core_command
 from .extraction import (Extraction, ExtractedPart, ExtractionContext, ExtractionLimits)
 
 API_VERSION = 1
@@ -224,11 +225,17 @@ def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None
                'component': spec.get('component'), 'operation': operation, **payload}
     try:
         data = json.dumps(request, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
-        process = run_worker([sys.executable, '-X', 'utf8', '-m', 'leakguard_core.plugin_worker'], data,
+        # Extension modules are explicitly selected trusted code. Preserve their
+        # bounded parent search roots, while pinning the worker's own core and
+        # standard-library imports before any caller-controlled directory.
+        from itertools import islice
+        paths = tuple(str(Path(value or os.getcwd()).absolute())
+                      for value in islice(iter(sys.path), 257))
+        process = run_worker(core_command('leakguard_core.plugin_worker', search_paths=paths), data,
                              timeout=timeout if timeout is not None else getattr(limits, 'detector_timeout_seconds', 45),
                              max_output_bytes=maximum, max_input_bytes=maximum,
                              memory_bytes=getattr(limits, 'worker_memory_bytes', 512 * 1024 * 1024),
-                             env=worker_environment({'PYTHONPATH': os.pathsep.join(sys.path)}), cancel=cancel)
+                             env=worker_environment(), cancel=cancel)
         if process.returncode:
             raise PluginError('plugin-crashed')
         response = _loads(process.stdout)
