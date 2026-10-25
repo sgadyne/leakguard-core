@@ -285,6 +285,18 @@ class SourceRef:
         _require_nonempty("path", self.path)
         for name in ("repository", "commit", "blob_oid", "index_tree_oid"):
             _require_optional_string(name, getattr(self, name))
+        for name in ("commit", "blob_oid", "index_tree_oid"):
+            value = getattr(self, name)
+            if value is not None and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is None:
+                raise ValueError(f"{name} must be a full lowercase Git object ID or None")
+        if self.kind in {SourceKind.FILESYSTEM, SourceKind.BYTES} and any(
+            getattr(self, name) is not None for name in ("commit", "blob_oid", "index_tree_oid")
+        ):
+            raise ValueError("non-Git sources cannot include Git object IDs")
+        if self.kind is SourceKind.GIT_INDEX and self.commit is not None:
+            raise ValueError("index sources cannot include a commit ID")
+        if self.kind is SourceKind.GIT_COMMIT and self.index_tree_oid is not None:
+            raise ValueError("commit sources cannot include an index tree ID")
 
 
 @dataclass(frozen=True, slots=True)

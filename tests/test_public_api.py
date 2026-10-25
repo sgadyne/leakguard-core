@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from leakguard_core.api import ConfigurationError, ScanConfig
+from leakguard_core.api import ConfigurationError, ScanConfig, Scanner
 from leakguard_core.cli import _parser, main
 from leakguard_core import manage, presentation
 from leakguard_core.models import (
@@ -28,9 +28,12 @@ from leakguard_core.models import (
     FindingClassification,
     FindingRecord,
     FindingSeverity,
+    FileInput,
     PolicyDecision,
     RuntimeIdentity,
+    ScanLimits,
     ScanOutcome,
+    ScanPolicy,
     ScanReport,
     ScanResult,
     SourceKind,
@@ -135,6 +138,20 @@ class PublicApiTests(unittest.TestCase):
         value = BytesInput(b"PRIVATE-BYTES-MARKER", "fixture.bin")
         self.assertNotIn("PRIVATE-BYTES-MARKER", repr(value))
 
+    def test_source_refs_validate_git_object_identity_without_requiring_nullable_fields(self):
+        git = SourceRef(SourceKind.GIT_COMMIT, "fixture.txt", commit="a" * 40, blob_oid="b" * 64)
+        index = SourceRef(SourceKind.GIT_INDEX, "fixture.txt", index_tree_oid="c" * 40)
+        partial_git = SourceRef(SourceKind.GIT_COMMIT, "fixture.txt")
+        self.assertEqual(git.commit, "a" * 40)
+        self.assertEqual(index.index_tree_oid, "c" * 40)
+        self.assertIsNone(partial_git.commit)
+        with self.assertRaises(ValueError):
+            SourceRef(SourceKind.GIT_COMMIT, "fixture.txt", commit="short")
+        with self.assertRaises(ValueError):
+            SourceRef(SourceKind.FILESYSTEM, "fixture.txt", blob_oid="a" * 40)
+        with self.assertRaises(ValueError):
+            SourceRef(SourceKind.GIT_COMMIT, "fixture.txt", index_tree_oid="a" * 40)
+
     def test_config_file_rejects_duplicate_keys_without_echoing_values(self):
         with tempfile.TemporaryDirectory(prefix="leakguard-test-public-") as directory:
             path = Path(directory) / "config.json"
@@ -187,7 +204,7 @@ class PublicApiTests(unittest.TestCase):
         self.assertIn("\\udcff", presentation.clean(source.path))
 
     def test_manage_current_history_uses_closed_store_report_without_raw_fields(self):
-        stamp = "2026-10-25T18:00:00+00:00"
+        stamp = "2026-10-25X18:00:00+00:00"
         row = {
             "id": "a" * 64,
             "source": {"kind": "filesystem", "path": "fixture.txt", "repository": None,
@@ -197,7 +214,7 @@ class PublicApiTests(unittest.TestCase):
             "detector_id": "builtin", "detector_severity": "review", "severity": "review",
             "classification": "credential-candidate", "state": "unknown",
             "first_seen": stamp, "last_seen": stamp, "last_verified": None,
-            "resolved_at": None, "state_reason": "historical-observation",
+            "resolved_at": None, "state_reason": "source-unavailable",
             "matched_value": "PRIVATE-VALUE", "policy_id": "internal-policy-id",
         }
 
@@ -227,6 +244,8 @@ class PublicApiTests(unittest.TestCase):
             self.assertNotIn("PRIVATE-VALUE", stdout.getvalue())
             self.assertNotIn("PRIVATE-SOURCE", stdout.getvalue())
             self.assertNotIn("policy_id", payload["findings"][0])
+            self.assertEqual(payload["findings"][0]["state_reason"], "source-unavailable")
+            self.assertEqual(payload["findings"][0]["first_seen"], "2026-10-25T18:00:00.000000Z")
             self.assertTrue(store.closed)
             self.assertEqual(stderr.getvalue(), "")
 
@@ -422,6 +441,28 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual(scanner.limits.detector_timeout_seconds, 7)
             self.assertEqual(stdout.getvalue().count("\n"), 1)
             self.assertEqual(stderr.getvalue(), "")
+
+    def test_python_scanner_uses_caller_supplied_limits(self):
+        report = _report()
+
+        class FakeService:
+            received = None
+
+            def scan(self, inputs, *, policy, limits, use_cache, cancel):
+                self.received = (tuple(inputs), policy, limits, use_cache, cancel)
+                return report
+
+            def close(self):
+                pass
+
+        service = FakeService()
+        scanner = Scanner(service)
+        input_value = FileInput(Path("synthetic.txt"))
+        policy = ScanPolicy.inventory()
+        limits = ScanLimits(30, 10, max_file_bytes=4567, detector_timeout_seconds=9)
+        result = scanner.scan([input_value], policy=policy, limits=limits, use_cache=False)
+        self.assertIs(result, report)
+        self.assertEqual(service.received, ((input_value,), policy, limits, False, None))
 
     def test_cli_malformed_or_missing_config_fails_closed_to_stderr(self):
         with tempfile.TemporaryDirectory(prefix="leakguard-test-cli-config-") as directory:

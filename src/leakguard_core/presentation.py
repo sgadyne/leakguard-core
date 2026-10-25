@@ -250,7 +250,8 @@ def _public_finding_row(row):
     reason = row.get("state_reason")
     if reason not in {
         "historical-observation", "incomplete-scan", "policy-obsolete", "complete-content-scan",
-        "verified-present", "partial-observation", "legacy-unverified", "source-absent", "source-event",
+        "verified-present", "partial-observation", "legacy-unverified", "source-event",
+        "source-unavailable",
     }:
         raise ValueError("invalid stored finding")
     first_seen = _public_timestamp(row.get("first_seen"))
@@ -300,7 +301,7 @@ def _public_timestamp(value, allow_none=False):
         raise ValueError("invalid stored finding")
     if parsed.utcoffset() != datetime.timedelta(0):
         raise ValueError("invalid stored finding")
-    return value
+    return parsed.astimezone(datetime.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def select_report(state, explicit=None, repo=None, cwd=None):
