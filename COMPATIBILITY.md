@@ -72,6 +72,10 @@ with `--state history` for prior observations. Both current/history views includ
 timestamps and use a closed redacted JSON schema with `--format json`. Successful
 reads return 0 even when reports contain blocking findings; read or state failures
 return 2. The query path opens the store without initializing detectors.
+Current findings describe the latest observed state, not confirmed filesystem
+absence. An observed delete or rename makes prior evidence unknown rather than
+resolving it; notifications can be lost, and this release exposes no explicit
+absence-confirmation action. Partial or failed audits do not establish absence.
 
 This differs from 0.1 callers that treated a zero scan exit as evidence of a clean
 scan. A zero means the requested inventory completed under its declared policy;
