@@ -276,6 +276,53 @@ def _hook_latency_benchmark(*, root: Path, config: Path, backend: Path,
     return result
 
 
+def _aggregate_checks(benchmarks: list[dict], part_curve: list[dict],
+                     hook_rows: list[dict]) -> tuple[dict[str, int], list[dict]]:
+    """Aggregate case-local checks without assuming policy IDs are global.
+
+    Scan limits are part of policy identity, so cases at different file counts
+    may correctly have different policy IDs. The three measurements for one
+    case must agree with each other; the receipt retains identities by case.
+    """
+    identity_cases = []
+    for item in benchmarks:
+        measurements = item["measurements"]
+        policy_ids = {mode: measurements[mode]["policy_id"]
+                      for mode in ("cold", "warm", "uncached")}
+        runtime_ids = {mode: measurements[mode]["runtime_id"]
+                       for mode in ("cold", "warm", "uncached")}
+        identity_cases.append({
+            "files": item["files"], "content": item["content"],
+            "repetition": item["repetition"],
+            "policy_ids": policy_ids, "runtime_ids": runtime_ids,
+            "consistent_within_case": (len(set(policy_ids.values())) == 1
+                                        and len(set(runtime_ids.values())) == 1),
+        })
+
+    return ({
+        "equivalence_failures": sum(
+            not all(item["equivalence"].values()) for item in benchmarks
+        ),
+        "cache_reuse_failures": sum(
+            item["measurements"]["warm"]["backend_worker_launches"] != 0
+            or item["warm_reused_results"] != item["files"]
+            for item in benchmarks
+        ),
+        "coverage_failures": sum(
+            not all(item["measurements"][mode]["coverage_complete"]
+                    for mode in ("cold", "warm", "uncached"))
+            for item in benchmarks
+        ) + sum(not item["covered_text_surfaces_complete"] for item in part_curve),
+        "installed_hook_failures": sum(
+            item["clean_exit_code"] != 0 or not item["positive_blocked"]
+            or not item["positive_output_redacted"] for item in hook_rows
+        ),
+        "scan_identity_failures": sum(
+            not item["consistent_within_case"] for item in identity_cases
+        ),
+    }, identity_cases)
+
+
 def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                   repetitions: int, seed: int, input_root: Path) -> dict:
     from leakguard_core import engine, models
@@ -342,7 +389,6 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                 source = models.BytesInput(data, f"part-curve-{count}-{repetition}.docx")
                 row, _normalized_findings, report = _measure(service, [source], use_cache=False)
                 row["parts_requested"] = count
-                row["backend_worker_launches"] = row["backend_worker_launches"]
                 coverage = _part_curve_coverage(report)
                 row.update(coverage)
                 row["covered_text_surfaces"] = row["backend_worker_launches"]
@@ -359,24 +405,7 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
     finally:
         service.close()
 
-    equivalence_failures = sum(
-        not all(item["equivalence"].values()) for item in benchmarks
-    )
-    cache_failures = sum(
-        item["measurements"]["warm"]["worker_launches"] != 0
-        or item["warm_reused_results"] != item["files"]
-        for item in benchmarks
-    )
-    coverage_failures = sum(
-        not all(item["measurements"][mode]["coverage_complete"]
-                for mode in ("cold", "warm", "uncached"))
-        for item in benchmarks
-    ) + sum(not item["covered_text_surfaces_complete"] for item in part_curve)
-    hook_failures = sum(
-        item["clean_exit_code"] != 0 or not item["positive_blocked"]
-        or not item["positive_output_redacted"] for item in hook_rows
-    )
-    sample_report = next((item["measurements"]["cold"] for item in benchmarks), {})
+    checks, identity_cases = _aggregate_checks(benchmarks, part_curve, hook_rows)
     version_result = subprocess.run([str(gitleaks), "version"], capture_output=True,
                                     timeout=10, check=False)
     version_text = version_result.stdout.decode("utf-8", "replace") if version_result.returncode == 0 else ""
@@ -394,13 +423,8 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
         "service_open_seconds": round(service_open_seconds, 6),
         "backend_sha256": backend_digest, "backend_version": backend_version,
         "rules_sha256": rules_digest, "installed_dependencies": dependencies,
-        "policy_id": sample_report.get("policy_id"),
-        "runtime_id": sample_report.get("runtime_id"),
-        "scan_identities_consistent": all(
-            (row["policy_id"], row["runtime_id"]) ==
-            (sample_report.get("policy_id"), sample_report.get("runtime_id"))
-            for item in benchmarks for row in item["measurements"].values()
-        ),
+        "scan_identity_cases": identity_cases,
+        "scan_identities_consistent": checks["scan_identity_failures"] == 0,
         "metric_definitions": {
             "backend_worker_launches": "Calls to leakguard_core.backends.run_worker only; excludes Git, parser and other subprocesses.",
             "sqlite_statement_count": "SQLite trace callback count only; statement text and parameters are discarded.",
@@ -408,15 +432,7 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
             "children_lifetime_high_water_bytes": "Cumulative child-process lifetime RSS high-water, not per-operation peak.",
             "service_open_seconds": "ScanService constructor time, recorded separately from scan calls.",
         },
-        "checks": {"equivalence_failures": equivalence_failures,
-                   "cache_reuse_failures": cache_failures,
-                   "coverage_failures": coverage_failures,
-                   "installed_hook_failures": hook_failures,
-                   "scan_identity_failures": int(not all(
-                       (row["policy_id"], row["runtime_id"]) ==
-                       (sample_report.get("policy_id"), sample_report.get("runtime_id"))
-                       for item in benchmarks for row in item["measurements"].values()
-                   ))},
+        "checks": checks,
     }
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -20,6 +21,13 @@ spec = importlib.util.spec_from_file_location("evidence_safe_inputs", HELPER)
 safe_inputs = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 spec.loader.exec_module(safe_inputs)
+
+BENCHMARK = ROOT / "tools" / "benchmark_scan.py"
+sys.path.insert(0, str(ROOT / "tools"))
+benchmark_spec = importlib.util.spec_from_file_location("evidence_benchmark_scan", BENCHMARK)
+benchmark_scan = importlib.util.module_from_spec(benchmark_spec)
+assert benchmark_spec and benchmark_spec.loader
+benchmark_spec.loader.exec_module(benchmark_scan)
 
 
 class SafeInputTests(unittest.TestCase):
@@ -73,6 +81,81 @@ class SafeInputTests(unittest.TestCase):
                 b"symlink\0" + os.fsencode(str(outside)) + b"\0"
             ).digest()
             self.assertEqual(digest.digest(), expected)
+
+
+class BenchmarkAggregationTests(unittest.TestCase):
+    def test_report_aggregation_uses_backend_metric_and_case_local_identities(self):
+        def case(files, policy_id):
+            rows = {}
+            for mode in ("cold", "warm", "uncached"):
+                rows[mode] = {
+                    "backend_worker_launches": 0 if mode == "warm" else files,
+                    "coverage_complete": True,
+                    "policy_id": policy_id,
+                    "runtime_id": "runtime-fixed",
+                }
+            return {
+                "files": files, "content": "clean", "repetition": 0,
+                "measurements": rows, "warm_reused_results": files,
+                "equivalence": {"warm_matches_cold": True,
+                                "uncached_matches_cold": True},
+            }
+
+        benchmarks = [case(10, "policy-small-limit"), case(50, "policy-large-limit")]
+        part_curve = [{"covered_text_surfaces_complete": True}]
+        hooks = [{"clean_exit_code": 0, "positive_blocked": True,
+                  "positive_output_redacted": True}]
+        checks, identities = benchmark_scan._aggregate_checks(benchmarks, part_curve, hooks)
+
+        self.assertEqual(checks, {
+            "equivalence_failures": 0, "cache_reuse_failures": 0,
+            "coverage_failures": 0, "installed_hook_failures": 0,
+            "scan_identity_failures": 0,
+        })
+        self.assertTrue(all(row["consistent_within_case"] for row in identities))
+        self.assertEqual(identities[0]["policy_ids"]["cold"], "policy-small-limit")
+        self.assertEqual(identities[1]["policy_ids"]["cold"], "policy-large-limit")
+
+    def test_mocked_benchmark_result_reaches_redacted_receipt(self):
+        measurements = {
+            mode: {"backend_worker_launches": 0, "coverage_complete": True,
+                   "policy_id": "policy-limit-10", "runtime_id": "runtime-stable"}
+            for mode in ("cold", "warm", "uncached")
+        }
+        checks, identities = benchmark_scan._aggregate_checks([{
+            "files": 10, "content": "clean", "repetition": 0,
+            "measurements": measurements, "warm_reused_results": 10,
+            "equivalence": {"warm_matches_cold": True,
+                            "uncached_matches_cold": True},
+        }], [{"covered_text_surfaces_complete": True}], [{
+            "clean_exit_code": 0, "positive_blocked": True,
+            "positive_output_redacted": True,
+        }])
+        details = {"checks": checks, "scan_identity_cases": identities,
+                   "scan_identities_consistent": True}
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "empty.json"
+            config.write_text("{}\n", encoding="utf-8")
+            backend = root / "backend"
+            backend.write_text("synthetic backend placeholder\n", encoding="ascii")
+            backend.chmod(0o700)
+            output = root / "receipt.json"
+            source = ("a" * 40, "b" * 64)
+            with patch.object(benchmark_scan, "run_benchmark", return_value=details), \
+                    patch.object(benchmark_scan, "source_identity", return_value=source):
+                status = benchmark_scan.main([
+                    "--output", str(output), "--state", str(root / "state"),
+                    "--config", str(config), "--gitleaks", str(backend),
+                    "--repetitions", "3",
+                ])
+            self.assertEqual(status, 0)
+            receipt = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["outcome"], "passed")
+            self.assertEqual(receipt["details"]["checks"]["cache_reuse_failures"], 0)
+            self.assertEqual(receipt["details"]["scan_identity_cases"][0]["policy_ids"]["warm"],
+                             "policy-limit-10")
 
 
 if __name__ == "__main__":
