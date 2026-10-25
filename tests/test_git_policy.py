@@ -19,7 +19,7 @@ class RequiredDocumentTests(unittest.TestCase):
             (repo / 'broken.docx').write_bytes(b'synthetic document')
             subprocess.run(['git', 'add', 'broken.docx'], cwd=repo, check=True)
             real_git = engine.git
-            with patch.object(engine, 'STATE', root / 'state'), patch.object(engine, 'git', side_effect=lambda *args, **kwargs: real_git(*args, **({'cwd': repo} | kwargs))), patch.object(engine, 'existing_hook', return_value=0), patch.object(engine.presentation, 'render', return_value='typed incomplete report'), patch('sys.stderr', new_callable=io.StringIO):
+            with patch.object(engine, 'STATE', root / 'state'), patch('pathlib.Path.cwd', return_value=repo), patch.object(engine, 'existing_hook', return_value=0), patch.object(engine.presentation, 'render', return_value='typed incomplete report'), patch('sys.stderr', new_callable=io.StringIO):
                 self.assertEqual(engine.git_hook('pre-commit', []), 2)
 
 
@@ -182,3 +182,56 @@ class OriginalGitObjectTests(unittest.TestCase):
         report = self.scan_tip(self.git('rev-parse', 'synthetic-blob-tag').decode().strip())
         self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
         self.assertTrue(any(issue.code is m.ErrorCode.GIT_INPUT_INVALID for issue in report.issues))
+
+
+class GitPathIdentityTests(unittest.TestCase):
+    setUp = GitSnapshotTests.setUp
+    tearDown = GitSnapshotTests.tearDown
+    git = GitSnapshotTests.git
+
+    def test_subdirectory_request_uses_repository_root_without_resetting_deadline(self):
+        from leakguard_core import models as m
+        from leakguard_core.git_scanning import GitInputs
+        child = self.repo / 'subdirectory'; child.mkdir()
+        (child / 'candidate.txt').write_text('ordinary text\n')
+        self.git('add', '.')
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            report = service.scan_git(child, request=m.GitRequest(m.GitRequestKind.INDEX), limits=m.ScanLimits(30, 10))
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW)
+            self.assertEqual(report.results[0].source.repository, str(self.repo.resolve()))
+            self.assertEqual(report.results[0].source.path, 'subdirectory/candidate.txt')
+            self.assertIsNone(service.store._deadlines.get(__import__('threading').get_ident()))
+            with patch('leakguard_core.git_scanning.repository_root', side_effect=lambda repo, **kwargs: (setattr(self, 'discovery_deadline', kwargs['deadline']) or self.repo)):
+                session = GitInputs(child, m.GitRequest(m.GitRequestKind.INDEX), limits=m.ScanLimits(30, 10))
+            self.assertEqual(session.deadline, self.discovery_deadline)
+        finally:
+            service.close()
+
+    @unittest.skipIf(__import__('os').name == 'nt', 'POSIX pathname bytes')
+    def test_trailing_space_newline_and_undecodable_root_bytes_are_preserved(self):
+        import os
+        from leakguard_core import models as m
+        from leakguard_core.git_scanning import path_output
+        name = os.fsdecode(b'repository-\xff \n')
+        moved = self.repo / name; moved.mkdir()
+        (self.repo / '.git').rename(moved / '.git')
+        self.repo = moved
+        (self.repo / 'candidate.txt').write_text('ordinary text\n')
+        self.git('add', '.')
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            report = service.scan_git(self.repo, request=m.GitRequest(m.GitRequestKind.INDEX), limits=m.ScanLimits(30, 10))
+            self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW)
+            self.assertEqual(report.results[0].source.repository, str(self.repo.resolve()))
+            self.assertEqual(path_output(os.fsencode(str(self.repo)) + b'\n'), str(self.repo))
+            self.assertIn('\\udcff', report.to_json())
+        finally:
+            service.close()
+
+    @unittest.skipIf(__import__('os').name == 'nt', 'POSIX shell and pathname semantics')
+    def test_existing_hook_path_keeps_its_trailing_newline(self):
+        directory = self.repo / 'hooks \n'; directory.mkdir()
+        (directory / 'pre-commit.before-leakguard').write_text('#!/bin/sh\nexit 7\n')
+        self.git('config', 'core.hooksPath', str(directory))
+        self.assertEqual(engine.existing_hook(self.repo, 'pre-commit', (), b''), 7)

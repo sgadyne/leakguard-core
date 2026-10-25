@@ -856,3 +856,28 @@ class HookReplacementTests(unittest.TestCase):
             os.mkfifo(directory / 'pre-commit')
             with self.assertRaises(RuntimeError):
                 hooks.install_at(directory)
+
+
+class OptionalAbsenceStoreTests(unittest.TestCase):
+    def test_file_only_store_does_not_receive_absence_extension_kwargs(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore
+        class FileOnlyStore:
+            def __init__(self):
+                self.memory = MemoryScanStore()
+            def reserve(self, source): return self.memory.reserve(source)
+            def get_cached(self, key): return self.memory.get_cached(key)
+            def record_result(self, result, *, generation, cache_key=None):
+                return self.memory.record_result(result, generation=generation, cache_key=cache_key)
+            def record_report(self, report): return self.memory.record_report(report)
+        with tempfile.TemporaryDirectory(prefix='leakguard-optional-absence-') as folder:
+            path = Path(folder) / 'candidate.txt'; path.write_text('synthetic')
+            store = FileOnlyStore()
+            service = engine.ScanService({'gitleaks_executable': str(engine.EXE)}, store=store)
+            try:
+                with patch.object(backends, 'detect', return_value=()):
+                    report = service.scan((m.FileInput(path),), policy=m.ScanPolicy.git(), limits=m.ScanLimits(30, 1))
+                self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW)
+                self.assertEqual(len(store.memory.results), 1)
+            finally:
+                service.close()

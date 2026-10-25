@@ -320,7 +320,8 @@ def git_findings(raw, repo):
 
 
 def existing_hook(repo, kind, args, payload):
-    hooks = pathlib.Path(git('rev-parse', '--path-format=absolute', '--git-path', 'hooks', cwd=repo).stdout.decode().strip())
+    from .git_scanning import git_output, path_output
+    hooks = pathlib.Path(path_output(git_output(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks', maximum=1_000_000, timeout=5)[1]))
     backup = hooks / (kind + '.before-leakguard')
     if not backup.exists():
         return 0
@@ -334,15 +335,15 @@ def git_hook(kind, args):
     """Compatibility hook adapter; the typed service owns scan and policy."""
     _legacy()
     from . import models as m
-    from .git_scanning import parse_push
-    repo = pathlib.Path(git('rev-parse', '--show-toplevel').stdout.decode('utf-8', errors='surrogateescape').strip())
-    payload = sys.stdin.buffer.read(1_000_001) if kind == 'pre-push' else b''
-    if kind == 'pre-commit':
-        prior = existing_hook(repo, kind, args, payload)
-        if prior:
-            return prior
+    from .git_scanning import parse_push, repository_root
     service = None
     try:
+        repo = repository_root(pathlib.Path.cwd(), deadline=time.monotonic() + 5)
+        payload = sys.stdin.buffer.read(1_000_001) if kind == 'pre-push' else b''
+        if kind == 'pre-commit':
+            prior = existing_hook(repo, kind, args, payload)
+            if prior:
+                return prior
         request = m.GitRequest(m.GitRequestKind.INDEX) if kind == 'pre-commit' else parse_push(payload)
         config = dict(CONFIG)
         config['gitleaks_executable'] = str(EXE)
@@ -472,12 +473,21 @@ class ScanService:
     def scan_git(self, repo, *, request, limits, cancel=None):
         from . import git_scanning, models as m
         session = git_scanning.GitInputs(pathlib.Path(repo), request, limits=limits, cancel=cancel)
-        return self._run(session, policy=m.ScanPolicy.git(), limits=limits, use_cache=False, cancel=cancel, enumeration=session.status, final_check=session.valid, repository=str(session.repo))
+        try:
+            return self._run(session, policy=m.ScanPolicy.git(), limits=limits, use_cache=False, cancel=cancel, enumeration=session.status, final_check=session.valid, repository=str(session.repo), _deadline=session.deadline)
+        finally:
+            if hasattr(self.store, 'set_deadline'):
+                try:
+                    self.store.set_deadline(None)
+                except Exception:
+                    pass
 
     def confirm_absent(self, path, *, root, limits):
         """Internal explicit absence check, separate from failed scans/events."""
         from . import models as m
         from .sources import confirm_absence
+        if self._closed or type(limits) is not m.ScanLimits:
+            return False
         deadline = time.monotonic() + limits.deadline_seconds
         if '..' in pathlib.Path(path).parts or '..' in pathlib.Path(root).parts:
             return False
@@ -535,6 +545,8 @@ class ScanService:
                     except Exception:
                         pass
         required_methods = ('acquire_cycle', 'claim_work', 'enqueue_work', 'finish_directory', 'cycle_status', 'lease_valid', 'release_cycle', 'invalidate_scope', 'record_event')
+        if root is not None:
+            required_methods += ('reconcile_cycle',)
         if any(not hasattr(self.store, name) for name in required_methods):
             return failure(m.ErrorCode.STATE_FAILED)
         if hasattr(self.store, 'set_deadline'):
@@ -871,7 +883,7 @@ class ScanService:
         for result, (generation, cache_key), observations, anchor in zip(results, reservations, material_results, anchors):
             try:
                 kwargs = {'work': work_claims.get(result.source.path)} if work_claims is not None else {}
-                if anchor is not None:
+                if anchor is not None and hasattr(self.store, 'source_anchor') and hasattr(self.store, 'confirm_absent'):
                     kwargs['anchor'] = anchor
                 if materials is not None and (materials.references or materials.issues):
                     kwargs.update(material_observations=observations, materials_checked=True, materials_complete=result.coverage is m.CoverageState.COMPLETE)

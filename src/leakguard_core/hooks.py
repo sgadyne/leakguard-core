@@ -12,7 +12,7 @@ PYTHON = pathlib.Path(sys.executable)
 
 
 def run(*args, cwd=None, check=True):
-    return subprocess.run(['git', *args], cwd=cwd, check=check, capture_output=True, text=True)
+    return subprocess.run(['git', *args], cwd=cwd, check=check, capture_output=True)
 
 
 def quote(value):
@@ -26,7 +26,7 @@ def _read_hook(path, maximum=1_000_000):
         return None
     if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
         raise RuntimeError('hook-target-nonregular')
-    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
@@ -70,7 +70,7 @@ def install_at(hooks):
         if previous and marker not in previous[0]:
             backup = hooks / (kind + '.before-leakguard')
             # Exclusive creation never follows an existing backup link.
-            descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0), mode)
             try:
                 _write_descriptor(descriptor, previous[0])
                 if os.name != 'nt':
@@ -124,7 +124,7 @@ def main():
     seen = set()
     for repo in discover(root):
         try:
-            path = pathlib.Path(run('rev-parse', '--path-format=absolute', '--git-path', 'hooks', cwd=repo).stdout.strip())
+            path = pathlib.Path(__import__('leakguard_core.git_scanning', fromlist=['path_output']).path_output(run('rev-parse', '--path-format=absolute', '--git-path', 'hooks', cwd=repo).stdout))
             key = os.path.normcase(str(path))
             if key not in seen:
                 install_at(path); seen.add(key)
@@ -132,7 +132,7 @@ def main():
         except Exception as error:
             records.append({'repo': str(repo), 'status': 'error', 'error_type': type(error).__name__})
     template = __import__('leakguard_core.engine', fromlist=['STATE']).STATE / 'git-template'
-    old = run('config', '--global', '--get', 'init.templateDir', check=False).stdout.strip()
+    old = run('config', '--global', '--get', 'init.templateDir', check=False).stdout.removesuffix(b'\n').decode('utf-8', errors='surrogateescape')
     if old:
         template = pathlib.Path(os.path.expandvars(os.path.expanduser(old)))
     install_at(template / 'hooks')

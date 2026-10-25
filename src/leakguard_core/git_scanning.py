@@ -35,14 +35,45 @@ def git_output(repo, *args, maximum=16_000_000, timeout=45, check=True):
         raise AcquisitionError('budget-exhausted' if error.code == 'worker-timeout' else 'git-range-incomplete') from None
 
 
+def path_output(output):
+    """Remove exactly Git's one LF terminator, preserving pathname bytes."""
+    if not isinstance(output, bytes) or not output.endswith(b'\n') or b'\0' in output:
+        raise AcquisitionError('git-range-incomplete')
+    value = output[:-1]
+    if not value:
+        raise AcquisitionError('git-range-incomplete')
+    return value.decode('utf-8', errors='surrogateescape')
+
+
+def repository_root(repo, *, deadline, cancel=None):
+    def run(*args):
+        if time.monotonic() >= deadline or cancel is not None and cancel():
+            raise AcquisitionError('budget-exhausted')
+        return git_output(repo, *args, maximum=1_000_000, timeout=max(0.001, deadline - time.monotonic()), check=False)
+    code, output = run('rev-parse', '--show-toplevel')
+    if code:
+        code, bare = run('rev-parse', '--is-bare-repository')
+        if code or bare != b'true\n':
+            raise AcquisitionError('git-range-incomplete')
+        code, output = run('rev-parse', '--absolute-git-dir')
+        if code:
+            raise AcquisitionError('git-range-incomplete')
+    return Path(path_output(output)).resolve()
+
+
 
 class GitInputs:
     def __init__(self, repo: Path, request: m.GitRequest, *, limits, cancel=None):
+        self.deadline = time.monotonic() + limits.deadline_seconds
         self.repo = repo.resolve()
         self.request = request
         self.limits = limits
         self.cancel = cancel
-        self.deadline = time.monotonic() + limits.deadline_seconds
+        self.initial_error = None
+        try:
+            self.repo = repository_root(self.repo, deadline=self.deadline, cancel=cancel)
+        except AcquisitionError as error:
+            self.initial_error = error.code
         self.complete = True
         self.issues = []
         self.index_tree = None
@@ -55,6 +86,8 @@ class GitInputs:
 
     def __iter__(self):
         try:
+            if self.initial_error is not None:
+                raise AcquisitionError(self.initial_error)
             if self.request.kind is m.GitRequestKind.INDEX:
                 self.index_tree = self._git('write-tree', maximum=128)[1].decode('ascii').strip()
                 if not _oid(self.index_tree):
