@@ -136,11 +136,13 @@ class ScanStore(Protocol):
     def record_result(self, result: m.ScanResult, *, generation: int,
                       cache_key: str | None = None, scope: str = '', work: WorkClaim | None = None,
                       material_observations: tuple = (), materials_checked: bool = False,
-                      materials_complete: bool = False) -> str: ...
+                      materials_complete: bool = False, anchor=None) -> str: ...
     def record_report(self, report: m.ScanReport, *, repository: str | None = None) -> None: ...
     def latest_report(self, repository: str | None = None) -> m.ScanReport | None: ...
     def query_findings_page(self, *, state: str = 'current', profile: str | None = None, limit: int = 1000, cursor: str | None = None) -> FindingPage: ...
     def query_findings(self, *, state: str = 'current', profile: str | None = None) -> tuple[dict, ...]: ...
+    def source_anchor(self, source: m.SourceRef): ...
+    def confirm_absent(self, proof, *, generation: int) -> bool: ...
     def material_snapshot(self, *, max_bytes: int = 1_000_000, max_sources: int = 100): ...
     def acquire_cycle(self, scope: str, root, *, lease_seconds: float) -> WorkLease | None: ...
     def lease_valid(self, lease: WorkLease) -> bool: ...
@@ -148,7 +150,8 @@ class ScanStore(Protocol):
     def claim_work(self, lease: WorkLease) -> WorkClaim | None: ...
     def finish_directory(self, claim: WorkClaim, *, success: bool | None) -> None: ...
     def cycle_status(self, lease: WorkLease) -> dict: ...
-    def release_cycle(self, lease: WorkLease) -> None: ...
+    def release_cycle(self, lease: WorkLease, *, allow_complete: bool = True) -> None: ...
+    def reconcile_cycle(self, lease: WorkLease, root) -> None: ...
     def invalidate_scope(self, root, *, reason: str = 'source-unavailable') -> None: ...
     def record_event(self, path: str, kind: str, *, old_path=None, when=None) -> None: ...
     def record_metadata(self, path: str, size: int) -> None: ...
@@ -162,6 +165,7 @@ class MemoryScanStore:
         self._deadlines = {}
         self.config = config or {}
         self.generations = {}
+        self.reservation_times = {}
         self.results = {}
         self.cache = {}
         self.reports = []
@@ -173,6 +177,7 @@ class MemoryScanStore:
         self.cycles = {}
         self.work = {}
         self.locations = {}
+        self.anchors = {}
         self.material_sources = []
         self.material_locations = {}
         self._material_key = __import__('secrets').token_bytes(32)
@@ -189,6 +194,7 @@ class MemoryScanStore:
         key = source_key(source, scope)
         generation = self.generations.get(key, 0) + 1
         self.generations[key] = generation
+        self.reservation_times[key] = datetime.now(timezone.utc).isoformat()
         return generation
 
     @_synchronized
@@ -197,7 +203,7 @@ class MemoryScanStore:
         return replace(self.results[entry], reused_from=self.results[entry].reused_from or entry) if entry else None
 
     @_synchronized
-    def record_result(self, result, *, generation, cache_key=None, scope='', work=None, material_observations=(), materials_checked=False, materials_complete=False):
+    def record_result(self, result, *, generation, cache_key=None, scope='', work=None, material_observations=(), materials_checked=False, materials_complete=False, anchor=None):
         if type(result) is not m.ScanResult:
             raise StateError()
         scan_id = uuid.uuid4().hex
@@ -225,6 +231,8 @@ class MemoryScanStore:
             self.current[key] = result
             if result.content:
                 self.locations[result.source.path] = {'size': result.content.size_bytes, 'digest': result.content.digest, 'present': True}
+        if anchor is not None and result.source.kind is m.SourceKind.FILESYSTEM:
+            self.anchors[key] = anchor
         if materials_checked and result.source.kind is m.SourceKind.FILESYSTEM:
             self._record_materials(result, material_observations, complete=materials_complete)
         self._finish_work(work, result)
@@ -277,7 +285,7 @@ class MemoryScanStore:
         fresh = current is None or current['completed'] is not None
         generation = (current['generation'] + 1) if current and fresh else current['generation'] if current else 1
         owner = uuid.uuid4().hex
-        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None}
+        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None, 'started': datetime.now(timezone.utc).isoformat() if fresh else current['started']}
         self.cycles[scope] = cycle
         lease = WorkLease(scope, generation, owner)
         for key, work in self.work.items():
@@ -300,7 +308,7 @@ class MemoryScanStore:
         for path, kind, priority in entries:
             key = (lease.scope, lease.generation, path, kind)
             if refresh or key not in self.work:
-                self.work[key] = {'priority': priority, 'attempts': 0, 'failed': False, 'done': False, 'claimed': None}
+                self.work[key] = {'priority': priority, 'attempts': 0, 'failed': False, 'done': False, 'claimed': None, 'verified': False}
 
     @_synchronized
     def claim_work(self, lease):
@@ -329,6 +337,7 @@ class MemoryScanStore:
             return
         row = self.work[(work.lease.scope, work.lease.generation, work.path, work.kind)]
         row['done'] = result.coverage is not m.CoverageState.INCOMPLETE
+        row['verified'] = result.coverage is m.CoverageState.COMPLETE
         if not row['done']:
             row['attempts'] += 1
             row['failed'] = row['attempts'] >= 3
@@ -339,18 +348,35 @@ class MemoryScanStore:
         return {'complete': not pending, 'pending_files': sum(key[3] == 'file' for key, _ in pending), 'pending_directories': sum(key[3] == 'directory' for key, _ in pending), 'failed': sum(row['failed'] for _, row in pending), 'cycle_id': str(lease.generation)}
 
     @_synchronized
-    def release_cycle(self, lease):
+    def release_cycle(self, lease, *, allow_complete=True):
         if not self.lease_valid(lease):
             return
         status = self.cycle_status(lease)
         cycle = self.cycles[lease.scope]
         cycle['owner'] = None
         cycle['lease_until'] = 0
-        if status['complete']:
+        if status['complete'] and allow_complete:
             cycle['completed'] = datetime.now(timezone.utc).isoformat()
         for key, row in self.work.items():
             if key[:2] == (lease.scope, lease.generation):
                 row['claimed'] = None
+
+    @_synchronized
+    def reconcile_cycle(self, lease, root):
+        from pathlib import Path
+        if not self.lease_valid(lease):
+            raise StateError()
+        root = Path(root).absolute()
+        observed = {key[2] for key, row in self.work.items() if key[:2] == (lease.scope, lease.generation) and row.get('verified')}
+        started = self.cycles[lease.scope]['started']
+        changed = set()
+        for (key, _), row in self.states.items():
+            path = Path(row['source']['path']).absolute()
+            if row['state'] in {'active', 'unknown'} and (path == root or root in path.parents) and row['source']['path'] not in observed and row['last_seen'] <= started and self.reservation_times.get(key, '') <= started:
+                row.update(state='unknown', resolved_at=None, state_reason='source-unavailable')
+                changed.add(key)
+        for key in changed:
+            self.generations[key] = self.generations.get(key, 0) + 1
 
     @_synchronized
     def invalidate_scope(self, root, *, reason='source-unavailable'):
@@ -362,6 +388,32 @@ class MemoryScanStore:
             path = Path(row['source']['path']).absolute()
             if row['state'] in {'active', 'unknown'} and (root == path or root in path.parents):
                 row.update(state='unknown', resolved_at=None, state_reason=reason)
+
+    @_synchronized
+    def source_anchor(self, source):
+        return self.anchors.get(source_key(source))
+
+    @_synchronized
+    def confirm_absent(self, proof, *, generation):
+        from .sources import AbsenceProof
+        if type(proof) is not AbsenceProof or not proof.valid():
+            raise StateError()
+        source = m.SourceRef(m.SourceKind.FILESYSTEM, proof.anchor.source_path)
+        key = source_key(source)
+        if self.generations.get(key) != generation or self.anchors.get(key) != proof.anchor:
+            return False
+        when = proof.observed_at.isoformat()
+        for state_key, row in self.states.items():
+            if state_key[0] == key and row['state'] in {'active', 'unknown'}:
+                row.update(state='resolved', state_reason='source-absent', resolved_at=when, last_verified=when)
+                if state_key in self._current_order:
+                    self._current_order.remove(state_key)
+        if source.path in self.locations:
+            self.locations[source.path]['present'] = False
+        for (_, path), row in self.material_locations.items():
+            if path == source.path:
+                row['present'] = False
+        return True
 
     @_synchronized
     def material_snapshot(self, *, max_bytes=1_000_000, max_sources=100):
@@ -500,6 +552,23 @@ def _result_json(result):
     return json.dumps(report.to_dict()['results'][0], separators=(',', ':'), ensure_ascii=True)
 
 
+def _anchor_data(anchor):
+    return json.dumps({'source_path': anchor.source_path, 'directories': [[item.path, item.device, item.inode, item.mode] for item in anchor.directories]}, ensure_ascii=True, separators=(',', ':'))
+
+
+def _anchor_from(payload):
+    from .sources import FilesystemAnchor, DirectoryIdentity
+    value = _exact(json.loads(payload), 'source_path directories')
+    if type(value['source_path']) is not str or type(value['directories']) is not list or not 1 <= len(value['directories']) <= 128:
+        raise StateError()
+    directories = []
+    for item in value['directories']:
+        if type(item) is not list or len(item) != 4 or type(item[0]) is not str or len(item[0]) > 4096 or any(type(x) is not int or x < 0 for x in item[1:]):
+            raise StateError()
+        directories.append(DirectoryIdentity(*item))
+    return FilesystemAnchor(value['source_path'], tuple(directories))
+
+
 _SCHEMA = '''
 CREATE TABLE IF NOT EXISTS cache(path TEXT PRIMARY KEY,size INTEGER,mtime INTEGER,status TEXT,policy TEXT,digest TEXT,payload TEXT,executed_at TEXT);
 CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY,path TEXT,rule TEXT,line INTEGER,part TEXT,severity TEXT,first_seen TEXT,last_seen TEXT);
@@ -517,15 +586,16 @@ CREATE INDEX IF NOT EXISTS input_scans_path ON input_scans(path,observed_at);
 CREATE TABLE IF NOT EXISTS scan_findings(scan_id TEXT,finding_id TEXT,payload TEXT NOT NULL,PRIMARY KEY(scan_id,finding_id));
 CREATE TABLE IF NOT EXISTS finding_current(input_key TEXT,finding_id TEXT,payload TEXT NOT NULL,PRIMARY KEY(input_key,finding_id));
 CREATE TABLE IF NOT EXISTS finding_history(id INTEGER PRIMARY KEY AUTOINCREMENT,scan_id TEXT,finding_id TEXT,payload TEXT NOT NULL,UNIQUE(scan_id,finding_id));
-CREATE TABLE IF NOT EXISTS current_inputs(input_key TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0,last_complete_scan_id TEXT,latest_attempt_id TEXT,current_state TEXT,state_reason TEXT,policy_id TEXT,runtime_id TEXT);
+CREATE TABLE IF NOT EXISTS current_inputs(input_key TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0,last_complete_scan_id TEXT,latest_attempt_id TEXT,current_state TEXT,state_reason TEXT,policy_id TEXT,runtime_id TEXT,reserved_at TEXT);
 CREATE TABLE IF NOT EXISTS finding_state(input_key TEXT,finding_id TEXT,state TEXT,rule TEXT,path TEXT,payload TEXT NOT NULL,PRIMARY KEY(input_key,finding_id));
 CREATE INDEX IF NOT EXISTS finding_state_query ON finding_state(state,path,rule);
 CREATE INDEX IF NOT EXISTS finding_state_input_state ON finding_state(input_key,state,finding_id);
 CREATE INDEX IF NOT EXISTS scan_runs_repository ON scan_runs(repository,finished_at DESC);
 CREATE INDEX IF NOT EXISTS scan_runs_finished ON scan_runs(finished_at DESC);
+CREATE TABLE IF NOT EXISTS source_anchors(input_key TEXT PRIMARY KEY,payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scan_cache(cache_key TEXT PRIMARY KEY,scan_id TEXT NOT NULL REFERENCES input_scans(scan_id));
 CREATE TABLE IF NOT EXISTS audit_cycles(scope TEXT PRIMARY KEY,generation INTEGER,started TEXT,completed TEXT,failed INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_until REAL);
-CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,PRIMARY KEY(scope,generation,path,kind));
+CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,verified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,generation,path,kind));
 '''
 
 
@@ -569,7 +639,8 @@ def open_database(state_dir):
             'cache': [('policy', 'TEXT'), ('digest', 'TEXT'), ('payload', 'TEXT'), ('executed_at', 'TEXT')],
             'directories': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
             'files': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
-            'audit_work': [('done', 'INTEGER NOT NULL DEFAULT 0'), ('claimed', 'TEXT')],
+            'audit_work': [('done', 'INTEGER NOT NULL DEFAULT 0'), ('claimed', 'TEXT'), ('verified', 'INTEGER NOT NULL DEFAULT 0')],
+            'current_inputs': [('reserved_at', 'TEXT')],
         }.items():
             present = {row[1] for row in conn.execute('PRAGMA table_info(' + table + ')')}
             for column, declaration in additions:
@@ -653,7 +724,7 @@ class SQLiteScanStore:
     def reserve(self, source, *, scope=''):
         key = source_key(source, scope)
         with self.conn:
-            self.conn.execute('INSERT INTO current_inputs(input_key,generation) VALUES(?,1) ON CONFLICT(input_key) DO UPDATE SET generation=generation+1', (key,))
+            self.conn.execute('INSERT INTO current_inputs(input_key,generation,reserved_at) VALUES(?,1,?) ON CONFLICT(input_key) DO UPDATE SET generation=generation+1,reserved_at=excluded.reserved_at', (key, datetime.now(timezone.utc).isoformat()))
             return self.conn.execute('SELECT generation FROM current_inputs WHERE input_key=?', (key,)).fetchone()[0]
 
     @_bounded_sql
@@ -668,7 +739,7 @@ class SQLiteScanStore:
         return None
 
     @_bounded_sql
-    def record_result(self, result, *, generation, cache_key=None, scope='', work=None, material_observations=(), materials_checked=False, materials_complete=False):
+    def record_result(self, result, *, generation, cache_key=None, scope='', work=None, material_observations=(), materials_checked=False, materials_complete=False, anchor=None):
         if type(result) is not m.ScanResult:
             raise StateError()
         key = source_key(result.source, scope)
@@ -689,6 +760,8 @@ class SQLiteScanStore:
                     comparable = previous[1:] == (result.identity.policy_id, result.identity.runtime_id)
                     self._transition_sql(key, result, complete=complete, comparable=comparable)
                     self._record_location(result)
+                if anchor is not None and result.source.kind is m.SourceKind.FILESYSTEM:
+                    self.conn.execute('INSERT OR REPLACE INTO source_anchors VALUES(?,?)', (key, _anchor_data(anchor)))
                 if materials_checked and result.source.kind is m.SourceKind.FILESYSTEM:
                     self._record_materials(result, material_observations, complete=materials_complete)
                 self._finish_work(work, result)
@@ -839,7 +912,7 @@ class SQLiteScanStore:
         if work is None:
             return
         complete = result.coverage is not m.CoverageState.INCOMPLETE
-        self.conn.execute('UPDATE audit_work SET done=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (complete, not complete, not complete, work.lease.scope, work.lease.generation, work.path, work.kind, work.lease.owner))
+        self.conn.execute('UPDATE audit_work SET done=?,verified=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (complete, result.coverage is m.CoverageState.COMPLETE, not complete, not complete, work.lease.scope, work.lease.generation, work.path, work.kind, work.lease.owner))
 
     @_bounded_sql
     def cycle_status(self, lease):
@@ -848,13 +921,29 @@ class SQLiteScanStore:
         return {'complete': not rows, 'pending_files': counts.get('file', 0), 'pending_directories': counts.get('directory', 0), 'failed': sum(failed for _, _, failed in rows), 'cycle_id': str(lease.generation)}
 
     @_bounded_sql
-    def release_cycle(self, lease):
+    def release_cycle(self, lease, *, allow_complete=True):
         with self.conn:
             if not self._lease_valid(lease):
                 return
             status = self.cycle_status(lease)
-            self.conn.execute('UPDATE audit_cycles SET completed=?,failed=?,owner=NULL,lease_until=0 WHERE scope=? AND generation=? AND owner=?', (datetime.now(timezone.utc).isoformat() if status['complete'] else None, status['failed'] > 0, lease.scope, lease.generation, lease.owner))
+            self.conn.execute('UPDATE audit_cycles SET completed=?,failed=?,owner=NULL,lease_until=0 WHERE scope=? AND generation=? AND owner=?', (datetime.now(timezone.utc).isoformat() if status['complete'] and allow_complete else None, status['failed'] > 0, lease.scope, lease.generation, lease.owner))
             self.conn.execute('UPDATE audit_work SET claimed=NULL WHERE scope=? AND generation=?', (lease.scope, lease.generation))
+
+    @_bounded_sql
+    def reconcile_cycle(self, lease, root):
+        from pathlib import Path
+        root = str(Path(root).absolute())
+        prefix = root.rstrip('/\\') + __import__('os').sep
+        with self.conn:
+            if not self._lease_valid(lease):
+                raise StateError()
+            started = self.conn.execute('SELECT started FROM audit_cycles WHERE scope=? AND generation=?', (lease.scope, lease.generation)).fetchone()[0]
+            self.conn.execute('CREATE TEMP TABLE IF NOT EXISTS reconcile_inputs(input_key TEXT PRIMARY KEY)')
+            self.conn.execute('DELETE FROM reconcile_inputs')
+            self.conn.execute("INSERT OR IGNORE INTO reconcile_inputs SELECT s.input_key FROM finding_state s JOIN current_inputs i ON i.input_key=s.input_key WHERE s.state IN ('active','unknown') AND (s.path=? OR substr(s.path,1,?)=?) AND json_extract(s.payload,'$.last_seen')<=? AND coalesce(i.reserved_at,'')<=? AND NOT EXISTS(SELECT 1 FROM audit_work w WHERE w.scope=? AND w.generation=? AND w.path=s.path AND w.verified=1)", (root, len(prefix), prefix, started, started, lease.scope, lease.generation))
+            self.conn.execute("UPDATE finding_state SET state='unknown',payload=json_set(payload,'$.state','unknown','$.state_reason','source-unavailable','$.resolved_at',NULL) WHERE state IN ('active','unknown') AND input_key IN (SELECT input_key FROM reconcile_inputs)")
+            self.conn.execute("UPDATE finding_current SET payload=(SELECT s.payload FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id) WHERE input_key IN (SELECT input_key FROM reconcile_inputs)")
+            self.conn.execute("UPDATE current_inputs SET generation=generation+1,current_state='unknown',state_reason='source-unavailable' WHERE input_key IN (SELECT input_key FROM reconcile_inputs)")
 
     @_bounded_sql
     def invalidate_scope(self, root, *, reason='source-unavailable'):
@@ -866,6 +955,34 @@ class SQLiteScanStore:
         with self.conn:
             self.conn.execute("UPDATE finding_state SET state='unknown',payload=json_set(payload,'$.state','unknown','$.state_reason',?,'$.resolved_at',NULL) WHERE state IN ('active','unknown') AND (path=? OR substr(path,1,?)=?)", (reason, root, len(prefix), prefix))
             self.conn.execute("UPDATE finding_current SET payload=(SELECT s.payload FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id) WHERE EXISTS(SELECT 1 FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id AND s.state IN ('active','unknown') AND (s.path=? OR substr(s.path,1,?)=?))", (root, len(prefix), prefix))
+
+    @_bounded_sql
+    def source_anchor(self, source):
+        row = self.conn.execute('SELECT payload FROM source_anchors WHERE input_key=?', (source_key(source),)).fetchone()
+        return _anchor_from(row[0]) if row else None
+
+    @_bounded_sql
+    def confirm_absent(self, proof, *, generation):
+        from .sources import AbsenceProof
+        from . import catalog, policies
+        if type(proof) is not AbsenceProof or not proof.valid():
+            raise StateError()
+        source = m.SourceRef(m.SourceKind.FILESYSTEM, proof.anchor.source_path)
+        key = source_key(source)
+        when = proof.observed_at.isoformat()
+        self._apply_budget()
+        with self.conn:
+            row = self.conn.execute('SELECT generation FROM current_inputs WHERE input_key=?', (key,)).fetchone()
+            recorded = self.conn.execute('SELECT payload FROM source_anchors WHERE input_key=?', (key,)).fetchone()
+            if not row or row[0] != generation or not recorded or _anchor_from(recorded[0]) != proof.anchor:
+                return False
+            self.conn.execute("UPDATE finding_state SET state='resolved',payload=json_set(payload,'$.state','resolved','$.state_reason','source-absent','$.resolved_at',?,'$.last_verified',?) WHERE input_key=? AND state IN ('active','unknown')", (when, when, key))
+            self.conn.execute('DELETE FROM finding_current WHERE input_key=?', (key,))
+            self.conn.execute("UPDATE current_inputs SET current_state='absent',state_reason='source-absent' WHERE input_key=? AND generation=?", (key, generation))
+            path = policies.canonical(source.path, self.config)
+            self.conn.execute('UPDATE locations SET present=0,last_seen=? WHERE host=? AND path=?', (when, catalog.HOST, path))
+            self.conn.execute('UPDATE material_locations SET present=0,last_seen=? WHERE host=? AND path=?', (when, catalog.HOST, path))
+        return True
 
     @_bounded_sql
     def material_snapshot(self, *, max_bytes=1_000_000, max_sources=100):

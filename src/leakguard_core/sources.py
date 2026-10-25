@@ -157,6 +157,7 @@ class SnapshotInput:
     data: bytes
     context: ProofContext
     revalidate: object = None
+    anchor: object = None
 
     @property
     def content(self):
@@ -195,7 +196,13 @@ def acquire_file(path: Path, *, max_bytes: int):
         except AcquisitionError:
             return False
 
-    return SnapshotInput(source, data, context, valid)
+    try:
+        anchor = capture_anchor(path)
+        if anchor.source_path != str(path):
+            anchor = None
+    except AcquisitionError:
+        anchor = None
+    return SnapshotInput(source, data, context, valid, anchor)
 
 
 def acquire_bytes(data, logical_path, *, max_bytes):
@@ -203,3 +210,85 @@ def acquire_bytes(data, logical_path, *, max_bytes):
         raise AcquisitionError('input-limit')
     # Caller-supplied bytes never receive a filesystem or Git proof capability.
     return SnapshotInput(m.SourceRef(m.SourceKind.BYTES, logical_path), data, ProofContext(lambda name: None))
+
+
+@dataclass(frozen=True)
+class DirectoryIdentity:
+    path: str
+    device: int
+    inode: int
+    mode: int
+
+
+def _directory_identity(path):
+    try:
+        value = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode) or getattr(value, 'st_file_attributes', 0) & 0x400 or not value.st_ino:
+            raise AcquisitionError('source-unavailable')
+        return DirectoryIdentity(str(path), value.st_dev, value.st_ino, value.st_mode)
+    except OSError:
+        raise AcquisitionError('source-unavailable') from None
+
+
+@dataclass(frozen=True)
+class FilesystemAnchor:
+    source_path: str
+    directories: tuple[DirectoryIdentity, ...]
+
+    def valid(self):
+        source = Path(self.source_path)
+        expected = tuple(str(parent) for parent in reversed((source.parent, *source.parent.parents)))
+        if not source.is_absolute() or not 1 <= len(expected) <= 128 or tuple(item.path for item in self.directories) != expected:
+            return False
+        try:
+            return all(_directory_identity(Path(item.path)) == item for item in self.directories)
+        except AcquisitionError:
+            return False
+
+
+def capture_anchor(path):
+    path = Path(os.path.abspath(path))
+    parents = tuple(reversed((path.parent, *path.parent.parents)))
+    if len(parents) > 128:
+        raise AcquisitionError('input-limit')
+    return FilesystemAnchor(str(path), tuple(_directory_identity(parent) for parent in parents))
+
+
+@dataclass(frozen=True)
+class AbsenceProof:
+    anchor: FilesystemAnchor
+    root: str
+    observed_at: object
+
+    def valid(self):
+        source = Path(self.anchor.source_path)
+        root = Path(self.root)
+        if str(root) not in {item.path for item in self.anchor.directories} or source == root or not source.is_relative_to(root):
+            return False
+        if not self.anchor.valid():
+            return False
+        try:
+            os.stat(self.anchor.source_path, follow_symlinks=False)
+        except FileNotFoundError:
+            # A missing intermediate/unmounted/replaced directory cannot authorize
+            # a negative. The same recorded traversal must still be available.
+            return self.anchor.valid()
+        except OSError:
+            return False
+        return False
+
+
+def confirm_absence(path, root, anchor):
+    from datetime import datetime, timezone
+    if '..' in Path(path).parts or '..' in Path(root).parts:
+        raise AcquisitionError('source-unavailable')
+    path = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(root))
+    if type(anchor) is not FilesystemAnchor or anchor.source_path != str(path) or path == root or not path.is_relative_to(root):
+        raise AcquisitionError('source-unavailable')
+    if str(root) not in {item.path for item in anchor.directories}:
+        raise AcquisitionError('source-unavailable')
+    proof = AbsenceProof(anchor, str(root), datetime.now(timezone.utc))
+    if not proof.valid():
+        raise AcquisitionError('source-unavailable')
+    return proof

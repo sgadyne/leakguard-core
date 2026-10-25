@@ -583,6 +583,102 @@ class PageIsolationTests(unittest.TestCase):
             self.assertEqual(store.query_findings_page(state=state).rows[0]['source']['path'], result.source.path)
 
 
+class AbsenceConfirmationTests(unittest.TestCase):
+    def test_delete_notification_unknown_then_explicit_confirmed_absence(self):
+        import json
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-absence-') as folder:
+                root = Path(folder)
+                corpus = root / 'corpus'; corpus.mkdir()
+                source = corpus / 'candidate.txt'; source.write_text('synthetic')
+                store = store_type(root / 'store') if store_type is SQLiteScanStore else store_type()
+                service = engine.ScanService({'gitleaks_executable': str(engine.EXE)}, store=store)
+                try:
+                    with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                        initial = service.scan((m.FileInput(source),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
+                    self.assertEqual(initial.counts.findings, 1)
+                    source.unlink()
+                    store.record_event(str(source), 'deleted')
+                    self.assertEqual(store.query_findings()[0]['state'], 'unknown')
+                    self.assertTrue(service.confirm_absent(source, root=corpus, limits=m.ScanLimits(30, 1)))
+                    self.assertEqual(store.query_findings(), ())
+                    if store_type is MemoryScanStore:
+                        row = next(iter(store.states.values()))
+                    else:
+                        row = json.loads(store.conn.execute('SELECT payload FROM finding_state').fetchone()[0])
+                    self.assertEqual(row['state'], 'resolved')
+                    self.assertEqual(row['state_reason'], 'source-absent')
+                finally:
+                    service.close(); store.close()
+
+    def test_replaced_or_missing_parent_cannot_prove_absence(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore
+        with tempfile.TemporaryDirectory(prefix='leakguard-absence-parent-') as folder:
+            root = Path(folder)
+            corpus = root / 'corpus'; corpus.mkdir()
+            source = corpus / 'candidate.txt'; source.write_text('synthetic')
+            store = MemoryScanStore()
+            service = engine.ScanService({'gitleaks_executable': str(engine.EXE)}, store=store)
+            try:
+                with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                    service.scan((m.FileInput(source),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
+                corpus.rename(root / 'original-corpus')
+                corpus.mkdir()
+                self.assertFalse(service.confirm_absent(source, root=corpus, limits=m.ScanLimits(30, 1)))
+                self.assertEqual(store.query_findings()[0]['state'], 'unknown')
+            finally:
+                service.close()
+
+    def test_newer_generation_fences_an_older_absence_confirmation(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.sources import confirm_absence
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with tempfile.TemporaryDirectory(prefix='leakguard-absence-fence-') as folder:
+                root = Path(folder)
+                source = root / 'candidate.txt'; source.write_text('synthetic')
+                store = store_type(root / 'store') if store_type is SQLiteScanStore else store_type()
+                service = engine.ScanService({'gitleaks_executable': str(engine.EXE)}, store=store)
+                try:
+                    with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                        report = service.scan((m.FileInput(source),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
+                    ref = report.results[0].source
+                    source.unlink()
+                    old_generation = store.reserve(ref)
+                    proof = confirm_absence(source, root, store.source_anchor(ref))
+                    store.reserve(ref)
+                    self.assertFalse(store.confirm_absent(proof, generation=old_generation))
+                    self.assertEqual(store.query_findings()[0]['state'], 'active')
+                finally:
+                    service.close(); store.close()
+
+    def test_successful_reconciliation_marks_lost_delete_event_unknown(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with tempfile.TemporaryDirectory(prefix='leakguard-reconcile-') as folder:
+                root = Path(folder)
+                corpus = root / 'corpus'; corpus.mkdir()
+                source = corpus / 'candidate.txt'; source.write_text('synthetic')
+                store = store_type(root / 'store') if store_type is SQLiteScanStore else store_type()
+                service = engine.ScanService({'audit_scopes': {'synthetic': str(corpus)}, 'gitleaks_executable': str(engine.EXE)}, store=store)
+                try:
+                    with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                        first = service.audit('synthetic', limits=m.ScanLimits(30, 10))
+                    self.assertEqual(first.decision.verdict, m.DecisionVerdict.BLOCK)
+                    self.assertEqual(store.query_findings()[0]['state'], 'active')
+                    source.unlink()  # Deliberately no watcher event.
+                    second = service.audit('synthetic', limits=m.ScanLimits(30, 10))
+                    self.assertTrue(second.coverage.enumeration_complete)
+                    self.assertEqual(store.query_findings()[0]['state'], 'unknown')
+                    self.assertEqual(store.query_findings()[0]['state_reason'], 'source-unavailable')
+                finally:
+                    service.close(); store.close()
+
+
 class IdentityBudgetServiceTests(unittest.TestCase):
     def test_identity_failure_before_admission_is_explicit_and_does_not_read_input(self):
         from leakguard_core import models as m, scan_policy
@@ -631,6 +727,29 @@ class IdentityBudgetServiceTests(unittest.TestCase):
             service.close()
 
 
+class ReconciliationFenceTests(unittest.TestCase):
+    def test_reconciliation_fences_older_publish_but_preserves_newer_reservation(self):
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            for newer in (False, True):
+                with self.subTest(store=store_type.__name__, newer=newer), tempfile.TemporaryDirectory(prefix='leakguard-reconcile-fence-') as folder:
+                    store = store_type(folder) if store_type is SQLiteScanStore else store_type()
+                    result = StoreLifecycleTests.make_result(self)
+                    try:
+                        store.record_result(result, generation=store.reserve(result.source))
+                        if not newer:
+                            generation = store.reserve(result.source)
+                        lease = store.acquire_cycle('synthetic', None, lease_seconds=60)
+                        if newer:
+                            generation = store.reserve(result.source)
+                        store.reconcile_cycle(lease, '/synthetic')
+                        self.assertEqual(store.query_findings()[0]['state'], 'active' if newer else 'unknown')
+                        store.record_result(result, generation=generation)
+                        self.assertEqual(store.query_findings()[0]['state'], 'active' if newer else 'unknown')
+                    finally:
+                        store.close()
+
+
 class MaterialEventTests(unittest.TestCase):
     def test_delete_and_rename_hints_keep_material_and_location_presence_unknown(self):
         from leakguard_core import catalog
@@ -672,3 +791,29 @@ class PersistedReportCountsTests(unittest.TestCase):
             payload['counts']['findings'] = bad
             with self.subTest(value=bad), self.assertRaises(StateError):
                 _report_from(payload)
+
+
+class ReconciliationFailureTests(unittest.TestCase):
+    def test_state_failure_never_completes_cycle_and_keeps_positive(self):
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore, StateError
+        class BrokenReportStore(MemoryScanStore):
+            def record_report(self, report, **kwargs):
+                raise StateError()
+        class BrokenReconciliationStore(MemoryScanStore):
+            def reconcile_cycle(self, lease, root):
+                raise StateError()
+        for store_type in (BrokenReportStore, BrokenReconciliationStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-cycle-state-failure-') as folder:
+                root = Path(folder)
+                (root / 'candidate.txt').write_text('synthetic')
+                store = store_type()
+                service = engine.ScanService({'audit_scopes': {'synthetic': str(root)}, 'gitleaks_executable': str(engine.EXE)}, store=store)
+                try:
+                    with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                        report = service.audit('synthetic', limits=m.ScanLimits(30, 10))
+                    self.assertEqual(report.counts.findings, 1)
+                    self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                    self.assertIsNone(store.cycles['audit:synthetic']['completed'])
+                finally:
+                    service.close()

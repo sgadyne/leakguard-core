@@ -474,6 +474,38 @@ class ScanService:
         session = git_scanning.GitInputs(pathlib.Path(repo), request, limits=limits, cancel=cancel)
         return self._run(session, policy=m.ScanPolicy.git(), limits=limits, use_cache=False, cancel=cancel, enumeration=session.status, final_check=session.valid, repository=str(session.repo))
 
+    def confirm_absent(self, path, *, root, limits):
+        """Internal explicit absence check, separate from failed scans/events."""
+        from . import models as m
+        from .sources import confirm_absence
+        deadline = time.monotonic() + limits.deadline_seconds
+        if '..' in pathlib.Path(path).parts or '..' in pathlib.Path(root).parts:
+            return False
+        source = m.SourceRef(m.SourceKind.FILESYSTEM, os.path.abspath(path))
+        if not hasattr(self.store, 'source_anchor') or not hasattr(self.store, 'confirm_absent'):
+            return False
+        try:
+            if hasattr(self.store, 'set_deadline'):
+                self.store.set_deadline(deadline)
+            generation = self.store.reserve(source)
+            anchor = self.store.source_anchor(source)
+            proof = confirm_absence(path, root, anchor)
+            if time.monotonic() >= deadline:
+                return False
+            return self.store.confirm_absent(proof, generation=generation)
+        except Exception:
+            try:
+                self.store.invalidate_scope(source.path)
+            except Exception:
+                pass
+            return False
+        finally:
+            if hasattr(self.store, 'set_deadline'):
+                try:
+                    self.store.set_deadline(None)
+                except Exception:
+                    pass
+
     def audit(self, scope, *, limits, use_cache=True, cancel=None):
         from .settings import ConfigurationError
         if scope not in self.config.get('audit_scopes', {}):
@@ -492,6 +524,7 @@ class ScanService:
         claims = {}
         deadline = time.monotonic() + limits.deadline_seconds
         enumerated = 0
+        completed = False
         def failure(code, source=None):
             try:
                 return self._run((), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=False, cancel=cancel, enumeration=lambda: {'complete': False, 'issues': (m.CoverageIssue(code, source, required=True),)}, _deadline=deadline)
@@ -578,12 +611,31 @@ class ScanService:
                 if metadata.get('failed'):
                     issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
                 return {**metadata, 'complete': metadata['complete'] and not any(issue.required for issue in issues), 'issues': tuple(issues)}
-            return self._run(work_inputs(), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=use_cache, cancel=cancel, enumeration=status, final_check=lambda: self.store.lease_valid(lease), work_claims=claims, _deadline=deadline)
+            report = self._run(work_inputs(), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=use_cache, cancel=cancel, enumeration=status, final_check=lambda: self.store.lease_valid(lease), work_claims=claims, _deadline=deadline)
+            if report.coverage.enumeration_complete and report.coverage.required_complete:
+                try:
+                    if time.monotonic() >= deadline or cancel is not None and cancel():
+                        raise StateError()
+                    if root is not None:
+                        self.store.reconcile_cycle(lease, root)
+                    self.store.release_cycle(lease, allow_complete=True)
+                    completed = True
+                except Exception:
+                    from dataclasses import replace
+                    from . import scan_policy
+                    failure_issues = report.issues + (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)
+                    coverage, decision = scan_policy.evaluate(report.results, policy=m.ScanPolicy.inventory(), policy_id=report.policy_id, enumeration_complete=False, issues=failure_issues, pending_files=report.coverage.pending_files, pending_directories=report.coverage.pending_directories, cycle_id=report.coverage.cycle_id)
+                    report = replace(report, coverage=coverage, decision=decision, issues=failure_issues)
+                    try:
+                        self.store.record_report(report)
+                    except Exception:
+                        pass
+            return report
         except Exception:
             return failure(m.ErrorCode.STATE_FAILED)
         finally:
             try:
-                self.store.release_cycle(lease)
+                self.store.release_cycle(lease, allow_complete=completed)
             except Exception:
                 pass
             if hasattr(self.store, 'set_deadline'):
@@ -687,6 +739,7 @@ class ScanService:
         reservations = []
         material_results = []
         snapshots = []
+        anchors = []
         run_issues = []
         enumeration_complete = True
         finding_count = 0
@@ -772,6 +825,7 @@ class ScanService:
             reservations.append((generation, cache_key))
             material_results.append(material_observations)
             snapshots.append(snapshot.detach_validator() if snapshot is not None else None)
+            anchors.append(snapshot.anchor if snapshot is not None else None)
             snapshot = None
             if not enumeration_complete:
                 break
@@ -811,11 +865,14 @@ class ScanService:
             if validate_snapshot is not None and (time.monotonic() >= deadline or not validate_snapshot()):
                 result = results[index]
                 code = m.ErrorCode.BUDGET_EXHAUSTED if time.monotonic() >= deadline else m.ErrorCode.INPUT_CHANGED
+                anchors[index] = None
                 results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, result.source, required=True),))
         # Publication is after validation; no slow detector runs under a write lock.
-        for result, (generation, cache_key), observations in zip(results, reservations, material_results):
+        for result, (generation, cache_key), observations, anchor in zip(results, reservations, material_results, anchors):
             try:
                 kwargs = {'work': work_claims.get(result.source.path)} if work_claims is not None else {}
+                if anchor is not None:
+                    kwargs['anchor'] = anchor
                 if materials is not None and (materials.references or materials.issues):
                     kwargs.update(material_observations=observations, materials_checked=True, materials_complete=result.coverage is m.CoverageState.COMPLETE)
                 self.store.record_result(result, generation=generation, cache_key=cache_key if result.coverage is m.CoverageState.COMPLETE else None, **kwargs)
