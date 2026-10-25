@@ -22,6 +22,14 @@ Required incomplete coverage, errors and bounded unfinished work return 2. Use
 [compatibility notes](COMPATIBILITY.md) for the 0.2 exit contract and API
 migration.
 
+The CLI defaults to 120 seconds/1,000 files for `scan`, 600 seconds/3,000 files
+for `audit`, and 45 seconds/150 files for `drain`. Override the time and file
+bounds with `--budget-seconds` and `--max-files`. `--no-cache` disables semantic
+reuse; `drain` starts with reuse disabled and accepts `--use-cache` to opt in.
+The selected config's `max_file_bytes` and `scan_timeout_seconds` also bound CLI
+input and detector execution. Python callers supply these limits explicitly in
+`ScanLimits`.
+
 `LEAKGUARD_CONFIG` optionally names an external JSON configuration. Start with `examples/config.json`. Set `LEAKGUARD_STATE_DIR` to a private writable runtime directory; otherwise the per-user OS state directory is used. `LEAKGUARD_GITLEAKS` can select a separately installed binary. Runtime state is automatically excluded from traversal. Set restrictive filesystem permissions on configuration and runtime state, especially when using shared directories.
 
 ```json

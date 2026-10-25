@@ -57,6 +57,9 @@ even when it reports findings. Add `--fail-on block` to return 1 for a blocking
 finding. Required coverage failures, errors, invalid configuration or bounded
 unfinished work return 2. JSON mode writes exactly one report object to stdout;
 human progress and sanitized setup errors go to stderr.
+CLI bounds can be set with `--budget-seconds` and `--max-files`; validated
+configuration supplies the maximum input size and per-detector timeout. Python
+callers choose those values explicitly through `ScanLimits`.
 
 Git hooks use the same report schema and policy decision. Allow or allow-with-
 omissions returns 0, a blocking finding returns 1, and required incomplete work
