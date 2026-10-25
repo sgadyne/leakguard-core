@@ -18,11 +18,14 @@ install .`, then explicitly select this component in the external configuration:
     }
   ],
   "extractor_overrides": {
-    "demo-note": "example-demo-note"
+    ".envelope": "example-demo-note"
   },
-  "required_formats": ["demo-note"]
+  "required_formats": ["example-envelope"]
 }
 ```
+
+The suffix override explicitly routes `.envelope` files to this declared
+`example-envelope` format. A format ID and a component ID are distinct values.
 
 This is an illustration only. Parser and extension code run with the scanner's
 account permissions; worker supervision does not turn Python code into a

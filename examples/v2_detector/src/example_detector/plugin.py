@@ -2,7 +2,6 @@
 from collections.abc import Iterable, Mapping
 
 from leakguard_core.plugins import (
-    API_VERSION,
     DetectionContext,
     Finding,
     OptionSchema,

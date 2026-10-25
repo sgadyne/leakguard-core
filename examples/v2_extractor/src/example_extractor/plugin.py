@@ -2,7 +2,7 @@
 from collections.abc import Mapping
 
 from leakguard_core.extraction import Extraction, ExtractedPart, ExtractionContext
-from leakguard_core.plugins import API_VERSION, OptionSchema, PluginManifest
+from leakguard_core.plugins import OptionSchema, PluginManifest
 
 
 API_VERSION = 2
@@ -11,7 +11,7 @@ MANIFEST = PluginManifest(
     implementation_version="1.0.0",
     kind="extractor",
     rules=(),
-    formats=("demo-note",),
+    formats=("example-envelope",),
     part_kinds=("note",),
     options_schema=OptionSchema(fields=()),
     dependencies=(),
