@@ -396,8 +396,26 @@ class ScanResult:
         _require_optional_utc_datetime("last_executed_at", self.last_executed_at)
         _require_optional_utc_datetime("last_verified_at", self.last_verified_at)
         _require_optional_string("reused_from", self.reused_from)
+        if self.last_executed_at is not None and self.last_executed_at > self.observed_at:
+            raise ValueError("last_executed_at must not follow observed_at")
+        if self.last_verified_at is not None and self.last_verified_at > self.observed_at:
+            raise ValueError("last_verified_at must not follow observed_at")
+        if (self.last_executed_at is not None and self.last_verified_at is not None
+                and self.last_verified_at < self.last_executed_at):
+            raise ValueError("last_verified_at must not precede last_executed_at")
+        if any(finding.source != self.source for finding in self.findings):
+            raise ValueError("finding source must match its containing result source")
+        if self.coverage is CoverageState.COMPLETE and any(issue.required for issue in self.issues):
+            raise ValueError("complete coverage cannot contain a required issue")
         if self.outcome is ScanOutcome.REUSED and not self.reused_from:
             raise ValueError("reused results require reused_from")
+        if self.outcome is ScanOutcome.REUSED:
+            if self.coverage is not CoverageState.COMPLETE:
+                raise ValueError("reused results require complete coverage")
+            if not self.identity.cache_eligible:
+                raise ValueError("reused results require a cache-eligible identity")
+            if self.last_executed_at is None or self.last_verified_at is None:
+                raise ValueError("reused results require execution and verification timestamps")
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,4 +686,3 @@ def _require_utc_datetime(name: str, value: object) -> None:
 def _require_optional_utc_datetime(name: str, value: object) -> None:
     if value is not None:
         _require_utc_datetime(name, value)
-
