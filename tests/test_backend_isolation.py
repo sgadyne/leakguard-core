@@ -117,15 +117,11 @@ class BackendIsolationTests(unittest.TestCase):
             root = Path(temporary)
             repo = root / 'repo'
             repo.mkdir()
-            home = root / 'home'
-            home.mkdir()
             state = root / 'private-state'
             global_config = root / 'empty-global-gitconfig'
             source_root = Path(backends.__file__).resolve().parents[1]
             env = _minimal_environment()
             env.update({
-                'HOME': str(home),
-                'XDG_CONFIG_HOME': str(root / 'xdg'),
                 'GIT_CONFIG_GLOBAL': str(global_config),
                 'GIT_CONFIG_NOSYSTEM': '1',
                 'GIT_TERMINAL_PROMPT': '0',
@@ -146,6 +142,7 @@ class BackendIsolationTests(unittest.TestCase):
                 ('user.name', 'LeakGuard synthetic fixture'),
                 ('user.email', 'synthetic@example.invalid'),
                 ('commit.gpgsign', 'false'),
+                ('core.hooksPath', str(repo / '.git' / 'hooks')),
             ):
                 configured = git('config', key, value)
                 self.assertEqual(configured.returncode, 0)
