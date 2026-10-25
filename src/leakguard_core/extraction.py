@@ -5,10 +5,9 @@ from dataclasses import dataclass
 import base64
 import json
 from pathlib import PurePath
-import os
-import sys
 
 from ._supervision import WorkerError, run_worker, worker_environment
+from ._python import core_command
 
 DOCUMENT_FORMATS = {
     '.docx': 'office-word', '.xlsx': 'office-sheet', '.xlsm': 'office-sheet',
@@ -149,9 +148,9 @@ def extract(data: bytes, logical_path: str, *, limits=None, timeout: float | Non
     request = {'schema_version': 1, 'format_id': format_id,
                'limits': {key: getattr(bounds, key) for key in bounds.__dataclass_fields__},
                'data': base64.b64encode(data).decode('ascii')}
-    env = worker_environment({'PYTHONPATH': os.pathsep.join(sys.path)})
+    env = worker_environment()
     try:
-        process = run_worker([sys.executable, '-X', 'utf8', '-m', 'leakguard_core.extract_worker', '--v2'],
+        process = run_worker(core_command('leakguard_core.extract_worker', '--v2'),
                              json.dumps(request, separators=(',', ':')).encode(),
                              timeout=timeout if timeout is not None else getattr(limits, 'extract_timeout_seconds', 25),
                              max_output_bytes=bounds.max_ipc_bytes, max_input_bytes=bounds.max_ipc_bytes,
