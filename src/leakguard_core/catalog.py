@@ -111,3 +111,115 @@ def match_materials(conn, path, text, state):
             conn.execute('UPDATE material_locations SET present=0,last_seen=? WHERE host=? AND path=? AND name=?', (when, HOST, path, name))
     conn.commit()
     return matches
+
+
+# Typed pipeline material snapshots are transient capabilities. Only their keyed
+# identity and redacted observations may reach ScanStore/report publication.
+from dataclasses import dataclass, field as dataclass_field
+
+
+@dataclass(frozen=True)
+class MaterialReference:
+    name: str
+    kind: str
+    value: str = dataclass_field(repr=False)
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class MaterialObservation:
+    name: str
+    kind: str
+    part_id: str
+    line: int
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class MaterialSnapshot:
+    references: tuple[MaterialReference, ...]
+    identity: str
+    issues: tuple[str, ...] = ()
+    validate: object = dataclass_field(default=None, repr=False)
+
+    def valid(self):
+        return self.validate is None or self.validate()
+
+
+def snapshot_materials(rows, key, *, max_bytes=1_000_000, max_sources=100):
+    """Read a bounded fresh source closure; missing/invalid sources are failures."""
+    from .sources import _bounded_file, AcquisitionError
+    references = []
+    identities = []
+    expected = []
+    issues = []
+    rows = tuple(rows)
+    if len(rows) > max_sources:
+        issues.append('detector-output-limit')
+        rows = rows[:max_sources]
+    def unique(pairs):
+        result = {}
+        for name, item in pairs:
+            if name in result:
+                raise ValueError()
+            result[name] = item
+        return result
+    remaining = max_bytes
+    for name, source, fmt, field, kind in rows:
+        content = None
+        source_identity = 'missing'
+        try:
+            if kind not in {'credential', 'license'} or not all(isinstance(item, str) for item in (name, source, fmt, field)):
+                raise ValueError()
+            content = _bounded_file(pathlib.Path(source), min(max_bytes, remaining))
+            remaining -= len(content)
+            source_identity = hmac.new(key, content, hashlib.sha256).hexdigest()
+            text = content.decode('utf-8-sig', errors='strict')
+            if fmt == 'json':
+                value = json.loads(text, object_pairs_hook=unique)
+                for component in field.split('.'):
+                    value = value[component]
+            elif fmt in {'python', 'py'}:
+                tree = ast.parse(text)
+                candidates = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == field for target in node.targets)]
+                if len(candidates) != 1:
+                    raise ValueError()
+                value = candidates[0]
+            else:
+                raise ValueError()
+            if type(value) is not str or not 8 <= len(value) <= max_bytes:
+                raise ValueError()
+            references.append(MaterialReference(name, kind, value, hmac.new(key, value.encode(), hashlib.sha256).hexdigest()))
+        except (AcquisitionError, OSError):
+            issues.append('source-unavailable')
+        except (ValueError, KeyError, TypeError, SyntaxError, UnicodeError, RecursionError):
+            issues.append('detector-failed')
+        registration = [name, source, fmt, field, kind, source_identity]
+        identities.append(hmac.new(key, json.dumps(registration, ensure_ascii=True, separators=(',', ':')).encode(), hashlib.sha256).hexdigest())
+        expected.append((source, source_identity, len(content) if content is not None else None))
+    identity = hmac.new(key, json.dumps(['materials-v1', identities], separators=(',', ':')).encode(), hashlib.sha256).hexdigest()
+
+    def valid():
+        # Compare keyed content identities, never retain source bytes or values.
+        for source, original, original_size in expected:
+            if original == 'missing':
+                if pathlib.Path(source).exists():
+                    return False
+                continue
+            try:
+                current = hmac.new(key, _bounded_file(pathlib.Path(source), original_size), hashlib.sha256).hexdigest()
+            except (AcquisitionError, OSError):
+                current = 'missing'
+            if current != original:
+                return False
+        return True
+    return MaterialSnapshot(tuple(references), identity, tuple(dict.fromkeys(issues)), valid)
+
+
+def material_observations(snapshot, part_id, text):
+    observations = []
+    for reference in snapshot.references:
+        position = text.find(reference.value)
+        if position >= 0:
+            observations.append(MaterialObservation(reference.name, reference.kind, part_id, text[:position].count('\n') + 1, reference.fingerprint))
+    return tuple(observations)

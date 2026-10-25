@@ -741,6 +741,7 @@ class ScanService:
         deadline = time.monotonic() + limits.deadline_seconds
         results = []
         reservations = []
+        material_results = []
         snapshots = []
         run_issues = []
         enumeration_complete = True
@@ -748,6 +749,12 @@ class ScanService:
         report_bytes = 0
         runtime, eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()))
         runtime_valid = runtime == self._runtime
+        materials = None
+        if policy.mode is m.ScanMode.INVENTORY:
+            try:
+                materials = self.store.material_snapshot(max_bytes=min(limits.max_file_bytes, 1_000_000), max_sources=100)
+            except Exception:
+                materials = catalog.MaterialSnapshot((), 'unavailable', ('source-unavailable',))
         iterator = iter(inputs)
         while True:
             if time.monotonic() >= deadline or (cancel and cancel()):
@@ -781,6 +788,7 @@ class ScanService:
                 break
             snapshot = None
             cache_key = None
+            material_observations = ()
             try:
                 if not runtime_valid:
                     raise AcquisitionError('source-unavailable')
@@ -790,7 +798,7 @@ class ScanService:
                     snapshot = acquire_file(item.path, max_bytes=limits.max_file_bytes)
                 else:
                     snapshot = acquire_bytes(item.data, item.logical_path, max_bytes=limits.max_file_bytes)
-                result, cache_key = self._scan_snapshot(snapshot, policy, policy_id, limits, deadline, use_cache, cancel)
+                result, cache_key, material_observations = self._scan_snapshot(snapshot, policy, policy_id, limits, deadline, use_cache, cancel, materials)
             except Exception as error:
                 code = self._error_code(getattr(error, 'code', 'input-unreadable'), 'input-unreadable')
                 when = dt.datetime.now(dt.timezone.utc)
@@ -808,6 +816,7 @@ class ScanService:
             finding_count += len(result.findings)
             results.append(result)
             reservations.append((generation, cache_key))
+            material_results.append(material_observations)
             snapshots.append(snapshot.detach_validator() if snapshot is not None else None)
             snapshot = None
             if not enumeration_complete:
@@ -823,15 +832,19 @@ class ScanService:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
             results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
+        if materials is not None and not materials.valid():
+            results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
         for index, validate_snapshot in enumerate(snapshots):
             if validate_snapshot is not None and (time.monotonic() >= deadline or not validate_snapshot()):
                 result = results[index]
                 code = m.ErrorCode.BUDGET_EXHAUSTED if time.monotonic() >= deadline else m.ErrorCode.INPUT_CHANGED
                 results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, result.source, required=True),))
         # Publication is after validation; no slow detector runs under a write lock.
-        for result, (generation, cache_key) in zip(results, reservations):
+        for result, (generation, cache_key), observations in zip(results, reservations, material_results):
             try:
                 kwargs = {'work': work_claims.get(result.source.path)} if work_claims is not None else {}
+                if materials is not None and (materials.references or materials.issues):
+                    kwargs.update(material_observations=observations, materials_checked=True, materials_complete=result.coverage is m.CoverageState.COMPLETE)
                 self.store.record_result(result, generation=generation, cache_key=cache_key if result.coverage is m.CoverageState.COMPLETE else None, **kwargs)
             except Exception:
                 run_issues.append(m.CoverageIssue(m.ErrorCode.STATE_FAILED, result.source, required=True))
@@ -860,23 +873,26 @@ class ScanService:
         except ValueError:
             return ErrorCode(fallback)
 
-    def _scan_snapshot(self, snapshot, policy, policy_id, limits, deadline, use_cache, cancel):
+    def _scan_snapshot(self, snapshot, policy, policy_id, limits, deadline, use_cache, cancel, materials=None):
         from dataclasses import replace
         from . import models as m, extraction, backends
         source = snapshot.source
-        identity = m.RuntimeIdentity(policy_id, self._runtime, snapshot.context.identity, self._cache_eligible and not snapshot.context.truncated)
+        material_enabled = materials is not None and bool(materials.references or materials.issues)
+        runtime_id = hashlib.sha256((self._runtime + '|' + materials.identity).encode()).hexdigest() if material_enabled else self._runtime
+        identity = m.RuntimeIdentity(policy_id, runtime_id, snapshot.context.identity, self._cache_eligible and not snapshot.context.truncated and not material_enabled)
         key_data = [snapshot.content.digest, snapshot.content.size_bytes, identity.runtime_id, policy_id, source.kind.value, source.path, source.repository, source.commit, source.index_tree_oid, identity.context_id]
         cache_key = hashlib.sha256(json.dumps(key_data, separators=(',', ':')).encode()).hexdigest()
         if use_cache and identity.cache_eligible:
             cached = self.store.get_cached(cache_key)
             if cached is not None and cached.coverage is m.CoverageState.COMPLETE and cached.identity == identity and cached.content == snapshot.content and snapshot.valid():
                 when = dt.datetime.now(dt.timezone.utc)
-                return replace(cached, source=source, outcome=m.ScanOutcome.REUSED, observed_at=when, last_verified_at=when, reused_from=cached.reused_from or hashlib.sha256(_legacy_origin(cached).encode()).hexdigest()), cache_key
+                return replace(cached, source=source, outcome=m.ScanOutcome.REUSED, observed_at=when, last_verified_at=when, reused_from=cached.reused_from or hashlib.sha256(_legacy_origin(cached).encode()).hexdigest()), cache_key, ()
         when = dt.datetime.now(dt.timezone.utc)
         remaining = max(0.001, deadline - time.monotonic())
         extracted = extraction.extract(snapshot.data, source.path, limits=limits, timeout=min(limits.extract_timeout_seconds, remaining), plugins=self._plugins, cancel=cancel, extractor_overrides=self.config.get('extractor_overrides'))
-        issues = []
+        issues = [m.CoverageIssue(self._error_code(code), source, required=True) for code in materials.issues] if materials is not None else []
         findings = []
+        observations = []
         omitted = self._omission(policy, source.path, extracted.format_id)
         unknown_binary = extracted.format_id in {'binary', 'unknown', 'unsupported-binary'} or (extracted.disposition == 'unsupported' and not pathlib.Path(source.path).suffix.lower() in DOCUMENT_SUFFIXES)
         required = not omitted and (not unknown_binary or any(value in policy.required_formats for value in ('all', 'binary', extracted.format_id)))
@@ -893,6 +909,10 @@ class ScanService:
         if omitted and not any(issue.omission_id == omitted for issue in issues):
             issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, source, omission_id=omitted))
         for part in extracted.parts:
+            if materials is not None:
+                for observation in catalog.material_observations(materials, part.part_id, part.text):
+                    observations.append(observation)
+                    findings.append(self._finding(snapshot, part, 'known-material-' + observation.kind, observation.line, observation.line, 'review' if observation.kind == 'license' else 'block', 'known-material'))
             if time.monotonic() >= deadline or (cancel and cancel()):
                 issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
                 break
@@ -925,7 +945,7 @@ class ScanService:
         # A document's declared nontext omissions are not eligible negatives.
         finished = dt.datetime.now(dt.timezone.utc)
         result = m.ScanResult(source, snapshot.content, identity, outcome, coverage, tuple(merged.values()), tuple(issues), finished, when if extracted.parts else None, finished if coverage is m.CoverageState.COMPLETE else None)
-        return result, cache_key
+        return result, cache_key, tuple(observations)
 
     def _omission(self, policy, path, format_id):
         import fnmatch

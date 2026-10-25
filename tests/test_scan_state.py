@@ -138,6 +138,13 @@ class StoreLifecycleTests(unittest.TestCase):
 
 
 class ServiceTests(unittest.TestCase):
+    def setUp(self):
+        # These tests isolate orchestration; the live pinned-backend probe covers
+        # eligibility of a concrete installed runtime closure separately.
+        self.runtime = patch('leakguard_core.scan_policy.runtime_identity', return_value=('synthetic-runtime', True))
+        self.runtime.start()
+        self.addCleanup(self.runtime.stop)
+
     def config(self):
         return {'gitleaks_executable': str(engine.EXE)}
 
@@ -310,3 +317,84 @@ class QueueTests(unittest.TestCase):
                 self.assertTrue(next(iter(store.work.values()))['failed'])
             finally:
                 service.close()
+
+
+class MaterialServiceTests(unittest.TestCase):
+    def test_reference_changes_and_failures_do_not_manufacture_resolution_or_leak_values(self):
+        import json
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        marker = 'SyntheticOnly~MaterialReferenceForOfflineTests42'
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-material-') as folder:
+                root = Path(folder)
+                reference = root / 'reference.json'; reference.write_text(json.dumps({'value': marker}))
+                candidate = root / 'candidate.txt'; candidate.write_text('header\n' + marker)
+                rows = [('private-registration', str(reference), 'json', 'value', 'credential')]
+                store = store_type(root / 'store') if store_type is SQLiteScanStore else store_type()
+                if store_type is MemoryScanStore:
+                    store.material_sources = rows
+                else:
+                    store.conn.executemany('INSERT INTO material_sources VALUES(?,?,?,?,?)', rows); store.conn.commit()
+                service = engine.ScanService({'gitleaks_executable': str(engine.EXE)}, store=store)
+                try:
+                    with patch.object(backends, 'detect', return_value=()):
+                        first = service.scan([m.FileInput(candidate)], policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                        self.assertEqual(first.counts.findings, 1)
+                        finding = first.results[0].findings[0]
+                        self.assertEqual(finding.rule, 'known-material-credential')
+                        self.assertEqual((finding.part_id, finding.start_line), ('text', 2))
+                        self.assertNotIn(marker, first.to_json())
+                        self.assertNotIn('private-registration', first.to_json())
+                        reference.unlink()
+                        failed = service.scan([m.FileInput(candidate)], policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                        self.assertEqual(failed.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                        self.assertEqual(store.query_findings()[0]['state'], 'unknown')
+                        reference.write_text(json.dumps({'value': marker}))
+                        restored = service.scan([m.FileInput(candidate)], policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                        self.assertEqual(restored.counts.findings, 1)
+                        candidate.write_text('removed')
+                        clean = service.scan([m.FileInput(candidate)], policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                        self.assertEqual(clean.counts.findings, 0)
+                        self.assertEqual(store.query_findings(), ())
+                    if store_type is SQLiteScanStore:
+                        self.assertNotIn(marker, '\n'.join(store.conn.iterdump()))
+                        self.assertEqual(store.conn.execute('SELECT present FROM material_locations').fetchone()[0], 0)
+                    else:
+                        self.assertFalse(next(iter(store.material_locations.values()))['present'])
+                finally:
+                    service.close(); store.close()
+
+    def test_duplicate_reference_keys_produce_explicit_failure(self):
+        from leakguard_core.catalog import snapshot_materials
+        with tempfile.TemporaryDirectory(prefix='leakguard-material-') as folder:
+            reference = Path(folder) / 'reference.json'
+            reference.write_text('{"value":"synthetic-one","value":"synthetic-two"}')
+            snapshot = snapshot_materials((('private', str(reference), 'json', 'value', 'credential'),), b'k' * 32)
+            self.assertEqual(snapshot.references, ())
+            self.assertIn('detector-failed', snapshot.issues)
+
+
+class MemoryConcurrencyTests(unittest.TestCase):
+    def test_concurrent_publish_keeps_the_newest_reserved_generation(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from dataclasses import replace
+        import threading
+        from leakguard_core.scan_store import MemoryScanStore
+        for _ in range(25):
+            store = MemoryScanStore()
+            base = StoreLifecycleTests.make_result(self)
+            gate = threading.Barrier(2)
+            def publish(number):
+                finding = replace(base.findings[0], id=str(number) * 64)
+                result = replace(base, findings=(finding,))
+                generation = store.reserve(result.source)
+                gate.wait(timeout=5)
+                store.record_result(result, generation=generation)
+                return generation, finding.id
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(publish, number) for number in (1, 2)]
+                expected = max(future.result(timeout=5) for future in futures)[1]
+            rows = store.query_findings()
+            self.assertEqual([row['id'] for row in rows], [expected])
+            self.assertEqual(rows[0]['state'], 'active')

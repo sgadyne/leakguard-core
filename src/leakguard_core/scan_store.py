@@ -11,6 +11,16 @@ import hashlib
 import json
 from typing import Protocol, runtime_checkable
 import uuid
+import threading
+from functools import wraps
+
+
+def _synchronized(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return locked
 
 from . import models as m
 
@@ -49,16 +59,30 @@ class ScanStore(Protocol):
     def reserve(self, source: m.SourceRef, *, scope: str = '') -> int: ...
     def get_cached(self, cache_key: str) -> m.ScanResult | None: ...
     def record_result(self, result: m.ScanResult, *, generation: int,
-                      cache_key: str | None = None, scope: str = '', work: WorkClaim | None = None) -> str: ...
+                      cache_key: str | None = None, scope: str = '', work: WorkClaim | None = None,
+                      material_observations: tuple = (), materials_checked: bool = False,
+                      materials_complete: bool = False) -> str: ...
     def record_report(self, report: m.ScanReport) -> None: ...
     def latest_report(self, repository: str | None = None) -> m.ScanReport | None: ...
     def query_findings(self, *, state: str = 'current', profile: str | None = None) -> tuple[dict, ...]: ...
+    def material_snapshot(self, *, max_bytes: int = 1_000_000, max_sources: int = 100): ...
+    def acquire_cycle(self, scope: str, root, *, lease_seconds: float) -> WorkLease | None: ...
+    def lease_valid(self, lease: WorkLease) -> bool: ...
+    def enqueue_work(self, lease: WorkLease, entries, *, refresh: bool = False) -> None: ...
+    def claim_work(self, lease: WorkLease) -> WorkClaim | None: ...
+    def finish_directory(self, claim: WorkClaim, *, success: bool | None) -> None: ...
+    def cycle_status(self, lease: WorkLease) -> dict: ...
+    def release_cycle(self, lease: WorkLease) -> None: ...
+    def invalidate_scope(self, root, *, reason: str = 'source-unavailable') -> None: ...
+    def record_event(self, path: str, kind: str, *, old_path=None, when=None) -> None: ...
+    def record_metadata(self, path: str, size: int) -> None: ...
     def close(self) -> None: ...
 
 
 class MemoryScanStore:
     """No filesystem writes, JSON archive, SQLite connection or implicit mirror."""
     def __init__(self, *, config=None):
+        self._lock = threading.RLock()
         self.config = config or {}
         self.generations = {}
         self.results = {}
@@ -69,18 +93,24 @@ class MemoryScanStore:
         self.cycles = {}
         self.work = {}
         self.locations = {}
+        self.material_sources = []
+        self.material_locations = {}
+        self._material_key = __import__('secrets').token_bytes(32)
 
+    @_synchronized
     def reserve(self, source, *, scope=''):
         key = source_key(source, scope)
         generation = self.generations.get(key, 0) + 1
         self.generations[key] = generation
         return generation
 
+    @_synchronized
     def get_cached(self, cache_key):
         entry = self.cache.get(cache_key)
         return replace(self.results[entry], reused_from=self.results[entry].reused_from or entry) if entry else None
 
-    def record_result(self, result, *, generation, cache_key=None, scope='', work=None):
+    @_synchronized
+    def record_result(self, result, *, generation, cache_key=None, scope='', work=None, material_observations=(), materials_checked=False, materials_complete=False):
         if type(result) is not m.ScanResult:
             raise StateError()
         scan_id = uuid.uuid4().hex
@@ -97,18 +127,23 @@ class MemoryScanStore:
             self.current[key] = result
             if result.content:
                 self.locations[result.source.path] = {'size': result.content.size_bytes, 'digest': result.content.digest, 'present': True}
+        if materials_checked and result.source.kind is m.SourceKind.FILESYSTEM:
+            self._record_materials(result, material_observations, complete=materials_complete)
         self._finish_work(work, result)
         return scan_id
 
+    @_synchronized
     def record_report(self, report):
         if type(report) is not m.ScanReport:
             raise StateError()
         self.reports.append(report)
 
+    @_synchronized
     def latest_report(self, repository=None):
         return next((report for report in reversed(self.reports)
                      if repository is None or any(result.source.repository == repository for result in report.results)), None)
 
+    @_synchronized
     def query_findings(self, *, state='current', profile=None):
         if state not in {'current', 'history'}:
             raise ValueError('invalid state')
@@ -121,9 +156,11 @@ class MemoryScanStore:
             rows = [row for row in rows if select_profile(row['source']['path'], self.config) == profile]
         return tuple(rows)
 
+    @_synchronized
     def close(self):
         pass
 
+    @_synchronized
     def acquire_cycle(self, scope, root, *, lease_seconds):
         import time
         now = time.time()
@@ -143,11 +180,13 @@ class MemoryScanStore:
             self.enqueue_work(lease, ((str(root), 'directory', 10),))
         return lease
 
+    @_synchronized
     def lease_valid(self, lease):
         import time
         cycle = self.cycles.get(lease.scope)
         return bool(cycle and cycle['generation'] == lease.generation and cycle['owner'] == lease.owner and cycle['lease_until'] > time.time())
 
+    @_synchronized
     def enqueue_work(self, lease, entries, *, refresh=False):
         if not self.lease_valid(lease):
             raise StateError()
@@ -156,6 +195,7 @@ class MemoryScanStore:
             if refresh or key not in self.work:
                 self.work[key] = {'priority': priority, 'attempts': 0, 'failed': False, 'done': False, 'claimed': None}
 
+    @_synchronized
     def claim_work(self, lease):
         if not self.lease_valid(lease):
             raise StateError()
@@ -166,6 +206,7 @@ class MemoryScanStore:
         row['claimed'] = lease.owner
         return WorkClaim(lease, key[2], key[3])
 
+    @_synchronized
     def finish_directory(self, claim, *, success):
         if not self.lease_valid(claim.lease):
             raise StateError()
@@ -175,6 +216,7 @@ class MemoryScanStore:
             row['attempts'] += 1
             row['failed'] = row['attempts'] >= 3
 
+    @_synchronized
     def _finish_work(self, work, result):
         if work is None:
             return
@@ -184,10 +226,12 @@ class MemoryScanStore:
             row['attempts'] += 1
             row['failed'] = row['attempts'] >= 3
 
+    @_synchronized
     def cycle_status(self, lease):
         pending = [(key, row) for key, row in self.work.items() if key[:2] == (lease.scope, lease.generation) and not row['done']]
         return {'complete': not pending, 'pending_files': sum(key[3] == 'file' for key, _ in pending), 'pending_directories': sum(key[3] == 'directory' for key, _ in pending), 'failed': sum(row['failed'] for _, row in pending), 'cycle_id': str(lease.generation)}
 
+    @_synchronized
     def release_cycle(self, lease):
         if not self.lease_valid(lease):
             return
@@ -201,6 +245,7 @@ class MemoryScanStore:
             if key[:2] == (lease.scope, lease.generation):
                 row['claimed'] = None
 
+    @_synchronized
     def invalidate_scope(self, root, *, reason='source-unavailable'):
         from pathlib import Path
         root = Path(root).absolute()
@@ -209,16 +254,31 @@ class MemoryScanStore:
             if root == path or root in path.parents:
                 row.update(state='unknown', resolved_at=None, state_reason=reason)
 
+    @_synchronized
+    def material_snapshot(self, *, max_bytes=1_000_000, max_sources=100):
+        from .catalog import snapshot_materials
+        return snapshot_materials(self.material_sources, self._material_key, max_bytes=max_bytes, max_sources=max_sources)
+
+    @_synchronized
+    def _record_materials(self, result, observations, *, complete):
+        names = {item.name for item in observations}
+        for (name, path), row in self.material_locations.items():
+            if path == result.source.path and name not in names:
+                row['present'] = False if complete else None
+        for item in observations:
+            self.material_locations[(item.name, result.source.path)] = {'fingerprint': item.fingerprint, 'present': True, 'last_seen': result.observed_at.isoformat()}
+
+    @_synchronized
     def record_metadata(self, path, size):
         self.locations[path] = {'size': size, 'digest': None, 'present': True}
 
+    @_synchronized
     def record_event(self, path, kind, *, old_path=None, when=None):
         if kind not in {'changed', 'created', 'deleted', 'renamed'}:
             raise StateError()
         for row in self.states.values():
             if row['source']['path'] in {path, old_path}:
                 row.update(state='unknown', resolved_at=None, state_reason='source-event')
-
 
 def _source_data(source):
     return {'kind': source.kind.value, 'path': source.path, 'repository': source.repository,
@@ -417,6 +477,7 @@ class SQLiteScanStore:
     def __init__(self, state_dir, *, config=None):
         self.config = config or {}
         self.conn = open_database(state_dir)
+        self.state_dir = __import__('pathlib').Path(state_dir)
 
     def reserve(self, source, *, scope=''):
         key = source_key(source, scope)
@@ -434,7 +495,7 @@ class SQLiteScanStore:
                 raise StateError() from None
         return None
 
-    def record_result(self, result, *, generation, cache_key=None, scope='', work=None):
+    def record_result(self, result, *, generation, cache_key=None, scope='', work=None, material_observations=(), materials_checked=False, materials_complete=False):
         if type(result) is not m.ScanResult:
             raise StateError()
         key = source_key(result.source, scope)
@@ -457,6 +518,8 @@ class SQLiteScanStore:
                     for (_, finding_id), row in states.items():
                         self.conn.execute('INSERT OR REPLACE INTO finding_state VALUES(?,?,?,?,?,?)', (key, finding_id, row['state'], row['rule'], result.source.path, json.dumps(row, separators=(',', ':'))))
                     self._record_location(result)
+                if materials_checked and result.source.kind is m.SourceKind.FILESYSTEM:
+                    self._record_materials(result, material_observations, complete=materials_complete)
                 self._finish_work(work, result)
                 self.conn.execute('UPDATE current_inputs SET latest_attempt_id=?,last_complete_scan_id=CASE WHEN ? THEN ? ELSE last_complete_scan_id END,current_state=?,state_reason=?,policy_id=?,runtime_id=? WHERE input_key=? AND generation=?', (scan_id, complete, scan_id, 'verified' if complete else 'unknown', 'complete-content-scan' if complete else 'incomplete-scan', result.identity.policy_id, result.identity.runtime_id, key, generation))
             return scan_id
@@ -595,6 +658,37 @@ class SQLiteScanStore:
                 if path == root or root in path.parents:
                     row.update(state='unknown', resolved_at=None, state_reason=reason)
                     self.conn.execute('UPDATE finding_state SET state=?,payload=? WHERE input_key=? AND finding_id=?', ('unknown', json.dumps(row, separators=(',', ':')), key, identity))
+
+    def material_snapshot(self, *, max_bytes=1_000_000, max_sources=100):
+        from .catalog import snapshot_materials, MaterialSnapshot
+        import os
+        rows = self.conn.execute('SELECT name,source,format,field,kind FROM material_sources ORDER BY name LIMIT ?', (max_sources + 1,)).fetchall()
+        if not rows:
+            return MaterialSnapshot((), 'no-materials')
+        key_path = self.state_dir / 'material-key.bin'
+        try:
+            descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(__import__('secrets').token_bytes(32))
+        from .sources import _bounded_file
+        key = _bounded_file(key_path, 32)
+        if len(key) != 32:
+            raise StateError()
+        return snapshot_materials(rows, key, max_bytes=max_bytes, max_sources=max_sources)
+
+    def _record_materials(self, result, observations, *, complete):
+        from . import catalog, policies
+        path = policies.canonical(result.source.path, self.config)
+        names = {item.name for item in observations}
+        when = result.observed_at.isoformat()
+        for (name,) in self.conn.execute('SELECT name FROM material_locations WHERE host=? AND path=?', (catalog.HOST, path)).fetchall():
+            if name not in names:
+                self.conn.execute('UPDATE material_locations SET present=?,last_seen=? WHERE host=? AND path=? AND name=?', (0 if complete else None, when, catalog.HOST, path, name))
+        for item in observations:
+            self.conn.execute('INSERT INTO material_locations VALUES(?,?,?,?,?,?,1) ON CONFLICT(host,name,path) DO UPDATE SET fingerprint=excluded.fingerprint,last_seen=excluded.last_seen,present=1', (catalog.HOST, item.name, path, item.fingerprint, when, when))
 
     def record_metadata(self, path, size):
         from . import catalog
