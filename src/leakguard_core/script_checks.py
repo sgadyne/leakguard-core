@@ -61,6 +61,8 @@ class ScriptDetector:
             value = _loads(output.stdout)
             if type(value) is not dict or set(value) != {'schema_version', 'findings'} or type(value['schema_version']) is not int or value['schema_version'] != 1 or type(value['findings']) is not list:
                 raise PluginError('detector-output-invalid')
+            if len(value['findings']) > maximum:
+                raise PluginError('detector-output-limit')
             findings = []
             for item in value['findings']:
                 if type(item) is not dict or set(item) != {'rule', 'line', 'severity'}:

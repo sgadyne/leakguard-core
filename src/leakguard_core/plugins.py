@@ -168,7 +168,9 @@ def _unique(pairs):
 
 
 def _loads(data):
-    return json.loads(data, object_pairs_hook=_unique)
+    def invalid_constant(_value):
+        raise ValueError()
+    return json.loads(data, object_pairs_hook=_unique, parse_constant=invalid_constant)
 
 
 def validate_options(schema, options):
@@ -306,6 +308,8 @@ def detect(instances, text, path, part, *, format_id='text', timeout=None, limit
                                      'max_findings': maximum}, timeout=timeout, limits=limits, cancel=cancel)
                 if set(response) != {'findings'} or type(response['findings']) is not list:
                     raise PluginError('detector-output-invalid')
+                if len(response['findings']) > maximum:
+                    raise PluginError('detector-output-limit')
                 items = []
                 for value in response['findings']:
                     if type(value) is not dict or set(value) != {'rule', 'line', 'severity'}:
@@ -417,11 +421,12 @@ def extract_component(instance, data, path, *, format_id=None, timeout=None, lim
     disposition = response['disposition']
     if disposition not in {'extracted', 'unsupported', 'encrypted', 'no-text'}:
         raise PluginError()
-    allowed = {'encrypted', 'no-text', 'unsupported-format', 'decode-failed', 'extract-failed', 'dependency-unavailable'}
     if type(response['issues']) is not list or any(type(code) is not str or code not in allowed for code in response['issues']):
         raise PluginError()
     if type(response['parts']) is not list:
         raise PluginError()
+    if len(response['parts']) > bounds.max_parts:
+        raise PluginError('extract-part-limit')
     parts = []; total = 0; seen = set()
     for ordinal, item in enumerate(response['parts'], 1):
         if (type(item) is not list or len(item) != 2 or any(type(x) is not str for x in item)
