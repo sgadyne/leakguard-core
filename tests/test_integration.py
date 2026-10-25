@@ -57,6 +57,25 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC.encode(), result.stdout + result.stderr)
         self.assertEqual(command(self.repo, 'rev-parse', 'HEAD').stdout.decode().strip(), self.base)
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX hook execute bits are not represented on Windows')
+    def test_installed_pre_commit_hook_has_execute_bit(self):
+        hook = self.repo / '.git' / 'hooks' / 'pre-commit'
+        self.assertTrue(hook.is_file())
+        self.assertTrue(hook.stat().st_mode & 0o111, 'Git would ignore a non-executable installed hook')
+
+    def test_required_no_text_docx_does_not_pass_pre_commit(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w') as archive:
+            archive.writestr('[Content_Types].xml', '<Types/>')
+        (self.repo / 'incomplete.docx').write_bytes(buffer.getvalue())
+        command(self.repo, 'add', 'incomplete.docx').check_returncode()
+
+        result = command(self.repo, 'commit', '-m', 'test: reject incomplete document scan')
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stderr)
+        self.assertNotIn(SYNTHETIC.encode(), result.stdout + result.stderr)
+
     def test_unstaged_secret_does_not_block_a_clean_index(self):
         (self.repo / 'app.py').write_text('print("clean staged change")\n')
         command(self.repo, 'add', 'app.py').check_returncode()
