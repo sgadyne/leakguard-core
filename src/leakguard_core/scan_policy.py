@@ -44,8 +44,19 @@ def policy_identity(*, config=None, policy=None, limits=None):
 
 def _file_identity(path):
     try:
-        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-    except OSError:
+        source = Path(path)
+        if not source.is_file() or source.stat().st_size > 512 * 1024 * 1024:
+            return 'unavailable'
+        before = source.stat()
+        digest = hashlib.sha256()
+        with source.open('rb') as stream:
+            while chunk := stream.read(1_048_576):
+                digest.update(chunk)
+        after = source.stat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            return 'unavailable'
+        return digest.hexdigest()
+    except (OSError, ValueError, TypeError):
         return 'unavailable'
 
 
@@ -105,7 +116,7 @@ def runtime_identity(config=None, binary=None, plugin_specs=()):
              'platform': [platform.system(), platform.machine()], 'gitleaks': binary_id,
              'rules': _file_identity(rules), 'parsers': parsers,
              'plugins': list(plugin_specs or config.get('plugins', ())),
-             'scripts': config.get('script_checks', ())}
+             'scripts': [{'spec': spec, 'artifacts': [(index, _file_identity(value)) for index, value in enumerate(spec['argv']) if Path(value).is_file()]} for spec in config.get('script_checks', ())]}
     if value['plugins'] or value['scripts'] or config.get('credential_store'):
         complete = False
     return _digest(value), complete and value['rules'] != 'unavailable'

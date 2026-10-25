@@ -329,7 +329,7 @@ def detect(instances, text, path, part, *, format_id='text', timeout=None, limit
 def _validate_extraction(result, manifest, bounds):
     if type(result) is not Extraction or result.disposition not in {'extracted', 'unsupported', 'encrypted', 'no-text'} or isinstance(result.parts, (str, bytes, dict)):
         raise PluginError()
-    if type(result.issues) not in {tuple, list} or any(code not in {'encrypted', 'no-text', 'unsupported-format', 'decode-failed', 'extract-failed'} for code in result.issues):
+    if type(result.issues) not in {tuple, list} or any(code not in {'encrypted', 'no-text', 'unsupported-format', 'decode-failed', 'extract-failed', 'dependency-unavailable'} for code in result.issues):
         raise PluginError()
     total = 0; seen = set(); parts = []
     for item in result.parts:
@@ -420,6 +420,8 @@ def extract_component(instance, data, path, *, format_id=None, timeout=None, lim
     if type(response['parts']) is not list:
         raise PluginError()
     selected_format = format_id or (manifest.formats[0] if manifest else 'extension')
+    if manifest is not None and selected_format not in manifest.formats:
+        raise PluginError()
     parts = []; total = 0; seen = set()
     for ordinal, item in enumerate(response['parts'], 1):
         if (type(item) is not list or len(item) != 2 or any(type(x) is not str for x in item)
