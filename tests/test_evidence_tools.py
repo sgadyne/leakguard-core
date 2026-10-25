@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +29,11 @@ benchmark_spec = importlib.util.spec_from_file_location("evidence_benchmark_scan
 benchmark_scan = importlib.util.module_from_spec(benchmark_spec)
 assert benchmark_spec and benchmark_spec.loader
 benchmark_spec.loader.exec_module(benchmark_scan)
+ACCEPTANCE = ROOT / "tools" / "run_acceptance.py"
+acceptance_spec = importlib.util.spec_from_file_location("evidence_run_acceptance", ACCEPTANCE)
+run_acceptance = importlib.util.module_from_spec(acceptance_spec)
+assert acceptance_spec and acceptance_spec.loader
+acceptance_spec.loader.exec_module(run_acceptance)
 
 
 class SafeInputTests(unittest.TestCase):
@@ -121,6 +127,32 @@ class BenchmarkAggregationTests(unittest.TestCase):
         self.assertEqual(identities[0]["policy_ids"]["cold"], "policy-small-limit")
         self.assertEqual(identities[1]["policy_ids"]["cold"], "policy-large-limit")
 
+    def test_hook_latency_summary_uses_median_and_nearest_rank_p95(self):
+        summary = benchmark_scan._hook_latency_summary([
+            {"clean_seconds": 0.1, "positive_seconds": 0.4},
+            {"clean_seconds": 0.2, "positive_seconds": 0.5},
+            {"clean_seconds": 0.3, "positive_seconds": 0.6},
+        ])
+        self.assertEqual(summary["clean_commit"], {
+            "samples": 3, "median_seconds": 0.2, "p95_nearest_rank_seconds": 0.3,
+        })
+        self.assertEqual(summary["positive_blocked_commit"], {
+            "samples": 3, "median_seconds": 0.5, "p95_nearest_rank_seconds": 0.6,
+        })
+
+    def test_live_process_tree_sampler_labels_platform_availability(self):
+        sampler = benchmark_scan._ProcessTreeRssSampler(interval_seconds=0.01)
+        sampler.start()
+        time.sleep(0.025)
+        row = sampler.stop()
+        if sys.platform.startswith("linux"):
+            self.assertTrue(row["process_tree_rss_sampling_available"])
+            self.assertGreater(row["sampled_process_tree_peak_bytes"], 0)
+            self.assertGreaterEqual(row["process_tree_sample_count"], 2)
+        else:
+            self.assertFalse(row["process_tree_rss_sampling_available"])
+            self.assertIsNone(row["sampled_process_tree_peak_bytes"])
+
     def test_mocked_benchmark_result_reaches_redacted_receipt(self):
         measurements = {
             mode: {"backend_worker_launches": 0, "coverage_complete": True,
@@ -161,6 +193,25 @@ class BenchmarkAggregationTests(unittest.TestCase):
             self.assertEqual(receipt["details"]["checks"]["cache_reuse_failures"], 0)
             self.assertEqual(receipt["details"]["scan_identity_cases"][0]["policy_ids"]["warm"],
                              "policy-limit-10")
+
+
+class AcceptanceSummaryTests(unittest.TestCase):
+    def test_unittest_summary_reports_counts_and_only_fixed_skip_ids(self):
+        output = (
+            "test_native_only (test_runtime_identity.RuntimeIdentityTests) ... skipped 'Windows only'\n"
+            "test_pdf_optional (test_corpus.CorpusTests) ... skipped 'parser extra unavailable'\n"
+            "test_regular_case (test_corpus.CorpusTests) ... ok\n\n"
+            "Ran 3 tests in 0.012s\n\nOK (skipped=2)\n"
+        )
+        summary = run_acceptance._parse_unittest_summary(output)
+        self.assertEqual(summary, {
+            "total": 3, "passed": 1, "skipped": 2, "failures": 0, "errors": 0,
+            "skip_test_ids": [
+                "test_corpus.CorpusTests.test_pdf_optional",
+                "test_runtime_identity.RuntimeIdentityTests.test_native_only",
+            ],
+        })
+        self.assertNotIn("parser extra unavailable", json.dumps(summary))
 
 
 if __name__ == "__main__":

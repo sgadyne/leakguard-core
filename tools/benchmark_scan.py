@@ -12,23 +12,26 @@ import datetime as dt
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 from collections import Counter
 from pathlib import Path
 import platform
 import random
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import threading
 try:
     import resource
 except ImportError:  # Windows does not expose getrusage through this module.
     resource = None
-import sys
-import tempfile
 import time
 import uuid
 import zipfile
-import shutil
-import subprocess
 from unittest.mock import patch
 
 
@@ -65,6 +68,93 @@ def _rss_high_water_bytes() -> dict[str, int | None]:
 
     return {"parent_lifetime_high_water_bytes": one(resource.RUSAGE_SELF),
             "children_lifetime_high_water_bytes": one(resource.RUSAGE_CHILDREN)}
+
+
+class _ProcessTreeRssSampler:
+    """Sample this benchmark process and current Linux descendants via procfs."""
+    def __init__(self, interval_seconds: float = 0.02):
+        self.interval_seconds = interval_seconds
+        self.available = sys.platform.startswith("linux") and Path("/proc").is_dir()
+        self._stop = threading.Event()
+        self._thread = None
+        self.samples = 0
+        self.peak_bytes = None
+        self.peak_processes = 0
+
+    @staticmethod
+    def _snapshot(root_pid: int) -> tuple[int, int]:
+        pending = [root_pid]
+        observed = set()
+        total_bytes = 0
+        while pending:
+            pid = pending.pop()
+            if pid in observed:
+                continue
+            observed.add(pid)
+            process = Path("/proc") / str(pid)
+            try:
+                for line in (process / "status").read_text(encoding="ascii").splitlines():
+                    if line.startswith("VmRSS:"):
+                        fields = line.split()
+                        if len(fields) >= 2:
+                            total_bytes += int(fields[1]) * 1024
+                        break
+                tasks = process / "task"
+                for task in tasks.iterdir():
+                    try:
+                        children = (task / "children").read_text(encoding="ascii").split()
+                    except OSError:
+                        continue
+                    for child in children:
+                        if child.isdigit():
+                            pending.append(int(child))
+            except (OSError, ValueError):
+                continue
+        return total_bytes, len(observed)
+
+    def _record(self) -> None:
+        if not self.available:
+            return
+        rss, process_count = self._snapshot(os.getpid())
+        self.samples += 1
+        self.peak_bytes = rss if self.peak_bytes is None else max(self.peak_bytes, rss)
+        self.peak_processes = max(self.peak_processes, process_count)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._record()
+            self._stop.wait(self.interval_seconds)
+
+    def start(self) -> None:
+        if not self.available:
+            return
+        self._record()
+        self._thread = threading.Thread(target=self._run, name="leakguard-rss-sampler", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict[str, int | bool | None]:
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=max(1.0, self.interval_seconds * 4))
+            self._record()
+        return {"sampled_process_tree_peak_bytes": self.peak_bytes,
+                "sampled_process_tree_peak_processes": self.peak_processes,
+                "process_tree_sample_count": self.samples,
+                "process_tree_rss_sampling_available": self.available}
+
+
+def _hook_latency_summary(rows: list[dict]) -> dict:
+    def summarize(key: str) -> dict:
+        values = sorted(float(row[key]) for row in rows)
+        if not values:
+            return {"samples": 0, "median_seconds": None, "p95_nearest_rank_seconds": None}
+        p95_index = max(0, math.ceil(0.95 * len(values)) - 1)
+        return {"samples": len(values), "median_seconds": round(statistics.median(values), 6),
+                "p95_nearest_rank_seconds": round(values[p95_index], 6)}
+
+    return {"clean_commit": summarize("clean_seconds"),
+            "positive_blocked_commit": summarize("positive_seconds"),
+            "percentile_method": "nearest-rank p95"}
 
 
 def _exclusive_write(path: Path, data: bytes) -> None:
@@ -140,12 +230,21 @@ def _measure(service, sources, *, use_cache: bool) -> tuple[dict, tuple, object]
         launches += 1
         return original(*args, **kwargs)
 
-    statement_count = [0]
+    statement_counts = {"statements": 0, "writes": 0}
     connection = getattr(getattr(service, "store", None), "conn", None)
     trace_available = callable(getattr(connection, "set_trace_callback", None))
+
+    def trace_statement(statement: str) -> None:
+        statement_counts["statements"] += 1
+        first_token = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ""
+        if first_token in {"INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP",
+                           "ALTER", "REINDEX", "VACUUM"}:
+            statement_counts["writes"] += 1
+
     if trace_available:
-        connection.set_trace_callback(lambda _statement: statement_count.__setitem__(
-            0, statement_count[0] + 1))
+        connection.set_trace_callback(trace_statement)
+    rss_sampler = _ProcessTreeRssSampler(interval_seconds=0.02)
+    rss_sampler.start()
     started = time.perf_counter()
     try:
         with patch.object(backends, "run_worker", side_effect=counted):
@@ -157,12 +256,23 @@ def _measure(service, sources, *, use_cache: bool) -> tuple[dict, tuple, object]
     finally:
         if trace_available:
             connection.set_trace_callback(None)
+        sampled_rss = rss_sampler.stop()
     elapsed = time.perf_counter() - started
     rss = _rss_high_water_bytes()
+    bytes_scanned = sum(result.content.size_bytes for result in report.results
+                        if result.content is not None)
+    elapsed_safe = max(elapsed, 1e-9)
     row = {
         "seconds": round(elapsed, 6), "backend_worker_launches": launches,
-        "sqlite_statement_count": statement_count[0] if trace_available else None,
+        "files_per_second": round(len(report.results) / elapsed_safe, 6),
+        "bytes_scanned": bytes_scanned,
+        "bytes_per_second": round(bytes_scanned / elapsed_safe, 3),
+        "sqlite_statement_count": statement_counts["statements"] if trace_available else None,
+        "sqlite_write_statement_count": statement_counts["writes"] if trace_available else None,
         "sqlite_statement_count_available": trace_available,
+        "sqlite_write_statement_count_available": trace_available,
+        "sqlite_lock_time_seconds": None,
+        "sqlite_lock_time_available": False,
         "deadline_seconds": BENCHMARK_DEADLINE_SECONDS,
         "findings": sum(len(result.findings) for result in report.results),
         "results": len(report.results),
@@ -175,6 +285,8 @@ def _measure(service, sources, *, use_cache: bool) -> tuple[dict, tuple, object]
         "coverage_states": dict(Counter(result.coverage.value for result in report.results)),
         "issue_codes": dict(Counter(issue.code.value for result in report.results for issue in result.issues)),
         "policy_verdict": report.decision.verdict.value,
+        "process_tree_rss_sample_interval_ms": round(rss_sampler.interval_seconds * 1000),
+        **sampled_rss,
         **rss,
         "policy_id": report.policy_id,
         "runtime_id": next((result.identity.runtime_id for result in report.results), None),
@@ -420,17 +532,27 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
     return {
         "seed": seed, "repetitions": repetitions, "file_curve": benchmarks,
         "part_curve": part_curve, "hook_latency": hook_rows,
+        "hook_latency_summary": _hook_latency_summary(hook_rows),
         "service_open_seconds": round(service_open_seconds, 6),
         "backend_sha256": backend_digest, "backend_version": backend_version,
         "rules_sha256": rules_digest, "installed_dependencies": dependencies,
         "scan_identity_cases": identity_cases,
         "scan_identities_consistent": checks["scan_identity_failures"] == 0,
         "metric_definitions": {
+            "files_per_second": "Result count divided by scan-call elapsed wall time.",
+            "bytes_per_second": "Bytes represented by available ContentIdentity sizes divided by scan-call elapsed wall time.",
             "backend_worker_launches": "Calls to leakguard_core.backends.run_worker only; excludes Git, parser and other subprocesses.",
             "sqlite_statement_count": "SQLite trace callback count only; statement text and parameters are discarded.",
+            "sqlite_write_statement_count": "Trace callback count of known SQLite DML/DDL mutator first tokens; statement text and parameters are discarded.",
+            "sqlite_lock_time_seconds": "Not measured; scan duration is not used as a lock-time proxy.",
             "parent_lifetime_high_water_bytes": "Parent process lifetime RSS high-water, not per-operation peak.",
             "children_lifetime_high_water_bytes": "Cumulative child-process lifetime RSS high-water, not per-operation peak.",
+            "sampled_process_tree_peak_bytes": "Approximate peak sum of VmRSS for the benchmark process and observed descendants, sampled every 20ms on Linux. It can miss shorter-lived children and double-count shared pages.",
+            "hook_latency_summary": "Median and nearest-rank p95 for repeated installed clean and blocked synthetic commits; no optimization or speedup claim is implied.",
             "service_open_seconds": "ScanService constructor time, recorded separately from scan calls.",
+        },
+        "known_measurement_gaps": {
+            "sqlite_lock_time": "unavailable: lock acquisition/hold time is not instrumented",
         },
         "checks": checks,
     }

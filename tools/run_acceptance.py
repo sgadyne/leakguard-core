@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,47 @@ def _command(argv, *, cwd: Path, env: dict[str, str], stage: str,
     if process.returncode:
         raise AcceptanceFailure(stage)
     return process
+
+
+def _parse_unittest_summary(output: str) -> dict | None:
+    """Extract aggregate counts and fixed skip IDs, discarding test output text."""
+    lines = output.splitlines()
+    ran = [re.fullmatch(r"Ran (\d+) tests? in [0-9.]+s", line.strip())
+           for line in lines]
+    ran = [match for match in ran if match]
+    if not ran:
+        return None
+    total = int(ran[-1].group(1))
+    status = next((line.strip() for line in reversed(lines)
+                   if line.strip()), "")
+    ok = re.fullmatch(r"OK(?: \(skipped=(\d+)\))?", status)
+    failed = re.fullmatch(r"FAILED(?: \((.*)\))?", status)
+    if ok:
+        skipped = int(ok.group(1) or "0")
+        failures = errors = 0
+    elif failed:
+        counts = dict(re.findall(r"(failures|errors)=(\d+)", failed.group(1) or ""))
+        failures = int(counts.get("failures", "0"))
+        errors = int(counts.get("errors", "0"))
+        skipped_match = re.search(r"skipped=(\d+)", failed.group(1) or "")
+        skipped = int(skipped_match.group(1)) if skipped_match else 0
+    else:
+        return None
+
+    skip_ids = []
+    skip_line = re.compile(
+        r"^(test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\) \.\.\. skipped(?:\s|$)"
+    )
+    for line in lines:
+        match = skip_line.match(line)
+        if match:
+            skip_ids.append(f"{match.group(2)}.{match.group(1)}")
+    passed = total - skipped - failures - errors
+    if min(total, skipped, failures, errors, passed) < 0:
+        return None
+    return {"total": total, "passed": passed, "skipped": skipped,
+            "failures": failures, "errors": errors,
+            "skip_test_ids": sorted(set(skip_ids))}
 
 
 def _python(venv_root: Path) -> Path:
@@ -311,6 +353,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
                  installed_tools / "_safe_inputs.py")
     shutil.copy2(ROOT / "tools" / "benchmark_scan.py",
                  installed_tools / "benchmark_scan.py")
+    shutil.copy2(ROOT / "tools" / "run_acceptance.py",
+                 installed_tools / "run_acceptance.py")
     (installed_tests / "state").mkdir(mode=0o700)
     test_env = _environment(config=config, state=installed_tests / "state", gitleaks=gitleaks,
                              global_gitconfig=installed_tests / "gitconfig", base=target_environment)
@@ -337,16 +381,14 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     suite = _command([str(target), "-m", "unittest", "discover", "-s", "tests", "-v"],
                      cwd=installed_tests, env=test_env, stage="installed-full-suite", timeout=MAX_STAGE_SECONDS)
     suite_text = suite.stderr.decode("utf-8", errors="replace") + suite.stdout.decode("utf-8", errors="replace")
-    if "FAILED" in suite_text or "Ran " not in suite_text:
+    test_summary = _parse_unittest_summary(suite_text)
+    if test_summary is None or test_summary["failures"] or test_summary["errors"]:
         raise AcceptanceFailure("installed-full-suite")
-    suite_lines = [line.strip() for line in suite_text.splitlines() if line.startswith("Ran ")]
-    try:
-        test_count = int(suite_lines[-1].split()[1]) if suite_lines else 0
-    except (ValueError, IndexError):
-        raise AcceptanceFailure("installed-full-suite") from None
+    test_count = test_summary["total"]
     if test_count < 100:
         raise AcceptanceFailure("installed-suite-count")
     return {"installed_origin": str(package_origin), "test_count": test_count,
+            "test_summary": test_summary,
             "target_python_version": target_python_version,
             "installation_mode": installation_mode,
             "conformance": conformance,
@@ -406,12 +448,14 @@ def main(argv=None) -> int:
             completed = _command([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
                                  cwd=ROOT, env={**env, "PYTHONPATH": str(ROOT / "src")},
                                  stage="source-full-suite")
-            output_text = completed.stderr.decode("utf-8", errors="replace")
-            lines = [line.strip() for line in output_text.splitlines() if line.startswith("Ran ")]
-            test_count = int(lines[-1].split()[1]) if lines else 0
-            if test_count < 100 or "FAILED" in output_text:
+            output_text = (completed.stderr.decode("utf-8", errors="replace")
+                           + completed.stdout.decode("utf-8", errors="replace"))
+            test_summary = _parse_unittest_summary(output_text)
+            if (test_summary is None or test_summary["total"] < 100
+                    or test_summary["failures"] or test_summary["errors"]):
                 raise AcceptanceFailure("source-full-suite")
-            details = {"test_count": test_count, "documents_extra": bool(args.documents_extra),
+            details = {"test_count": test_summary["total"], "test_summary": test_summary,
+                       "documents_extra": bool(args.documents_extra),
                        "installed_origin": str((ROOT / "src" / "leakguard_core" / "__init__.py").resolve())}
         result = {"outcome": "passed", "failed_stage": None, "mode": args.mode,
                   "source_commit": revision, "patch_digest": patch_digest, **details}
