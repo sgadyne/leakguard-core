@@ -84,6 +84,17 @@ path characters are preserved and escaped safely in JSON.
 
 Gitleaks provider-specific rules are extended with explicit client-secret/password assignment rules and XML password settings. Bare `secret` variable names, folder names, high entropy alone, file extensions and generic hash shapes do not justify suppressing or declaring credentials. Generic engine matches remain blocking in Git unless a narrow evidence check proves metadata.
 
+The backend runs Gitleaks with a private working directory, so a caller
+repository's `.gitleaksignore` cannot waive a required scan. Explicit local
+Gitleaks configuration may inherit relative rule files; LeakGuard snapshots the
+top file and up to two inherited files, each bounded to 1 MB, and stages only
+those rule files in the private directory. Scanned source stays on stdin and is
+not written into the staging area. External or unknown inherited configurations
+disable persistent cache reuse; bounded local rule bytes still participate in
+runtime identity. Missing, malformed or over-bound rules fail closed with a
+fixed configuration error. See [compatibility notes](COMPATIBILITY.md) for
+relative-path and inheritance bounds.
+
 There is no blanket pre-scan hash masking and no filename-wide hash exception. AST fingerprints are informational only when the digest matches the sibling function in the same commit/index version. `source_fingerprints` file hashes require matching file bytes from that version. Wrong/missing/ambiguous source, duplicate JSON keys and mixed values on one line do not grant exemptions. Real credentials alongside hashes still block.
 
 Explicit password fields do not need high entropy to be sensitive: weak literal passwords are detected too. Placeholder exceptions are limited to exact documented markers/environment references rather than broad `example-*` or `your-*` prefixes. Provider rules are independently evaluated. Duplicate Git/plugin observations retain the most restrictive severity.

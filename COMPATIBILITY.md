@@ -52,6 +52,52 @@ Store implementations must also accept `record_report(report, repository=...)`
 and preserve the explicit repository identity, including for empty Git reports
 with no result sources.
 
+The complete `ScanStore` protocol includes bounded current/history page queries,
+material snapshots, lifecycle methods and optional work-queue capabilities. A
+store used for `audit()` or `drain()` must implement the queue and event methods:
+`acquire_cycle`, `lease_valid`, `enqueue_work`, `claim_work`,
+`finish_directory`, `cycle_status`, `release_cycle`, `invalidate_scope` and
+`record_event`. A rooted audit also requires
+`reconcile_cycle(lease, root)`. If a required method is missing or fails, that
+batch is incomplete; it cannot publish a complete cycle. `record_metadata` is an
+optional bounded hint used when importing change events. Delete and rename events
+make prior observations unknown; they do not prove absence.
+
+The filesystem-anchor extension is a paired optional capability. Such a store
+must accept `anchor=None` on `record_result(...)` and implement
+`source_anchor(source)` and `confirm_absent(proof, *, generation)`. It retains
+only the verified directory identity anchor needed by the core's internal
+absence proof, and accepts a proof only when the input generation and stored
+anchor still match. The public `Scanner` facade and CLI do not expose an absence
+confirmation action. A successful `reconcile_cycle` marks unobserved prior paths
+unknown; it does not resolve them. Stores that omit the anchor capability keep
+the same conservative behavior.
+
+Inventory scans call `material_snapshot(max_bytes=1_000_000,
+max_sources=100)`, including when the store has no registered references; a store
+with no materials should return an empty valid snapshot. A missing or failed
+snapshot makes required inventory coverage incomplete. The corresponding
+`record_result(...)` call accepts the bounded material observations and completion
+flags, keeping reference locations and match state behind the injected store. The
+scan service does not create a second durable mirror for a custom store.
+
+#### Gitleaks rule configuration
+
+Gitleaks runs from a private temporary working directory so a caller's
+`.gitleaksignore` cannot suppress a required scan. The backend reads the
+explicit top-level TOML file and follows at most two `[extend].path` inheritance
+edges. Each top-level or inherited config file must be a regular file no larger
+than 1 MB. Relative paths keep Gitleaks' caller-working-directory meaning and
+are staged with their same relative names under the private working directory;
+the scanned source content remains on stdin and is never copied into staging.
+Relative references with more than 32 `..` components, unavailable files,
+non-files, malformed TOML, and staging-name collisions fail with the fixed
+`configuration-invalid` error. In particular, a reference that aliases the
+private `.gitleaksignore` staging name fails closed. Local inherited file bytes
+contribute to the runtime identity. Path/URL inheritance and incomplete
+or unknown closures are not eligible for persistent cache reuse, even when the
+local bytes that were available could be hashed.
+
 The temporary `engine.scan_file()` and `engine.scan_blob()` compatibility wrappers
 remain for existing internal callers. Their legacy return shapes are not the new
 contract. Legacy cache status `unchanged` maps to the typed `reused` outcome only
