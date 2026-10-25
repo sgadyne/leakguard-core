@@ -187,10 +187,11 @@ def _distribution_identity(name):
 
 def _module_artifacts(name):
     """Locate explicitly configured module bytes without importing parent code."""
-    search = list(sys.path)
     artifacts = []
     prefix = []
     try:
+        from ._python import extension_paths
+        search = list(extension_paths())
         for component in name.split('.'):
             _check_budget()
             prefix.append(component)

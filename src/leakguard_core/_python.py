@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from itertools import islice
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -20,6 +21,30 @@ sys.path.insert(0, root)
 sys.path.extend(json.loads(paths))
 runpy.run_module(module, run_name='__main__', alter_sys=True)
 '''
+
+
+def extension_paths():
+    """Bound explicitly selected extension roots, including operator PYTHONPATH.
+
+    An isolated hook ignores PYTHONPATH for its own startup. Configured trusted
+    extensions may still live at an absolute operator-selected path; these roots
+    are appended after the worker's trusted core and interpreter import roots.
+    """
+    candidates = tuple(islice(iter(sys.path), 257))
+    selected = os.environ.get('PYTHONPATH', '')
+    if len(candidates) > 256 or len(selected) > 65536:
+        raise ValueError('configuration-invalid')
+    paths = []
+    for value in (*candidates, *(item for item in selected.split(os.pathsep)
+                                 if item and Path(item).is_absolute())):
+        if type(value) is not str or '\x00' in value or len(value) > 4096:
+            raise ValueError('configuration-invalid')
+        path = str(Path(value or os.getcwd()).absolute())
+        if path not in paths:
+            paths.append(path)
+        if len(paths) > 256:
+            raise ValueError('configuration-invalid')
+    return tuple(paths)
 
 
 def core_command(module, *args, executable=None, search_paths=()):
