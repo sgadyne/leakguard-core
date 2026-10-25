@@ -1,7 +1,7 @@
-include LICENSE README.md PLUGIN_API.md CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md RELEASING.md VALIDATION.md
+include LICENSE README.md PLUGIN_API.md CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md RELEASING.md VALIDATION.md COMPATIBILITY.md
 recursive-include src *.py *.toml
-recursive-include tests *.py
-recursive-include examples *.py *.json
+recursive-include tests *.py *.json
+recursive-include examples *.py *.json *.md *.toml
 recursive-include scripts *.ps1
 recursive-include tools *.py
 recursive-include .github *.yml

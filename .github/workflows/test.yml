@@ -31,3 +31,38 @@ jobs:
           export PATH="$PWD/.tools:$PATH"
           python -m unittest discover -s tests -v
           python -m compileall -q src
+
+  installed-wheel:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        python-version: ['3.11', '3.13']
+        documents: [false, true]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Gitleaks
+        run: python tools/install_gitleaks.py .tools
+      - name: Prepare private test configuration
+        run: printf '{}\n' > "$RUNNER_TEMP/leakguard-config.json"
+      - name: Build and test the installed wheel without parser extras
+        if: ${{ !matrix.documents }}
+        run: >-
+          python tools/run_acceptance.py
+          --mode wheel
+          --output "$RUNNER_TEMP/leakguard-wheel-acceptance.json"
+          --gitleaks "$PWD/.tools/gitleaks"
+          --config "$RUNNER_TEMP/leakguard-config.json"
+      - name: Build and test the installed wheel with document parsers
+        if: ${{ matrix.documents }}
+        run: >-
+          python tools/run_acceptance.py
+          --mode wheel
+          --documents-extra
+          --output "$RUNNER_TEMP/leakguard-wheel-acceptance.json"
+          --gitleaks "$PWD/.tools/gitleaks"
+          --config "$RUNNER_TEMP/leakguard-config.json"
