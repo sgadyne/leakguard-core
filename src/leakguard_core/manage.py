@@ -263,7 +263,7 @@ def _repository_argument(value):
 
 
 def _read_explicit_report(path):
-    flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0)
+    flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
     descriptor = os.open(path, flags)
     try:
         metadata = os.fstat(descriptor)
