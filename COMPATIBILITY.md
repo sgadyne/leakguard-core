@@ -35,6 +35,9 @@ Without `state_dir` or an injected store, the API uses private temporary work an
 does not persist a catalog or semantic cache. `Scanner.scan()` accepts one
 `FileInput` per file or bounded `BytesInput`; `Scanner.scan_paths()` delegates
 directory expansion and enumeration coverage to the shared service.
+Audit directory enumeration is bounded per step. An unusually large or
+continuously changing directory may remain pending indefinitely, in which case
+the audit cycle remains incomplete and does not establish a complete inventory.
 
 The temporary `engine.scan_file()` and `engine.scan_blob()` compatibility wrappers
 remain for existing internal callers. Their legacy return shapes are not the new

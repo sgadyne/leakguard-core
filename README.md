@@ -33,7 +33,7 @@ migration.
 }
 ```
 
-Advance a persistent crawl with `leakguard audit workspace --budget-seconds 120 --max-files 1000`. Queues survive interruption. A bounded one-off `scan` reports remaining work but does not persist its pending paths; use `audit` for a full resumable baseline. Reports expose skipped/error paths and cycle completion, not a false "clean drive" claim. Excluded directories are policy omissions: their contents are not enumerated. Review configured exclusions when assessing coverage.
+Advance a persistent crawl with `leakguard audit workspace --budget-seconds 120 --max-files 1000`. Queues survive interruption. A bounded one-off `scan` reports remaining work but does not persist its pending paths; use `audit` for a full resumable baseline. Directory enumeration is bounded per step. A directory that is larger than the enumeration bound or keeps changing may remain pending indefinitely; its audit cycle stays incomplete. Reports expose skipped/error paths and cycle completion, not a false "clean drive" claim. Excluded directories are policy omissions: their contents are not enumerated. Review configured exclusions when assessing coverage.
 
 ## Git guards and inventory
 
