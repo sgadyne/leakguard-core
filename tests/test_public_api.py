@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from leakguard_core.api import ConfigurationError, ScanConfig, Scanner
@@ -111,6 +112,279 @@ def _finding_cursor(state, profile, position):
 
 
 class PublicApiTests(unittest.TestCase):
+    def test_a04_marker_redaction_across_api_cli_reports_and_sqlite(self):
+        """A positive synthetic value never enters public output or durable state."""
+        import sqlite3
+        from leakguard_core import engine
+        from leakguard_core.scan_store import SQLiteScanStore
+
+        marker = "A04-Synthetic-" + uuid.uuid4().hex
+        marker_bytes = marker.encode("ascii")
+        source_text = f'client_secret = "{marker}"\n'
+
+        def absent(label, value):
+            if isinstance(value, str):
+                leaked = marker in value
+            else:
+                leaked = marker_bytes in value
+            self.assertFalse(leaked, f"synthetic marker leaked through {label}")
+
+        with tempfile.TemporaryDirectory(prefix="leakguard-a04-redaction-") as directory:
+            root = Path(directory)
+            source_root = root / "source"
+            source_root.mkdir()
+            source = source_root / "fixture.txt"
+            source.write_text(source_text, encoding="utf-8")
+            reference = root / "private-reference.json"
+            reference.write_text(json.dumps({"secret": marker}), encoding="utf-8")
+            executable = Path(os.environ.get("LEAKGUARD_GITLEAKS", str(engine.EXE))).resolve()
+            config = ScanConfig.from_mapping({"gitleaks_executable": str(executable)})
+            limits = ScanLimits(45, 10)
+            policy = ScanPolicy.inventory()
+
+            # API scan persists a cold result and a cache replay to a private SQLite
+            # store. A registered value adds a keyed material observation, not bytes.
+            state_dir = root / "api-state"
+            store = SQLiteScanStore(state_dir, config=config.to_mapping())
+            scanner = None
+            try:
+                scanner = Scanner.open(config=config, state_dir=state_dir, store=store)
+                first = scanner.scan([FileInput(source)], policy=policy, limits=limits)
+                second = scanner.scan([FileInput(source)], policy=policy, limits=limits)
+                self.assertIn("literal-client-secret", {item.rule for item in first.results[0].findings})
+                self.assertEqual(second.results[0].outcome.value, "reused")
+                absent("cold API JSON", first.to_json())
+                absent("warm API JSON", second.to_json())
+                absent("API text renderer", presentation.render(first))
+
+                with store.conn:
+                    store.conn.execute(
+                        "INSERT INTO material_sources VALUES(?,?,?,?,?)",
+                        ("a04-fixture", str(reference), "json", "secret", "credential"),
+                    )
+                material_report = scanner.scan([FileInput(source)], policy=policy, limits=limits)
+                self.assertIn(
+                    "known-material-credential",
+                    {item.rule for item in material_report.results[0].findings},
+                )
+                absent("material-observation API JSON", material_report.to_json())
+                absent("material-observation text", presentation.render(material_report))
+
+                current_page = store.query_findings_page(state="current", limit=100)
+                history_page = store.query_findings_page(state="history", limit=100)
+                current = presentation.findings_page_report_to_dict(
+                    "current", "all", current_page.rows,
+                    has_more=current_page.has_more, next_cursor=current_page.next_cursor,
+                )
+                history = presentation.findings_page_report_to_dict(
+                    "history", "all", history_page.rows,
+                    has_more=history_page.has_more, next_cursor=history_page.next_cursor,
+                )
+                absent("current findings view", json.dumps(current, ensure_ascii=True))
+                absent("history findings view", json.dumps(history, ensure_ascii=True))
+                absent("current findings renderer", presentation.render_findings_report(current))
+                absent("history findings renderer", presentation.render_findings_report(history))
+
+                logical_dump = "\n".join(store.conn.iterdump())
+                absent("SQLite logical dump", logical_dump)
+                live_artifacts = {
+                    path.name: path.read_bytes()
+                    for path in state_dir.glob("state.sqlite3*") if path.is_file()
+                }
+                self.assertIn("state.sqlite3", live_artifacts)
+                for name, raw in live_artifacts.items():
+                    absent(f"live SQLite artifact {name}", raw)
+                self.assertTrue(store.conn.execute("SELECT COUNT(*) FROM scan_cache").fetchone()[0])
+                self.assertTrue(store.conn.execute("SELECT COUNT(*) FROM material_locations").fetchone()[0])
+                self.assertTrue(store.conn.execute("SELECT COUNT(*) FROM finding_history").fetchone()[0])
+            finally:
+                if scanner is not None:
+                    scanner.close()
+                store.close()
+            closed_artifacts = b"".join(
+                path.read_bytes() for path in state_dir.glob("state.sqlite3*") if path.is_file()
+            )
+            absent("closed SQLite database/WAL/SHM", closed_artifacts)
+
+            # The command-line scan and every management rendering consume the
+            # same typed store/report schema; capture streams without echoing them.
+            cli_state = root / "cli-state"
+            cli_config = root / "cli-config.json"
+            cli_config.write_text(json.dumps(config.to_mapping()), encoding="utf-8")
+            environment = dict(os.environ)
+            source_package = str(Path(__file__).resolve().parents[1] / "src")
+            environment["PYTHONPATH"] = source_package
+            environment["LEAKGUARD_CONFIG"] = str(cli_config)
+            environment["LEAKGUARD_STATE_DIR"] = str(cli_state)
+            environment["LEAKGUARD_GITLEAKS"] = str(executable)
+
+            def run_cli(*arguments):
+                return subprocess.run(
+                    [sys.executable, *arguments], cwd=root, env=environment,
+                    capture_output=True, text=True, timeout=60, check=False,
+                )
+
+            cold = run_cli(
+                "-m", "leakguard_core.cli", "scan", "--state-dir", str(cli_state),
+                "--format", "json", str(source),
+            )
+            self.assertEqual(cold.returncode, 0, "cold CLI scan should complete under inventory policy")
+            cold_report = json.loads(cold.stdout)
+            self.assertIn("literal-client-secret", {
+                item["rule"] for result in cold_report["results"] for item in result["findings"]
+            })
+            absent("JSON CLI stdout/stderr", cold.stdout + cold.stderr)
+
+            warm = run_cli(
+                "-m", "leakguard_core.cli", "scan", "--state-dir", str(cli_state),
+                "--format", "text", str(source),
+            )
+            self.assertEqual(warm.returncode, 0, "warm CLI scan should complete under inventory policy")
+            self.assertIn("literal-client-secret", warm.stdout)
+            absent("text CLI stdout/stderr", warm.stdout + warm.stderr)
+
+            report_path = root / "typed-report.json"
+            report_path.write_text(cold.stdout, encoding="utf-8")
+            for format_name in ("json", "text"):
+                explained = run_cli(
+                    "-m", "leakguard_core.manage", "explain", "--report", str(report_path),
+                    "--format", format_name,
+                )
+                self.assertEqual(explained.returncode, 0, "typed report explanation should succeed")
+                if format_name == "json":
+                    explained_data = json.loads(explained.stdout)
+                    self.assertIn("literal-client-secret", {
+                        item["rule"] for result in explained_data["results"] for item in result["findings"]
+                    })
+                else:
+                    self.assertIn("literal-client-secret", explained.stdout)
+                absent(f"manage explain {format_name} stdout/stderr", explained.stdout + explained.stderr)
+            for state, format_name in (("current", "json"), ("history", "text")):
+                viewed = run_cli(
+                    "-m", "leakguard_core.manage", "report", "all", "--state", state,
+                    "--format", format_name,
+                )
+                self.assertEqual(viewed.returncode, 0, "typed current/history report should succeed")
+                if format_name == "json":
+                    viewed_data = json.loads(viewed.stdout)
+                    self.assertIn("literal-client-secret", {
+                        item["rule"] for item in viewed_data["findings"]
+                    })
+                else:
+                    self.assertIn("literal-client-secret", viewed.stdout)
+                absent(f"manage report {state} {format_name} stdout/stderr", viewed.stdout + viewed.stderr)
+
+            # A plugin exception and a malformed extra-field result both carry
+            # this same marker through worker memory/protocol input. The public
+            # report and process output retain only fixed error codes.
+            plugin_root = root / "plugins"
+            plugin_root.mkdir()
+            plugin_root.joinpath("a04_exception.py").write_text(
+                "from leakguard_core.plugins import OptionSchema, OptionSpec, PluginManifest, RuleSpec\n"
+                "API_VERSION=2\n"
+                "MANIFEST=PluginManifest(id='a04-exception',implementation_version='1',kind='detector',"
+                "rules=(RuleSpec('a04-exception-rule'),),formats=('text',),part_kinds=('text',),"
+                "options_schema=OptionSchema((OptionSpec('message','string',required=True),)))\n"
+                "class Detector:\n"
+                " def __init__(self,message): self.message=message\n"
+                " def detect(self,text,context): raise RuntimeError(self.message)\n"
+                "def create_plugin(options): return Detector(options['message'])\n",
+                encoding="utf-8",
+            )
+            plugin_root.joinpath("a04_extra.py").write_text(
+                "from leakguard_core.plugins import OptionSchema, OptionSpec, PluginManifest, RuleSpec\n"
+                "API_VERSION=2\n"
+                "MANIFEST=PluginManifest(id='a04-extra',implementation_version='1',kind='detector',"
+                "rules=(RuleSpec('a04-extra-rule'),),formats=('text',),part_kinds=('text',),"
+                "options_schema=OptionSchema((OptionSpec('value','string',required=True),)))\n"
+                "class Detector:\n"
+                " def __init__(self,value): self.value=value\n"
+                " def detect(self,text,context): return [{'rule':'a04-extra-rule','line':1,'severity':'review','value':self.value}]\n"
+                "def create_plugin(options): return Detector(options['value'])\n",
+                encoding="utf-8",
+            )
+            plugin_mapping = config.to_mapping()
+            plugin_mapping["plugins"] = [
+                {"module": "a04_exception", "options": {"message": marker}},
+                {"module": "a04_extra", "options": {"value": marker}},
+            ]
+            plugin_config = ScanConfig.from_mapping(plugin_mapping)
+            plugin_environment = dict(environment)
+            plugin_environment["PYTHONPATH"] = os.pathsep.join((source_package, str(plugin_root)))
+            plugin_state = root / "plugin-state"
+            plugin_environment["LEAKGUARD_STATE_DIR"] = str(plugin_state)
+            plugin_environment["LEAKGUARD_CONFIG"] = str(root / "plugin-config.json")
+            Path(plugin_environment["LEAKGUARD_CONFIG"]).write_text(
+                json.dumps(plugin_config.to_mapping()), encoding="utf-8",
+            )
+
+            prior_path = list(sys.path)
+            sys.path.insert(0, str(plugin_root))
+            plugin_scanner = None
+            try:
+                plugin_scanner = Scanner.open(config=plugin_config, state_dir=plugin_state)
+                plugin_report = plugin_scanner.scan([FileInput(source)], policy=policy, limits=limits)
+            finally:
+                if plugin_scanner is not None:
+                    plugin_scanner.close()
+                sys.path[:] = prior_path
+            error_codes = {issue.code.value for result in plugin_report.results for issue in result.issues}
+            self.assertIn("plugin-invalid", error_codes)
+            self.assertIn("detector-output-invalid", error_codes)
+            absent("plugin exception/extra-field API JSON", plugin_report.to_json())
+            absent("plugin exception/extra-field text", presentation.render(plugin_report))
+
+            plugin_cli = subprocess.run(
+                [sys.executable, "-m", "leakguard_core.cli", "scan", "--state-dir", str(plugin_state),
+                 "--format", "json", "--no-cache", str(source)],
+                cwd=root, env=plugin_environment, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(plugin_cli.returncode, 2, "plugin failures must make CLI coverage incomplete")
+            plugin_cli_report = json.loads(plugin_cli.stdout)
+            plugin_cli_codes = {
+                issue["code"] for result in plugin_cli_report["results"] for issue in result["issues"]
+            }
+            self.assertIn("plugin-invalid", plugin_cli_codes)
+            self.assertIn("detector-output-invalid", plugin_cli_codes)
+            absent("plugin exception/extra-field CLI stdout/stderr", plugin_cli.stdout + plugin_cli.stderr)
+            plugin_db = sqlite3.connect(plugin_state / "state.sqlite3")
+            try:
+                plugin_dump = "\n".join(plugin_db.iterdump())
+            finally:
+                plugin_db.close()
+            absent("plugin exception/extra-field SQLite logical dump", plugin_dump)
+            checked = [
+                "positive built-in detection through Scanner API",
+                "cold and reused API reports",
+                "API text rendering",
+                "current/history finding serialization and rendering",
+                "SQLite logical dump with cache and material observation",
+                "live and closed SQLite database/WAL/SHM raw bytes",
+                "JSON and text CLI output",
+                "typed explain JSON/text and current/history report rendering",
+                "configured plugin exception and extra-field rejection through API/CLI",
+                "plugin-state SQLite logical and raw dumps",
+            ]
+            receipt_path = os.environ.get("LEAKGUARD_A04_RECEIPT")
+            if receipt_path:
+                Path(receipt_path).write_text(json.dumps({
+                    "schema_version": 1,
+                    "marker_sha256": hashlib.sha256(marker_bytes).hexdigest(),
+                    "checks": checked,
+                    "api_live_sqlite_artifacts": sorted(live_artifacts),
+                    "api_cache_replay": second.results[0].outcome.value,
+                    "api_material_observations": store.conn.execute(
+                        "SELECT COUNT(*) FROM material_locations"
+                    ).fetchone()[0],
+                    "plugin_issue_codes": sorted(error_codes),
+                    "source_and_transient_plugin_input_are_synthetic_exceptions": True,
+                }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            for label, state in (("API", state_dir), ("CLI", cli_state), ("plugin", plugin_state)):
+                raw = b"".join(
+                    path.read_bytes() for path in state.glob("state.sqlite3*") if path.is_file()
+                )
+                absent(f"{label} SQLite raw DB/WAL/SHM", raw)
+
     def test_import_is_inert_even_with_invalid_operator_environment(self):
         with tempfile.TemporaryDirectory(prefix="leakguard-test-public-") as directory:
             root = Path(directory)
