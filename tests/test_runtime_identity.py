@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
+import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -122,12 +125,20 @@ class RuntimeIdentityTests(unittest.TestCase):
     def test_runtime_identity_caps_artifact_reads_and_discovery(self):
         from leakguard_core.scan_policy import RuntimeIdentityError
 
-        too_large = SimpleNamespace(st_mode=0o100644, st_size=512 * 1024 * 1024 + 1)
-        with patch.object(Path, 'is_file', return_value=True), \
-                patch.object(Path, 'stat', return_value=too_large), \
-                patch.object(Path, 'open') as opened:
-            self.assertEqual(scan_policy._file_identity(Path('synthetic-artifact')), 'unavailable')
-        opened.assert_not_called()
+        with tempfile.TemporaryDirectory(prefix='leakguard-large-artifact-') as temporary:
+            artifact = Path(temporary) / 'artifact.bin'
+            artifact.write_bytes(b'small synthetic artifact')
+            real_fstat = os.fstat
+
+            def oversized_fstat(descriptor):
+                observed = real_fstat(descriptor)
+                fields = list(observed)
+                fields[stat.ST_SIZE] = 512 * 1024 * 1024 + 1
+                return os.stat_result(fields)
+
+            with patch.object(scan_policy.os, 'fstat', side_effect=oversized_fstat) as fstat:
+                self.assertEqual(scan_policy._file_identity(artifact), 'unavailable')
+            fstat.assert_called()
 
         budget = scan_policy._IdentityBudget(time.monotonic() + 10, None)
         with self.assertRaises(RuntimeIdentityError):
@@ -160,6 +171,92 @@ class RuntimeIdentityTests(unittest.TestCase):
         finally:
             scan_policy._IDENTITY_BUDGET.reset(token)
         self.assertEqual(error.exception.code, 'budget-exhausted')
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX FIFO race regression')
+    def test_regular_artifact_replaced_by_fifo_at_open_is_nonblocking(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-artifact-race-') as temporary:
+            artifact = Path(temporary) / 'artifact.bin'
+            artifact.write_bytes(b'synthetic artifact before race')
+            script = r'''
+import os
+from pathlib import Path
+import sys
+from leakguard_core import scan_policy
+
+artifact = Path(sys.argv[1])
+real_open = os.open
+def replace_then_open(path, flags, *args, **kwargs):
+    if os.fspath(path) == str(artifact):
+        artifact.unlink()
+        os.mkfifo(artifact)
+        if not flags & getattr(os, 'O_NONBLOCK', 0):
+            raise AssertionError('artifact open must be nonblocking')
+    return real_open(path, flags, *args, **kwargs)
+
+scan_policy.os.open = replace_then_open
+print(scan_policy._file_identity(artifact))
+'''
+            child_env = dict(os.environ)
+            completed = subprocess.run(
+                [sys.executable, '-c', script, str(artifact)],
+                capture_output=True, timeout=2, check=False, env=child_env,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode('utf-8', 'replace'))
+        self.assertEqual(completed.stdout.strip(), b'unavailable')
+
+    @unittest.skipUnless(hasattr(os, 'symlink'), 'symlink unavailable')
+    def test_artifact_symlink_hashes_target_and_tracks_target_changes(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-symlink-artifact-') as temporary:
+            root = Path(temporary)
+            target = root / 'real-artifact.py'
+            alias = root / 'artifact-alias.py'
+            first = b'synthetic runtime artifact one\n'
+            second = b'synthetic runtime artifact two\n'
+            target.write_bytes(first)
+            try:
+                alias.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest('symlink creation unavailable')
+
+            first_identity = scan_policy._file_identity(alias)
+            self.assertEqual(first_identity, hashlib.sha256(first).hexdigest())
+            target.write_bytes(second)
+            second_identity = scan_policy._file_identity(alias)
+
+        self.assertEqual(second_identity, hashlib.sha256(second).hexdigest())
+        self.assertNotEqual(first_identity, second_identity)
+
+    @unittest.skipUnless(hasattr(os, 'symlink'), 'symlink unavailable')
+    def test_package_directory_symlink_is_unknown_without_traversal(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-package-link-') as temporary:
+            root = Path(temporary)
+            package_tree = root / 'core'
+            external_tree = root / 'external'
+            package_tree.mkdir()
+            external_tree.mkdir()
+            (package_tree / 'visible.py').write_text('VALUE = 1\n', encoding='utf-8')
+            hidden = external_tree / 'hidden.py'
+            hidden.write_text('VALUE = 2\n', encoding='utf-8')
+            linked_directory = package_tree / 'linked-package'
+            try:
+                linked_directory.symlink_to(external_tree, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest('symlink creation unavailable')
+
+            artifacts = scan_policy._python_files(package_tree)
+            self.assertIn(linked_directory, artifacts)
+            self.assertNotIn(hidden, artifacts)
+            self.assertEqual(scan_policy._file_identity(linked_directory), 'unavailable')
+
+            binary = root / 'synthetic-backend'
+            binary.write_bytes(b'synthetic scanner bytes')
+            module_file = package_tree / 'scan_policy.py'
+            module_file.write_text('# synthetic module root marker\n', encoding='utf-8')
+            config = {'gitleaks_config': str(Path(scan_policy.__file__).resolve().parent / 'rules.toml')}
+            with patch.object(scan_policy, '__file__', str(module_file)), \
+                    patch.object(scan_policy, '_dependency_closure', return_value=([], True)):
+                _identity, eligible = scan_policy.runtime_identity(config, binary)
+            self.assertFalse(eligible)
 
     def test_distribution_artifact_bytes_change_runtime_identity(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-package-identity-') as temporary:
