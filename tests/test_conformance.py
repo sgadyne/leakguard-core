@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 import zipfile
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from leakguard_core import models
@@ -19,6 +20,7 @@ from leakguard_core.extraction import ExtractionLimits, extract
 from leakguard_core.conformance import (
     ConformanceCode, ConformanceIssue, ConformanceKind, ConformanceReport,
     DetectorCase, ExpectedFinding, ExpectedPart, ExtractorCase, check_detector,
+    check_extractor, main as conformance_main,
 )
 
 
@@ -70,17 +72,29 @@ class PublicModelConformanceTests(unittest.TestCase):
             required=False,
             omission_id='unsupported-binary',
         )
+        reused_source = models.SourceRef(kind=models.SourceKind.BYTES, path='replayed.txt')
         reused = models.ScanResult(
+            source=reused_source,
+            content=models.ContentIdentity('sha256', 'b' * 64, 4),
+            identity=identity,
+            outcome=models.ScanOutcome.REUSED,
+            coverage=models.CoverageState.COMPLETE,
+            findings=(),
+            issues=(),
+            observed_at=started + timedelta(seconds=2),
+            last_executed_at=started + timedelta(seconds=1),
+            last_verified_at=started + timedelta(seconds=2),
+            reused_from='prior-scan-fixture',
+        )
+        omitted = models.ScanResult(
             source=omitted_source,
             content=None,
             identity=identity,
-            outcome=models.ScanOutcome.REUSED,
+            outcome=models.ScanOutcome.SKIPPED,
             coverage=models.CoverageState.OMITTED,
             findings=(),
             issues=(omission,),
             observed_at=started + timedelta(seconds=2),
-            last_verified_at=started + timedelta(seconds=2),
-            reused_from='prior-scan-fixture',
         )
         report = models.ScanReport(
             schema_version=1,
@@ -88,7 +102,7 @@ class PublicModelConformanceTests(unittest.TestCase):
             started_at=started,
             finished_at=started + timedelta(seconds=3),
             policy_id='policy-fixture',
-            results=(scanned, reused),
+            results=(scanned, reused, omitted),
             coverage=models.CoverageSummary(
                 enumeration_complete=True,
                 required_complete=True,
@@ -124,7 +138,7 @@ class PublicModelConformanceTests(unittest.TestCase):
         })
         self.assertEqual(decoded['results'][0]['outcome'], 'scanned')
         self.assertEqual(decoded['results'][1]['outcome'], 'reused')
-        self.assertEqual(decoded['results'][1]['issues'][0]['code'], 'policy-omission')
+        self.assertEqual(decoded['results'][2]['issues'][0]['code'], 'policy-omission')
         self.assertEqual(decoded['results'][0]['findings'][0]['severity'], 'block')
         self.assertNotIn('Secret', serialized)
         self.assertNotIn('Match', serialized)
@@ -141,8 +155,8 @@ class PublicModelConformanceTests(unittest.TestCase):
         report, _ = self.make_report()
         counts = report.counts
 
-        self.assertEqual(counts.results, 2)
-        self.assertEqual((counts.scanned, counts.reused, counts.skipped), (1, 1, 0))
+        self.assertEqual(counts.results, 3)
+        self.assertEqual((counts.scanned, counts.reused, counts.skipped), (1, 1, 1))
         self.assertEqual(counts.findings, 1)
         self.assertEqual(counts.block_findings, 1)
         self.assertEqual(counts.omitted_results, 1)
@@ -204,6 +218,109 @@ class ExtensionConformanceModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ExtractorCase('sample', b'fixture', 'sample.docx', 'office-word', 'extracted',
                           expected_issues=('SyntheticOnly~InputLabel',))
+
+    def test_case_repr_hides_detector_text_and_extractor_bytes(self):
+        marker = 'SyntheticOnly~repr7Q3v'
+        detector = DetectorCase('private-case', marker, 'fixture.txt', 'text', 'text')
+        extractor = ExtractorCase('private-case', marker.encode(), 'fixture.bin', 'fixture-format', 'unsupported')
+        self.assertNotIn(marker, repr(detector))
+        self.assertNotIn(marker, repr(extractor))
+
+    def run_extractor_fixture(self, source, cases):
+        with tempfile.TemporaryDirectory(prefix='leakguard-conformance-extractor-') as temporary:
+            module_path = pathlib.Path(temporary) / 'fixture_extractor.py'
+            module_path.write_text(source, encoding='utf-8')
+            sys.path.insert(0, temporary)
+            try:
+                return check_extractor('fixture_extractor', {}, cases)
+            finally:
+                sys.path.remove(temporary)
+
+    def test_v2_extractor_matches_core_part_id_digest_and_lines(self):
+        source = '''from leakguard_core.extraction import Extraction, ExtractedPart\nfrom leakguard_core.plugins import PluginManifest\nAPI_VERSION=2\nMANIFEST=PluginManifest(id="fixture-note", implementation_version="1", kind="extractor", formats=("fixture-format",), part_kinds=("note",))\nclass Extractor:\n def extract(self,data,context): return Extraction("extracted", (ExtractedPart("note",1,data.decode("utf-8")),))\ndef create_plugin(options): return Extractor()\n'''
+        text = 'first\nsecond\n'
+        case = ExtractorCase(
+            'note-present', b'first\nsecond\n', 'case.note', 'fixture-format', 'extracted',
+            (ExpectedPart.from_text('note-1', text),),
+        )
+        report = self.run_extractor_fixture(source, (case,))
+        self.assertTrue(report.passed, report.to_json())
+        self.assertEqual((report.passed_cases, report.failed_cases), (1, 0))
+
+    def test_extractor_rejects_foreign_duplicate_parts_and_part_limit(self):
+        fixtures = (
+            ('foreign', 'Extraction("extracted", (ExtractedPart("foreign",1,"SyntheticOnly~ForeignPart"),))'),
+            ('duplicate', 'Extraction("extracted", (ExtractedPart("note",1,"one"), ExtractedPart("note",1,"SyntheticOnly~DuplicatePart")))'),
+            ('too-many', 'Extraction("extracted", tuple(ExtractedPart("note",i,"x") for i in range(1,1002)))'),
+        )
+        for case_id, expression in fixtures:
+            with self.subTest(case_id=case_id):
+                source = f'''from leakguard_core.extraction import Extraction, ExtractedPart\nfrom leakguard_core.plugins import PluginManifest\nAPI_VERSION=2\nMANIFEST=PluginManifest(id="fixture-note", implementation_version="1", kind="extractor", formats=("fixture-format",), part_kinds=("note",))\nclass Extractor:\n def extract(self,data,context): return {expression}\ndef create_plugin(options): return Extractor()\n'''
+                case = ExtractorCase(case_id, b'input', 'case.note', 'fixture-format', 'extracted')
+                report = self.run_extractor_fixture(source, (case,))
+                self.assertFalse(report.passed)
+                self.assertEqual(report.failed_cases, 1)
+                self.assertNotIn('SyntheticOnly~', report.to_json())
+
+    def test_extractor_exception_and_nontext_dispositions_have_closed_results(self):
+        source = '''from leakguard_core.extraction import Extraction\nfrom leakguard_core.plugins import PluginManifest\nAPI_VERSION=2\nMANIFEST=PluginManifest(id="fixture-note", implementation_version="1", kind="extractor", formats=("fixture-format",), part_kinds=("note",))\nclass Extractor:\n def extract(self,data,context):\n  if data == b"boom": raise RuntimeError("SyntheticOnly~ExtractorFailure")\n  if data == b"encrypted": return Extraction("encrypted", ())\n  return Extraction("unsupported", ())\ndef create_plugin(options): return Extractor()\n'''
+        cases = (
+            ExtractorCase('unsupported', b'unknown', 'case.note', 'fixture-format', 'unsupported',
+                          expected_issues=('unsupported-format',)),
+            ExtractorCase('encrypted', b'encrypted', 'case.note', 'fixture-format', 'encrypted',
+                          expected_issues=('encrypted',)),
+            ExtractorCase('exception', b'boom', 'case.note', 'fixture-format', 'extracted'),
+        )
+        report = self.run_extractor_fixture(source, cases)
+        self.assertEqual((report.passed_cases, report.failed_cases), (2, 1))
+        self.assertEqual(report.issues[-1].code, ConformanceCode.PLUGIN_INVALID)
+        self.assertNotIn('SyntheticOnly~ExtractorFailure', report.to_json())
+
+    def test_cli_emits_one_redacted_json_and_uses_three_exit_states(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-conformance-cli-') as temporary:
+            root = pathlib.Path(temporary)
+            (root / 'fixture_cli.py').write_text(
+                'from leakguard_core.plugins import Finding\nAPI_VERSION=1\n'
+                'class Detector:\n def detect(self,text,path,part): return []\n'
+                'def create_plugin(options): return Detector()\n', encoding='utf-8')
+            marker = 'SyntheticOnly~CLIInput7f3A'
+            cases_path = root / 'cases.json'
+            cases_path.write_text(json.dumps({'cases': [{
+                'case_id': 'cli-case', 'text': marker, 'logical_path': 'fixture.txt',
+                'format_id': 'text', 'part_id': 'text', 'expected_findings': [],
+            }]}), encoding='utf-8')
+            sys.path.insert(0, temporary)
+            try:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    status = conformance_main(['--kind', 'detector', '--module', 'fixture_cli', '--cases', str(cases_path)])
+                line = output.getvalue()
+                self.assertEqual(status, 0)
+                self.assertEqual(len(line.splitlines()), 1)
+                self.assertTrue(json.loads(line)['passed'])
+                self.assertNotIn(marker, line)
+
+                mismatch = root / 'mismatch.json'
+                mismatch.write_text(json.dumps({'cases': [{
+                    'case_id': 'expected-match', 'text': marker, 'logical_path': 'fixture.txt',
+                    'format_id': 'text', 'part_id': 'text',
+                    'expected_findings': [{'rule': 'fixture-rule', 'start_line': 1, 'end_line': 1, 'severity': 'review'}],
+                }]}), encoding='utf-8')
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    status = conformance_main(['--kind', 'detector', '--module', 'fixture_cli', '--cases', str(mismatch)])
+                self.assertEqual(status, 1)
+                self.assertEqual(len(output.getvalue().splitlines()), 1)
+                self.assertFalse(json.loads(output.getvalue())['passed'])
+
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    status = conformance_main(['--kind', 'detector', '--module', 'fixture_cli'])
+                self.assertEqual(status, 2)
+                self.assertEqual(len(output.getvalue().splitlines()), 1)
+                self.assertEqual(json.loads(output.getvalue())['issues'][0]['code'], 'setup-failed')
+            finally:
+                sys.path.remove(temporary)
 
     def test_conformance_report_serializer_is_allowlisted_and_redacted(self):
         report = ConformanceReport(

@@ -6,11 +6,15 @@ case text, input bytes, options, plugin output, or exception messages.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+import argparse
+import base64
 import hashlib
 import json
 import re
+from pathlib import Path
+import sys
 from typing import Mapping, Sequence
 
 
@@ -74,7 +78,7 @@ class ExpectedFinding:
 @dataclass(frozen=True)
 class DetectorCase:
     case_id: str
-    text: str
+    text: str = field(repr=False)
     logical_path: str
     format_id: str
     part_id: str
@@ -122,7 +126,7 @@ def _line_count(text: str) -> int:
 @dataclass(frozen=True)
 class ExtractorCase:
     case_id: str
-    data: bytes
+    data: bytes = field(repr=False)
     logical_path: str
     expected_format: str
     expected_disposition: str
@@ -136,7 +140,7 @@ class ExtractorCase:
                 or len(self.logical_path) > 4096):
             raise ValueError("case-invalid")
         _token(self.expected_format, "case-invalid")
-        if type(self.expected_disposition) is not str or self.expected_disposition not in {"extracted", "unsupported", "encrypted", "no-text", "error"}:
+        if type(self.expected_disposition) is not str or self.expected_disposition not in {"extracted", "unsupported", "encrypted", "no-text"}:
             raise ValueError("case-invalid")
         if type(self.expected_parts) is not tuple or len(self.expected_parts) > 1000 or any(
             type(item) is not ExpectedPart for item in self.expected_parts
@@ -367,3 +371,152 @@ def _check_extractor_loaded(plugins, handle, component_id: str,
             issues.append(_plugin_issue(code, "case-run", case.case_id, ConformanceKind.EXTRACTOR))
     return ConformanceReport(component_id, ConformanceKind.EXTRACTOR, len(cases), passed,
                              len(cases) - passed, 0, tuple(issues))
+
+
+class _CliSetupError(Exception):
+    """Internal marker for a safe CLI setup failure."""
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        del message
+        raise _CliSetupError
+
+
+def _object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError
+        result[key] = value
+    return result
+
+
+def _read_json(path: str, maximum: int):
+    try:
+        raw = Path(path).read_bytes()
+        if len(raw) > maximum:
+            raise ValueError
+        return json.loads(raw, object_pairs_hook=_object, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+    except Exception:
+        raise _CliSetupError from None
+
+
+def _required_keys(value, keys):
+    if type(value) is not dict or set(value) != set(keys):
+        raise ValueError
+    return value
+
+
+def _detector_cases(value):
+    if type(value) is not dict or set(value) != {"cases"} or type(value["cases"]) is not list:
+        raise ValueError
+    cases = []
+    for raw in value["cases"]:
+        if type(raw) is not dict:
+            raise ValueError
+        allowed = {"case_id", "text", "logical_path", "format_id", "part_id", "expected_findings"}
+        if not {"case_id", "text", "logical_path", "format_id", "part_id"} <= set(raw) <= allowed:
+            raise ValueError
+        findings = raw.get("expected_findings", [])
+        if type(findings) is not list:
+            raise ValueError
+        expected = []
+        for item in findings:
+            _required_keys(item, {"rule", "start_line", "end_line", "severity"})
+            expected.append(ExpectedFinding(**item))
+        cases.append(DetectorCase(
+            case_id=raw["case_id"], text=raw["text"], logical_path=raw["logical_path"],
+            format_id=raw["format_id"], part_id=raw["part_id"], expected_findings=tuple(expected),
+        ))
+    return tuple(cases)
+
+
+def _extractor_cases(value):
+    if type(value) is not dict or set(value) != {"cases"} or type(value["cases"]) is not list:
+        raise ValueError
+    cases = []
+    for raw in value["cases"]:
+        if type(raw) is not dict:
+            raise ValueError
+        required = {"case_id", "data_base64", "logical_path", "expected_format", "expected_disposition"}
+        allowed = required | {"expected_parts", "expected_issues"}
+        if not required <= set(raw) <= allowed or type(raw["data_base64"]) is not str:
+            raise ValueError
+        try:
+            data = base64.b64decode(raw["data_base64"], validate=True)
+        except Exception:
+            raise ValueError from None
+        parts = raw.get("expected_parts", [])
+        issues = raw.get("expected_issues", [])
+        if type(parts) is not list or type(issues) is not list:
+            raise ValueError
+        expected_parts = []
+        for item in parts:
+            _required_keys(item, {"part_id", "text_sha256", "line_count"})
+            expected_parts.append(ExpectedPart(**item))
+        cases.append(ExtractorCase(
+            case_id=raw["case_id"], data=data, logical_path=raw["logical_path"],
+            expected_format=raw["expected_format"], expected_disposition=raw["expected_disposition"],
+            expected_parts=tuple(expected_parts), expected_issues=tuple(issues),
+        ))
+    return tuple(cases)
+
+
+def _failure_report(kind: ConformanceKind, code: ConformanceCode) -> ConformanceReport:
+    return ConformanceReport(
+        component_id="invalid-component", kind=kind, total_cases=0,
+        passed_cases=0, failed_cases=0, skipped_cases=0,
+        issues=(ConformanceIssue("setup", code),),
+    )
+
+
+def _exit_status(report: ConformanceReport) -> int:
+    if any(issue.check_id in {"setup", "component-load", "component-kind", "extractor-api"}
+           or issue.code in {ConformanceCode.SETUP_FAILED, ConformanceCode.COMPONENT_INVALID,
+                          ConformanceCode.DEPENDENCY_UNAVAILABLE, ConformanceCode.CASE_INVALID}
+           for issue in report.issues):
+        return 2
+    return 0 if report.passed else 1
+
+
+def main(argv=None) -> int:
+    """Run author-provided JSON cases against one explicitly named plugin.
+
+    Detector case files contain a `cases` array with case_id, text,
+    logical_path, format_id, part_id and optional expected_findings. Extractor
+    files use data_base64 plus expected_format/disposition and optional
+    expected_parts (part_id, text_sha256, line_count) and expected_issues.
+    `--options` names a JSON object file. Only the redacted report is written.
+    """
+    kind = ConformanceKind.DETECTOR
+    parser = _ArgumentParser(prog="python -m leakguard_core.conformance")
+    parser.add_argument("--kind", required=True, choices=[item.value for item in ConformanceKind])
+    parser.add_argument("--module", required=True, help="explicit component import path")
+    parser.add_argument("--cases", required=True, help="author case JSON file")
+    parser.add_argument("--options", help="optional JSON object file for component options")
+    try:
+        args = parser.parse_args(argv)
+        kind = ConformanceKind(args.kind)
+        case_data = _read_json(args.cases, 64 * 1024 * 1024)
+        options = _read_json(args.options, 1 * 1024 * 1024) if args.options else {}
+        if type(options) is not dict:
+            raise _CliSetupError
+        cases = _detector_cases(case_data) if kind is ConformanceKind.DETECTOR else _extractor_cases(case_data)
+        report = (check_detector(args.module, options, cases) if kind is ConformanceKind.DETECTOR
+                  else check_extractor(args.module, options, cases))
+    except _CliSetupError:
+        report = _failure_report(kind, ConformanceCode.SETUP_FAILED)
+    except (ValueError, TypeError, KeyError, OverflowError):
+        report = _failure_report(kind, ConformanceCode.CASE_INVALID)
+    except BaseException as error:
+        if isinstance(error, (KeyboardInterrupt, GeneratorExit)):
+            report = _failure_report(kind, ConformanceCode.SETUP_FAILED)
+        else:
+            report = _failure_report(kind, ConformanceCode.SETUP_FAILED)
+    sys.stdout.write(report.to_json() + "\n")
+    return _exit_status(report)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
