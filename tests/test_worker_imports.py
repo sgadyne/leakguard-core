@@ -15,7 +15,8 @@ import tempfile
 import unittest
 import venv
 
-from leakguard_core import engine, plugins
+import leakguard_core
+from leakguard_core import plugins
 
 
 def _positive_pdf(text: str) -> bytes:
@@ -84,11 +85,15 @@ class WorkerImportIsolationTests(unittest.TestCase):
         environment = dict(os.environ)
         for key in ("PYTHONHOME", "PYTHONUSERBASE"):
             environment.pop(key, None)
+        selected_gitleaks = os.environ.get("LEAKGUARD_GITLEAKS")
+        if not selected_gitleaks:
+            candidate = Path(__file__).resolve().parents[1] / "tools" / "gitleaks"
+            selected_gitleaks = str(candidate) if candidate.is_file() else shutil.which("gitleaks") or "gitleaks"
         environment.update({
             "PYTHONPATH": str(package_root),
             "LEAKGUARD_CONFIG": str(self.config),
             "LEAKGUARD_STATE_DIR": str(state),
-            "LEAKGUARD_GITLEAKS": str(Path(os.environ.get("LEAKGUARD_GITLEAKS", engine.EXE)).resolve()),
+            "LEAKGUARD_GITLEAKS": str(Path(selected_gitleaks).resolve()),
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": str(self.gitconfig),
             "GIT_TERMINAL_PROMPT": "0",
@@ -113,7 +118,7 @@ class WorkerImportIsolationTests(unittest.TestCase):
         marker = "PDF-Import-Isolation-Synthetic-Q7nV5xP2"
         source = self.cwd / "positive.pdf"
         source.write_bytes(_positive_pdf(f'client_secret = "{marker}"'))
-        package_root = Path(engine.__file__).resolve().parent.parent
+        package_root = Path(leakguard_core.__file__).resolve().parent.parent
         result = self._scan(sys.executable, package_root, source, self.root / "state-installed")
 
         self.assertFalse(self.sentinel.exists(), "untrusted CWD pypdf.py was imported by parser worker")
@@ -138,7 +143,7 @@ class WorkerImportIsolationTests(unittest.TestCase):
             check=True,
         )
         site = Path(probe.stdout.strip())
-        package_source = Path(engine.__file__).resolve().parent
+        package_source = Path(leakguard_core.__file__).resolve().parent
         shutil.copytree(package_source, site / "leakguard_core",
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         packaging = importlib.util.find_spec("packaging")
