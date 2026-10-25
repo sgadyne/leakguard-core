@@ -26,7 +26,7 @@ class ScriptCheckTests(unittest.TestCase):
         return script
 
     def test_published_example_round_trips_through_the_supervised_adapter(self):
-        example = Path(__file__).resolve().parents[1] / "examples" / "script_checks" / "check.py"
+        example = Path(__file__).resolve().parent / "fixtures" / "script_check_example.py"
         detector = self.make_detector(example)
         findings = tuple(plugins.detect(
             [detector], "ordinary\nFIRM-DEMO-MARKER\n", "space/é\nfixture.txt", "text",

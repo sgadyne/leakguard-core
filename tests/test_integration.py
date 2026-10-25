@@ -120,6 +120,131 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(b'LeakGuard blocked', result.stderr)
         self.assertNotIn(SYNTHETIC.encode(), result.stdout + result.stderr)
 
+    def test_actual_local_bare_push_hook_blocks_root_and_intermediate_secrets(self):
+        bare = self.repo.parent / 'synthetic-remote.git'
+        initialized = subprocess.run(['git', 'init', '--bare', str(bare)], capture_output=True)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr.decode(errors='replace'))
+        base_branch = command(self.repo, 'rev-parse', '--abbrev-ref', 'HEAD').stdout.decode().strip()
+        command(self.repo, 'remote', 'add', 'origin', str(bare)).check_returncode()
+        seeded = command(self.repo, 'push', '--no-verify', 'origin', f'{base_branch}:refs/heads/main')
+        self.assertEqual(seeded.returncode, 0, seeded.stderr.decode(errors='replace'))
+
+        command(self.repo, 'checkout', '-b', 'synthetic-root').check_returncode()
+        (self.repo / 'root-secret.txt').write_text('client_secret = "' + SYNTHETIC + '"\n')
+        command(self.repo, 'add', 'root-secret.txt').check_returncode()
+        command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: synthetic branch root secret').check_returncode()
+        root_push = command(self.repo, 'push', 'origin', 'HEAD:refs/heads/synthetic-root')
+        self.assertNotEqual(root_push.returncode, 0)
+        self.assertIn(b'LeakGuard blocked', root_push.stderr)
+        self.assertNotIn(SYNTHETIC.encode(), root_push.stdout + root_push.stderr)
+
+        command(self.repo, 'checkout', base_branch).check_returncode()
+        command(self.repo, 'checkout', '-b', 'synthetic-intermediate').check_returncode()
+        (self.repo / 'history.txt').write_text('client_secret = "' + SYNTHETIC + '"\n')
+        command(self.repo, 'add', 'history.txt').check_returncode()
+        command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: synthetic intermediate secret').check_returncode()
+        (self.repo / 'history.txt').write_text('ordinary clean tip\n')
+        command(self.repo, 'add', 'history.txt').check_returncode()
+        command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: remove synthetic intermediate secret').check_returncode()
+        self.assertNotIn(SYNTHETIC, (self.repo / 'history.txt').read_text())
+        intermediate_push = command(self.repo, 'push', 'origin', 'HEAD:refs/heads/synthetic-intermediate')
+        self.assertNotEqual(intermediate_push.returncode, 0)
+        self.assertIn(b'LeakGuard blocked', intermediate_push.stderr)
+        self.assertNotIn(SYNTHETIC.encode(), intermediate_push.stdout + intermediate_push.stderr)
+
+    @unittest.skipIf(os.name == 'nt', 'invalid UTF-8 filename bytes are POSIX-specific')
+    def test_git_index_preserves_weird_filename_and_typed_line_range(self):
+        from leakguard_core import models
+        relative_bytes = b'space-\xc3\xa9\ninvalid-\xff.txt'
+        relative_path = os.fsdecode(relative_bytes)
+        full_path = os.fsencode(self.repo) + os.sep.encode() + relative_bytes
+        descriptor = os.open(full_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(descriptor, ('first line\nsecond line\nclient_secret = "' + SYNTHETIC + '"\n').encode())
+        finally:
+            os.close(descriptor)
+        added = command(self.repo, 'add', '--', relative_path)
+        self.assertEqual(added.returncode, 0, added.stderr.decode(errors='replace'))
+        report = self.typed_index_report()
+        findings = [finding for result in report.results for finding in result.findings
+                    if finding.rule == 'literal-client-secret']
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].source.kind, models.SourceKind.GIT_INDEX)
+        self.assertEqual(findings[0].source.path, relative_path)
+        self.assertEqual((findings[0].start_line, findings[0].end_line), (3, 3))
+        self.assertNotIn(SYNTHETIC, report.to_json())
+
+    def test_merge_result_only_secret_is_scanned_from_merge_commit(self):
+        from leakguard_core import models
+        base_branch = command(self.repo, 'rev-parse', '--abbrev-ref', 'HEAD').stdout.decode().strip()
+        target = self.repo / 'merge-resolution.txt'
+        target.write_text('base content\n')
+        command(self.repo, 'add', target.name).check_returncode()
+        command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: add merge base fixture').check_returncode()
+        remote_oid = command(self.repo, 'rev-parse', 'HEAD').stdout.decode().strip()
+        command(self.repo, 'checkout', '-b', 'synthetic-side').check_returncode()
+        target.write_text('side content\n')
+        command(self.repo, 'add', target.name).check_returncode()
+        command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: side version').check_returncode()
+        command(self.repo, 'checkout', base_branch).check_returncode()
+        target.write_text('main content\n')
+        command(self.repo, 'add', target.name).check_returncode()
+        command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: main version').check_returncode()
+        merged = command(self.repo, 'merge', '--no-commit', 'synthetic-side')
+        self.assertNotEqual(merged.returncode, 0, 'fixture must create a merge conflict')
+        target.write_text('client_secret = "' + SYNTHETIC + '"\n')
+        command(self.repo, 'add', target.name).check_returncode()
+        command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: secret only in merge result').check_returncode()
+        merge_oid = command(self.repo, 'rev-parse', 'HEAD').stdout.decode().strip()
+
+        with tempfile.TemporaryDirectory(prefix='leakguard-merge-state-') as state:
+            service = guard.ScanService({'gitleaks_executable': str(guard.EXE), 'gitleaks_config': str(guard.RULES)}, state_dir=pathlib.Path(state))
+            try:
+                report = service.scan_git(
+                    self.repo,
+                    request=models.GitRequest(models.GitRequestKind.PUSH, (
+                        models.RefUpdate('refs/heads/' + base_branch, merge_oid,
+                                         'refs/heads/' + base_branch, remote_oid),
+                    )),
+                    limits=models.ScanLimits(45, 100),
+                )
+            finally:
+                service.close()
+        matching = [finding for result in report.results for finding in result.findings
+                    if finding.source.commit == merge_oid and finding.source.path == target.name]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(report.decision.verdict, models.DecisionVerdict.BLOCK)
+        self.assertNotIn(SYNTHETIC, report.to_json())
+
+    def test_shallow_git_history_gap_is_reported_as_incomplete(self):
+        from leakguard_core import models
+        (self.repo / 'historical.txt').write_text('client_secret = "' + SYNTHETIC + '"\n')
+        command(self.repo, 'add', 'historical.txt').check_returncode()
+        command(self.repo, 'commit', '-q', '--no-verify', '-m', 'test: shallow history secret').check_returncode()
+        bare = self.repo.parent / 'shallow-origin.git'
+        clone = self.repo.parent / 'shallow-clone'
+        made_bare = subprocess.run(['git', 'clone', '--bare', str(self.repo), str(bare)], capture_output=True)
+        self.assertEqual(made_bare.returncode, 0, made_bare.stderr.decode(errors='replace'))
+        shallow = subprocess.run(['git', 'clone', '--depth=1', bare.as_uri(), str(clone)], capture_output=True)
+        self.assertEqual(shallow.returncode, 0, shallow.stderr.decode(errors='replace'))
+        self.assertEqual(command(clone, 'rev-parse', '--is-shallow-repository').stdout.strip(), b'true')
+        head = command(clone, 'rev-parse', 'HEAD').stdout.decode().strip()
+        with tempfile.TemporaryDirectory(prefix='leakguard-shallow-state-') as state:
+            service = guard.ScanService({'gitleaks_executable': str(guard.EXE), 'gitleaks_config': str(guard.RULES)}, state_dir=pathlib.Path(state))
+            try:
+                report = service.scan_git(
+                    clone,
+                    request=models.GitRequest(models.GitRequestKind.PUSH, (
+                        models.RefUpdate('refs/heads/main', head, 'refs/heads/main', '0' * len(head)),
+                    )),
+                    limits=models.ScanLimits(20, 20),
+                )
+            finally:
+                service.close()
+        self.assertEqual(report.decision.verdict, models.DecisionVerdict.INCOMPLETE)
+        self.assertIn(models.ErrorCode.GIT_RANGE_INCOMPLETE,
+                      {issue.code for issue in report.issues} | {issue.code for result in report.results for issue in result.issues})
+
     def seed_ast_manifest(self):
         import ast
         import hashlib

@@ -20,7 +20,8 @@ from leakguard_core.extraction import ExtractionLimits, extract
 from leakguard_core.conformance import (
     ConformanceCode, ConformanceIssue, ConformanceKind, ConformanceReport,
     DetectorCase, ExpectedFinding, ExpectedPart, ExtractorCase, check_detector,
-    check_extractor, main as conformance_main,
+    check_extractor, main as conformance_main, _CliSetupError, _exit_status,
+    _read_json,
 )
 
 
@@ -273,7 +274,7 @@ class ExtensionConformanceModelTests(unittest.TestCase):
         )
         report = self.run_extractor_fixture(source, cases)
         self.assertEqual((report.passed_cases, report.failed_cases), (2, 1))
-        self.assertEqual(report.issues[-1].code, ConformanceCode.PLUGIN_INVALID)
+        self.assertEqual(report.issues[-1].code, ConformanceCode.COMPONENT_INVALID)
         self.assertNotIn('SyntheticOnly~ExtractorFailure', report.to_json())
 
     def test_cli_emits_one_redacted_json_and_uses_three_exit_states(self):
@@ -322,6 +323,56 @@ class ExtensionConformanceModelTests(unittest.TestCase):
             finally:
                 sys.path.remove(temporary)
 
+    def test_cli_help_is_successful_static_output_without_a_report_object(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = conformance_main(["--help"])
+        self.assertEqual(status, 0)
+        self.assertIn("usage:", output.getvalue())
+        self.assertNotIn('"component_id"', output.getvalue())
+
+    def test_case_file_reader_is_stream_bounded(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-conformance-size-") as temporary:
+            path = pathlib.Path(temporary) / "cases.json"
+            path.write_bytes(b'{"ok":true}')
+            self.assertEqual(_read_json(str(path), 11), {"ok": True})
+            with patch.object(pathlib.Path, "read_bytes", side_effect=AssertionError("unbounded read")):
+                with self.assertRaises(_CliSetupError):
+                    _read_json(str(path), 5)
+
+    def test_component_contract_failure_is_one_while_dependency_absence_is_two(self):
+        from leakguard_core import plugins
+        case = DetectorCase("component-case", "fixture", "fixture.txt", "text", "text")
+        reports = (
+            (plugins.PluginError("plugin-invalid"), 1, ConformanceCode.COMPONENT_INVALID),
+            (plugins.PluginError("dependency-unavailable"), 2, ConformanceCode.DEPENDENCY_UNAVAILABLE),
+        )
+        with tempfile.TemporaryDirectory(prefix="leakguard-conformance-exit-") as temporary:
+            root = pathlib.Path(temporary)
+            cases = root / "cases.json"
+            cases.write_text(json.dumps({"cases": [{
+                "case_id": "component-case", "text": "fixture",
+                "logical_path": "fixture.txt", "format_id": "text", "part_id": "text",
+            }]}), encoding="utf-8")
+            for error, expected_status, expected_code in reports:
+                with self.subTest(code=error.code), patch.object(plugins, "load", side_effect=error):
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        status = conformance_main([
+                            "--kind", "detector", "--module", "fixture_plugin",
+                            "--cases", str(cases),
+                        ])
+                    self.assertEqual(status, expected_status)
+                    decoded = json.loads(output.getvalue())
+                    self.assertEqual(decoded["issues"][0]["code"], expected_code.value)
+
+        missing_api = ConformanceReport(
+            "fixture-extractor", ConformanceKind.EXTRACTOR,
+            total_cases=1, passed_cases=0, failed_cases=1, skipped_cases=0,
+            issues=(ConformanceIssue("extractor-api", ConformanceCode.COMPONENT_INVALID),),
+        )
+        self.assertEqual(_exit_status(missing_api), 1)
+
     def test_conformance_report_serializer_is_allowlisted_and_redacted(self):
         report = ConformanceReport(
             component_id='fixture-detector', kind=ConformanceKind.DETECTOR,
@@ -347,7 +398,7 @@ class ExtensionConformanceModelTests(unittest.TestCase):
             ConformanceIssue('invalid check', ConformanceCode.CASE_INVALID)
 
     def test_v1_detector_example_passes_through_supervised_adapter(self):
-        source = pathlib.Path(__file__).parents[1] / 'examples'
+        source = pathlib.Path(__file__).parent / 'fixtures'
         sys.path.insert(0, str(source))
         try:
             report = check_detector('example_plugin', {}, (
@@ -369,7 +420,7 @@ class ExtensionConformanceModelTests(unittest.TestCase):
 
         crashed = '''API_VERSION=1\nclass Detector:\n def detect(self,text,path,part): raise RuntimeError("SyntheticOnly~PluginException5c8")\ndef create_plugin(options): return Detector()\n'''
         report = self.run_detector_fixture(crashed, (case,))
-        self.assertEqual(report.issues[0].code, ConformanceCode.PLUGIN_INVALID)
+        self.assertEqual(report.issues[0].code, ConformanceCode.COMPONENT_INVALID)
         self.assertNotIn('SyntheticOnly~PluginException5c8', report.to_json())
 
     def test_detector_timeout_is_a_fixed_issue_and_worker_finishes(self):

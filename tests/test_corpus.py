@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import random
@@ -11,12 +12,17 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import ast
 
 from leakguard_core import engine, models
 from leakguard_core.extraction import extract
+from leakguard_core import backends, finding_details, plugins
 
 
 SEED = int(os.environ.get("LEAKGUARD_CORPUS_SEED", "20261025"))
+CATALOG_PATH = Path(__file__).with_name("fixtures") / "corpus_catalog.json"
+_CATALOG_DOC = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+CASE_CATALOG = tuple(_CATALOG_DOC["cases"])
 
 
 def _pdf_with_text(text: str) -> bytes:
@@ -125,9 +131,9 @@ def _cfb_with_streams(streams: tuple[tuple[str, bytes], ...]) -> bytes:
     return bytes(header) + fat_sector + bytes(directory) + b"".join(payloads)
 
 
-def _msg_fixture() -> bytes:
-    subject = ("synthetic subject " + "s" * 4100).encode("cp1252")
-    body = ("first body line\nsecond body line\n" + "b" * 2050).encode("utf-16le") + b"\0\0"
+def _msg_fixture(*, subject_text="synthetic subject", body_text="first body line\nsecond body line") -> bytes:
+    subject = (subject_text + " " + "s" * 4100).encode("cp1252")
+    body = (body_text + "\n" + "b" * 2050).encode("utf-16le") + b"\0\0"
     return _cfb_with_streams((
         ("__substg1.0_0037001E", subject),
         ("__substg1.0_1000001F", body),
@@ -143,6 +149,22 @@ class DeterministicCorpusTests(unittest.TestCase):
                     for label in labels]
         self.assertEqual(manifest(SEED), manifest(SEED))
         self.assertNotEqual(manifest(SEED), manifest(SEED + 1))
+
+    def test_catalog_has_at_least_32_static_cases_and_marks_uncovered_formats(self):
+        self.assertGreaterEqual(len(CASE_CATALOG), 32)
+        self.assertEqual(len({item["case_id"] for item in CASE_CATALOG}), len(CASE_CATALOG))
+        uncovered = {item["case_id"] for item in CASE_CATALOG if item["state"] == "uncovered"}
+        self.assertEqual(uncovered, {"office-sheet-uncovered", "office-slides-uncovered"})
+
+    def test_actual_labeled_cases_emit_case_level_counts_without_fixture_text(self):
+        summary = run_labeled_corpus(SEED, engine.EXE)
+        self.assertEqual(summary["counts"]["labeled_cases"], len(CASE_CATALOG))
+        self.assertEqual(summary["counts"]["uncovered"], 2)
+        self.assertEqual(summary["counts"]["failed"], 0, summary)
+        self.assertEqual(set(summary["by_category"]), {item["category"] for item in CASE_CATALOG})
+        encoded = json.dumps(summary, sort_keys=True)
+        self.assertNotIn("SyntheticOnly~", encoded)
+        self.assertIn("true_positive", summary["detector_metrics"])
 
     def test_pdf_fixture_is_parsed_as_a_real_text_document(self):
         payload = _pdf_with_text("Synthetic PDF marker line")
@@ -218,6 +240,268 @@ class PluginCollisionTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].rule, "shared-finding")
         self.assertEqual(findings[0].severity, models.FindingSeverity.BLOCK)
+
+
+def _seeded_secret(seed: int) -> str:
+    return "SyntheticOnly~" + hashlib.sha256(str(seed).encode("ascii")).hexdigest()[:32]
+
+
+def _line_number(text: str, value: str) -> int:
+    return text[:text.index(value)].count("\n") + 1
+
+
+def _docx_parts(members) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, text in members:
+            archive.writestr(name, "<d><p>" + text + "</p></d>")
+    return buffer.getvalue()
+
+
+def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
+    """Execute each declared fixture and return only closed labels/counts/hashes."""
+    catalog = {item["case_id"]: item for item in CASE_CATALOG}
+    secret = _seeded_secret(seed)
+    results = {}
+
+    def put(case_id, actual, *, coverage="complete", digest_input=b""):
+        item = catalog[case_id]
+        if item["state"] == "uncovered":
+            results[case_id] = {"actual": "uncovered", "coverage": "uncovered",
+                                "status": "uncovered", "artifact_sha256": None}
+            return
+        expected = item["expected"]
+        passed = expected == actual
+        results[case_id] = {"actual": actual, "coverage": coverage,
+                            "status": "passed" if passed else "failed",
+                            "artifact_sha256": hashlib.sha256(digest_input).hexdigest()}
+
+    # Exact placeholders and intentionally weak values are separate labeled
+    # detector cases; line mapping lets one bounded backend request exercise them.
+    client_placeholders = (
+        "your-client-secret", "example-client-secret", "placeholder-value",
+        "test-secret-placeholder", "YOUR-CLIENT-SECRET", "Example-Client-Secret",
+        "PLACEHOLDER-VALUE", "TEST-SECRET-PLACEHOLDER",
+    )
+    password_placeholders = (
+        "${password}", "%password%", "<password>", "<redacted>",
+        "placeholder-value", "your-password",
+    )
+    weak_client = ("short", "1234567890123456789", "tiny-value")
+    weak_password = ("short", "1234567", "x")
+    detector_cases = []
+    for index, value in enumerate(client_placeholders, 1):
+        case_id = f"placeholder-client-secret-{index:02d}"
+        detector_cases.append((case_id, f'client_secret = "{value}"', "none"))
+    for index, value in enumerate(password_placeholders, 1):
+        case_id = f"placeholder-password-{index:02d}"
+        detector_cases.append((case_id, f'password = "{value}"', "none"))
+    for index, value in enumerate(weak_client, 1):
+        case_id = f"weak-client-secret-{index:02d}"
+        detector_cases.append((case_id, f'client_secret = "{value}"', "none"))
+    for index, value in enumerate(weak_password, 1):
+        case_id = f"weak-password-{index:02d}"
+        detector_cases.append((case_id, f'password = "{value}"', "none"))
+    detector_cases.extend((
+        ("literal-client-secret-positive-01", f'client_secret = "{secret}"', "finding"),
+        ("literal-password-positive-01", f'password = "{secret}"', "finding"),
+    ))
+    detector_text = "\n".join(row[1] for row in detector_cases)
+    findings = backends.detect(detector_text, binary=gitleaks,
+                               rules=Path(__file__).parents[1] / "src" / "leakguard_core" / "rules.toml",
+                               timeout=15)
+    found_lines = {item.start_line for item in findings}
+    for line, (case_id, value, _expected) in enumerate(detector_cases, 1):
+        put(case_id, "finding" if line in found_lines else "none", digest_input=value.encode("utf-8"))
+
+    # Version-bound provider and function-AST proofs; wrong hashes, absent
+    # source, changed source and duplicate JSON keys always remain heuristic.
+    source = b"def Token():\n    return 'synthetic'\n"
+    source_hash = hashlib.sha256(source).hexdigest()
+    provider_rows = (
+        ("provider-hash-valid", {"source_fingerprints": {"module.py": source_hash}}, source),
+        ("provider-hash-wrong", {"source_fingerprints": {"module.py": "0" * 64}}, source),
+        ("provider-hash-missing-source", {"source_fingerprints": {"module.py": source_hash}}, None),
+    )
+    for case_id, value, referenced in provider_rows:
+        text = json.dumps(value, indent=2)
+        marker = source_hash if case_id != "provider-hash-wrong" else "0" * 64
+        line = _line_number(text, marker)
+        finding = {"path": "origins.json", "line": line, "end_line": line,
+                   "rule": "generic-api-key", "severity": "block"}
+        reader = lambda _name, referenced=referenced: referenced
+        result = finding_details.describe(finding, text.encode("utf-8"), reader)
+        actual = "verified-file" if result.get("classification") == "verified-file-sha256" else "heuristic"
+        put(case_id, actual, digest_input=text.encode("utf-8"))
+
+    tree = ast.parse(source)
+    ast_hash = hashlib.sha256(ast.dump(tree.body[0]).encode()).hexdigest()
+    changed_source = b"def Token():\n    return 'changed'\n"
+    for case_id, digest, referenced in (
+        ("ast-hash-valid", ast_hash, source),
+        ("ast-hash-wrong", "0" * 64, source),
+        ("ast-source-changed", ast_hash, changed_source),
+    ):
+        text = json.dumps({"scope.py": {"function_ast_sha256": {"Token": digest}}}, indent=2)
+        line = _line_number(text, digest)
+        finding = {"path": "origins.json", "line": line, "end_line": line,
+                   "rule": "generic-api-key", "severity": "block"}
+        result = finding_details.describe(finding, text.encode("utf-8"),
+                                          lambda _name, referenced=referenced: referenced)
+        actual = "verified-ast" if result.get("classification") == "verified-function-ast-sha256" else "heuristic"
+        put(case_id, actual, digest_input=text.encode("utf-8"))
+
+    for case_id, text, marker in (
+        ("duplicate-json-key", '{"source_fingerprints":{"module.py":"' + source_hash + '","module.py":"' + source_hash + '"}}', source_hash),
+        ("duplicate-json-proof-key", '{"scope.py":{"function_ast_sha256":{"Token":"' + ast_hash + '","Token":"' + ast_hash + '"}}}', ast_hash),
+    ):
+        line = _line_number(text, marker)
+        finding = {"path": "origins.json", "line": line, "end_line": line,
+                   "rule": "generic-api-key", "severity": "block"}
+        result = finding_details.describe(finding, text.encode("utf-8"), lambda _name: source)
+        actual = "verified-ast" if result.get("classification") == "verified-function-ast-sha256" else "heuristic"
+        put(case_id, actual, digest_input=text.encode("utf-8"))
+
+    def extract_case(case_id, data, path):
+        if (case_id.startswith("pdf-") and importlib.util.find_spec("pypdf") is None
+                or (case_id.startswith("msg-") or case_id == "unsupported-compound")
+                and importlib.util.find_spec("olefile") is None):
+            results[case_id] = {"actual": "uncovered", "coverage": "uncovered",
+                                "status": "uncovered", "artifact_sha256": hashlib.sha256(data).hexdigest()}
+            return
+        result = extract(data, path, timeout=15)
+        digest = hashlib.sha256(data).hexdigest()
+        if result.disposition == "extracted":
+            detected = any(backends.detect(part.text, binary=gitleaks,
+                                           rules=Path(__file__).parents[1] / "src" / "leakguard_core" / "rules.toml",
+                                           timeout=15) for part in result.parts)
+            actual = "finding" if detected else "none"
+            coverage = "complete"
+        elif result.disposition in {"unsupported", "no-text", "encrypted"}:
+            actual, coverage = "omission", "omitted"
+        else:
+            actual, coverage = "incomplete", "incomplete"
+        put(case_id, actual, coverage=coverage, digest_input=data)
+
+    extract_case("utf16-text-positive", b"\xff\xfe" + f'client_secret = "{secret}"'.encode("utf-16le"), "input.txt")
+    extract_case("unusual-extension-positive", f'client_secret = "{secret}"'.encode(), "input.odd")
+    office_document = _docx_parts((("word/document.xml", f'client_secret = "{secret}"'),))
+    office_comment = _docx_parts((("word/document.xml", "ordinary document text"),
+                                  ("word/comments1.xml", f'client_secret = "{secret}"')))
+    malformed = io.BytesIO()
+    with zipfile.ZipFile(malformed, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+    extract_case("office-word-document", office_document, "fixture.docx")
+    extract_case("office-word-comments", office_comment, "fixture.docx")
+    extract_case("office-word-malformed", malformed.getvalue(), "fixture.docx")
+
+    try:
+        pdf_text = _pdf_with_text(f'client_secret = "{secret}"')
+        from pypdf import PdfWriter
+        empty_writer = PdfWriter(); empty_writer.add_blank_page(width=612, height=792)
+        pdf_empty_buffer = io.BytesIO(); empty_writer.write(pdf_empty_buffer)
+        extract_case("pdf-text-positive", pdf_text, "fixture.pdf")
+        extract_case("pdf-image-only", pdf_empty_buffer.getvalue(), "fixture.pdf")
+    except (ImportError, unittest.SkipTest):
+        for case_id in ("pdf-text-positive", "pdf-image-only"):
+            results[case_id] = {"actual": "uncovered", "coverage": "uncovered",
+                                "status": "uncovered", "artifact_sha256": None}
+    msg_subject = f'client_secret = "{secret}"'
+    msg_body = f'client_secret = "{secret}"'
+    try:
+        extract_case("msg-subject-positive", _msg_fixture(subject_text=msg_subject), "fixture.msg")
+        extract_case("msg-body-positive", _msg_fixture(body_text=msg_body), "fixture.msg")
+        extract_case("unsupported-compound", _cfb_with_streams(()), "unlabelled.bin")
+    except ImportError:
+        for case_id in ("msg-subject-positive", "msg-body-positive", "unsupported-compound"):
+            results[case_id] = {"actual": "uncovered", "coverage": "uncovered",
+                                "status": "uncovered", "artifact_sha256": None}
+
+    parts = (
+        ("part-boundary-first", (("word/document.xml", f'client_secret = "{secret}"'),), "finding"),
+        ("part-boundary-second", (("word/document.xml", "ordinary text"),
+                                   ("word/comments1.xml", f'client_secret = "{secret}"')), "finding"),
+        ("part-boundary-no-cross-match", (("word/document.xml", 'client_secret = "SyntheticOnly~'),
+                                          ("word/comments1.xml", 'CorpusSecretTail"')), "none"),
+    )
+    for case_id, members, _expected in parts:
+        extract_case(case_id, _docx_parts(members), "odd name/é\nfixture.document")
+
+    # Each declaration executes in a supervised worker. The pairwise collision
+    # then verifies that merge arbitration keeps the stronger block severity.
+    policy_id = None
+    runtime_id = None
+    with tempfile.TemporaryDirectory(prefix="leakguard-corpus-plugin-") as temporary:
+        root = Path(temporary)
+        definitions = {
+            "corpus_block.py": '''from leakguard_core.plugins import Finding, PluginManifest, RuleSpec\nAPI_VERSION=2\nMANIFEST=PluginManifest(id="corpus-block",implementation_version="1",kind="detector",rules=(RuleSpec("shared-marker","block"),),formats=("text",),part_kinds=("text",))\nclass Detector:\n def detect(self,text,context): return [Finding("shared-marker",1,"block")]\ndef create_plugin(options): return Detector()\n''',
+            "corpus_review.py": '''from leakguard_core.plugins import Finding, PluginManifest, RuleSpec\nAPI_VERSION=2\nMANIFEST=PluginManifest(id="corpus-review",implementation_version="1",kind="detector",rules=(RuleSpec("shared-marker","review"),),formats=("text",),part_kinds=("text",))\nclass Detector:\n def detect(self,text,context): return [Finding("shared-marker",1,"review")]\ndef create_plugin(options): return Detector()\n''',
+        }
+        for name, source_text in definitions.items():
+            (root / name).write_text(source_text, encoding="utf-8")
+        sys.path.insert(0, temporary)
+        try:
+            loaded = [plugins.load([{"module": module, "options": {}}])[0]
+                      for module in ("corpus_block", "corpus_review")]
+            for case_id, handle, expected in zip(
+                ("plugin-collision-block", "plugin-collision-review"), loaded, ("block", "review")
+            ):
+                observed = tuple(plugins.detect([handle], "fixture", "fixture.txt", "text", timeout=15))
+                actual = observed[0].severity if observed else "none"
+                put(case_id, actual, digest_input=definitions["corpus_block.py" if expected == "block" else "corpus_review.py"].encode())
+            service = engine.ScanService({
+                "gitleaks_executable": str(gitleaks),
+                "gitleaks_config": str(Path(__file__).parents[1] / "src" / "leakguard_core" / "rules.toml"),
+                "plugins": [{"module": "corpus_block", "options": {}},
+                            {"module": "corpus_review", "options": {}}],
+            })
+            try:
+                report = service.scan([models.BytesInput(b"fixture", "collision.txt")],
+                                      policy=models.ScanPolicy.inventory(),
+                                      limits=models.ScanLimits(30, 2), use_cache=False)
+                policy_id = report.policy_id
+                runtime_id = report.results[0].identity.runtime_id if report.results else None
+                merged = [finding for result in report.results for finding in result.findings]
+                if len(merged) != 1 or merged[0].severity is not models.FindingSeverity.BLOCK:
+                    results["plugin-collision-block"]["status"] = "failed"
+                    results["plugin-collision-review"]["status"] = "failed"
+            finally:
+                service.close()
+        finally:
+            sys.path.remove(temporary)
+
+    for item in CASE_CATALOG:
+        if item["state"] == "uncovered":
+            put(item["case_id"], "uncovered", coverage="uncovered")
+    for item in CASE_CATALOG:
+        if item["case_id"] not in results:
+            put(item["case_id"], "uncovered", coverage="uncovered")
+
+    counts = {"labeled_cases": len(CASE_CATALOG), "covered": 0, "uncovered": 0, "failed": 0,
+              "true_positive": 0, "false_positive": 0, "false_negative": 0, "true_negative": 0}
+    by_category = {}
+    for item in CASE_CATALOG:
+        case_id, category = item["case_id"], item["category"]
+        result = results[case_id]
+        bucket = by_category.setdefault(category, {"cases": 0, "covered": 0, "uncovered": 0, "failed": 0})
+        bucket["cases"] += 1
+        if result["status"] == "uncovered":
+            counts["uncovered"] += 1; bucket["uncovered"] += 1
+            continue
+        counts["covered"] += 1; bucket["covered"] += 1
+        if result["status"] == "failed":
+            counts["failed"] += 1; bucket["failed"] += 1
+        if item["kind"] in {"detector", "extractor"} and item["expected"] in {"finding", "none"}:
+            expected_positive = item["expected"] == "finding"
+            actual_positive = result["actual"] == "finding"
+            key = ("true_positive" if expected_positive else "false_positive") if actual_positive else ("false_negative" if expected_positive else "true_negative")
+            counts[key] += 1
+    return {"seed": seed, "policy_id": policy_id, "runtime_id": runtime_id,
+            "counts": counts, "detector_metrics": {
+                key: counts[key] for key in ("true_positive", "false_positive", "false_negative", "true_negative")
+            }, "by_category": by_category,
+            "cases": [{"case_id": item["case_id"], "category": item["category"],
+                       **results[item["case_id"]]} for item in CASE_CATALOG]}
 
 
 if __name__ == "__main__":

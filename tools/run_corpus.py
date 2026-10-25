@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import re
 import subprocess
 import sys
 import time
@@ -18,11 +17,8 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CASE_IDS = (
-    "multiline-parts", "utf16-input", "unusual-extension", "duplicate-json",
-    "verified-ast-proof", "wrong-source-proof", "plugin-rule-collision",
-    "synthetic-pdf", "synthetic-msg", "unsupported-compound",
-)
+CATALOG = ROOT / "tests" / "fixtures" / "corpus_catalog.json"
+sys.path.insert(0, str(ROOT / "src"))
 
 
 def _sha(data: bytes) -> str:
@@ -31,6 +27,21 @@ def _sha(data: bytes) -> str:
 
 def _json(value) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+
+
+def _exclusive_write(path: Path, data: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _source_identity() -> tuple[str, str]:
@@ -67,6 +78,14 @@ def _dependency_versions() -> dict[str, str]:
     return dict(rows)
 
 
+def _file_sha(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1_048_576):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _validate(args):
     config_input = Path(args.config)
     if config_input.is_symlink():
@@ -93,6 +112,11 @@ def _validate(args):
     if output.is_symlink() or manifest_path.is_symlink() or output.exists() or manifest_path.exists():
         raise ValueError
     output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    catalog_data = json.loads(CATALOG.read_text(encoding="utf-8"))
+    if (type(catalog_data) is not dict or set(catalog_data) != {"schema_version", "seed", "cases"}
+            or catalog_data["schema_version"] != 1 or type(catalog_data["cases"]) is not list
+            or len(catalog_data["cases"]) < 32):
+        raise ValueError
     return config, backend, state, output, manifest_path
 
 
@@ -108,14 +132,20 @@ def main(argv=None) -> int:
     started = dt.datetime.now(dt.timezone.utc)
     monotonic_start = time.monotonic()
     output = Path(args.output).absolute()
+    summary = None
+    catalog_data = None
+    manifest_bytes = b""
+    revision, patch_digest = "unknown", "unknown"
+    backend = None
+    manifest_path = None
+    labels = []
     try:
         if args.seed < 0 or not 1 <= args.timeout_seconds <= 900:
             raise ValueError
         config, backend, state, output, manifest_path = _validate(args)
-        labels = [{"case_id": value} for value in CASE_IDS]
-        manifest = {"schema_version": 1, "seed": args.seed, "cases": labels}
-        manifest_bytes = _json(manifest)
-        manifest_path.write_bytes(manifest_bytes)
+        catalog_data = json.loads(CATALOG.read_text(encoding="utf-8"))
+        labels = [{"case_id": row["case_id"], "category": row["category"],
+                   "declared_state": row["state"]} for row in catalog_data["cases"]]
         revision, patch_digest = _source_identity()
         environment = dict(os.environ)
         environment.update({
@@ -126,38 +156,46 @@ def main(argv=None) -> int:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": str(state.parent / "gitconfig"),
             "GIT_TERMINAL_PROMPT": "0",
-            "PYTHONPATH": str(ROOT / "src"),
+            "PYTHONPATH": os.pathsep.join((str(ROOT / "src"), str(ROOT / "tests"))),
         })
-        home = state.parent / "home"
-        home.mkdir(mode=0o700, parents=True, exist_ok=True)
-        environment["HOME"] = str(home)
         command = [sys.executable, str(ROOT / "tools" / "_corpus_runner.py")]
-        sys.path.insert(0, str(ROOT / "src"))
         from leakguard_core._supervision import WorkerError, run_worker
         try:
             completed = run_worker(
                 command, b"", cwd=ROOT, env=environment, timeout=args.timeout_seconds,
-                max_output_bytes=4 * 1024 * 1024, max_input_bytes=1024, memory_bytes=None,
+                max_output_bytes=8 * 1024 * 1024, max_input_bytes=1024, memory_bytes=None,
             )
-            match = re.search(rb"Ran ([0-9]+) tests? in", completed.stdout)
-            test_count = int(match.group(1)) if match else 0
-            outcome = "passed" if completed.returncode == 0 and test_count > 0 else "failed"
+            summary = json.loads(completed.stdout)
+            if (type(summary) is not dict or set(summary) != {"seed", "policy_id", "runtime_id", "counts", "detector_metrics", "by_category", "cases"}
+                    or summary["seed"] != args.seed
+                    or summary["counts"].get("labeled_cases") != len(catalog_data["cases"])
+                    or len(summary["cases"]) != len(catalog_data["cases"])):
+                raise ValueError
+            outcome = "passed" if completed.returncode == 0 and summary["counts"].get("failed") == 0 else "failed"
             exit_code = 0 if outcome == "passed" else 1
-            # Runner output is deliberately discarded; failures may include
-            # synthetic fixture reprs, while this receipt contains no text.
             del completed
         except WorkerError as error:
             outcome = "timeout" if error.code == "worker-timeout" else "failed"
             exit_code = 1
-            test_count = 0
+        except Exception:
+            outcome = "failed"
+            exit_code = 1
+            summary = None
+        case_artifacts = []
+        if summary:
+            for item in summary.get("cases", ()):
+                case_artifacts.append({key: item.get(key) for key in
+                                       ("case_id", "category", "status", "coverage", "artifact_sha256")})
+        manifest_bytes = _json({"schema_version": 1, "seed": args.seed,
+                                "cases": labels, "artifacts": case_artifacts})
+        _exclusive_write(manifest_path, manifest_bytes)
     except Exception:
         outcome = "setup-failed"
         exit_code = 2
-        test_count = 0
         backend = None
         revision, patch_digest = "unknown", "unknown"
+        summary = None
         manifest_bytes = b""
-        manifest_path = None
 
     finished = dt.datetime.now(dt.timezone.utc)
     receipt = {
@@ -170,28 +208,28 @@ def main(argv=None) -> int:
         "python": sys.version.split()[0],
         "dependency_lock_digest": _sha(_json({"python": sys.version.split()[0], "packages": _dependency_versions()})),
         "installed_dependencies": _dependency_versions(),
-        "gitleaks_identity": _sha(backend.read_bytes()) if backend is not None else None,
-        "policy_id": None,
-        "runtime_id": None,
-        "command": ["python", "tools/_corpus_runner.py"],
+        "gitleaks_identity": _file_sha(backend) if backend is not None else None,
+        "policy_id": summary.get("policy_id") if summary else None,
+        "runtime_id": summary.get("runtime_id") if summary else None,
+        "command": ["python", "tools/_corpus_runner.py", "--seed", str(args.seed)],
         "seed": args.seed,
         "started_utc": started.isoformat(),
         "finished_utc": finished.isoformat(),
         "elapsed_seconds": round(time.monotonic() - monotonic_start, 3),
         "cache_status": "uncached",
         "outcome": outcome,
-        "counts": {"cases": len(CASE_IDS), "tests_run": test_count},
+        "counts": summary.get("counts", {"labeled_cases": 0, "failed": 0, "uncovered": 0}) if summary else {"labeled_cases": 0, "failed": 0, "uncovered": 0},
+        "detector_metrics": summary.get("detector_metrics") if summary else None,
+        "by_category": summary.get("by_category") if summary else None,
         "peak_rss_bytes": None,
         "subprocess_count": None,
         "artifact_sha256": _sha(manifest_bytes),
     }
     try:
         output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        output.write_text(json.dumps(receipt, sort_keys=True, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+        _exclusive_write(output, (json.dumps(receipt, sort_keys=True, ensure_ascii=True, indent=2) + "\n").encode("utf-8"))
     except Exception:
         return 2
-    if manifest_path is not None and not manifest_path.exists():
-        manifest_path.write_bytes(manifest_bytes)
     return exit_code
 
 

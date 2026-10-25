@@ -296,12 +296,18 @@ def _plugin_issue(code: str, check_id: str, case_id: str | None,
         fixed = ConformanceCode.PLUGIN_CRASHED
     elif code == "resource-bound-unavailable":
         fixed = ConformanceCode.DEPENDENCY_UNAVAILABLE
+    elif code == "dependency-unavailable":
+        fixed = ConformanceCode.DEPENDENCY_UNAVAILABLE
     elif code in {"detector-output-invalid", "detector-output-limit"}:
         fixed = ConformanceCode.DETECTOR_OUTPUT_INVALID
     elif code in {"extract-output-limit", "extract-part-limit", "extractor-output-invalid"}:
         fixed = ConformanceCode.EXTRACTOR_OUTPUT_INVALID
     elif code == "plugin-invalid":
-        fixed = ConformanceCode.PLUGIN_INVALID
+        # A loaded component that violates its manifest/API is a contract
+        # failure (exit 1), including during its initial inspection.
+        fixed = ConformanceCode.COMPONENT_INVALID
+    elif code == "component-invalid":
+        fixed = ConformanceCode.COMPONENT_INVALID
     elif code == "cancelled":
         fixed = ConformanceCode.SETUP_FAILED
     else:
@@ -344,7 +350,7 @@ def _check_extractor_loaded(plugins, handle, component_id: str,
     if not callable(runner):
         return ConformanceReport(
             component_id, ConformanceKind.EXTRACTOR, len(cases), 0, len(cases), 0,
-            (ConformanceIssue("extractor-api", ConformanceCode.SETUP_FAILED),),
+            (ConformanceIssue("extractor-api", ConformanceCode.COMPONENT_INVALID),),
         )
     from .extraction import ExtractionLimits
     issues = []
@@ -394,7 +400,8 @@ def _object(pairs):
 
 def _read_json(path: str, maximum: int):
     try:
-        raw = Path(path).read_bytes()
+        with Path(path).open("rb") as stream:
+            raw = stream.read(maximum + 1)
         if len(raw) > maximum:
             raise ValueError
         return json.loads(raw, object_pairs_hook=_object, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
@@ -472,9 +479,9 @@ def _failure_report(kind: ConformanceKind, code: ConformanceCode) -> Conformance
 
 
 def _exit_status(report: ConformanceReport) -> int:
-    if any(issue.check_id in {"setup", "component-load", "component-kind", "extractor-api"}
-           or issue.code in {ConformanceCode.SETUP_FAILED, ConformanceCode.COMPONENT_INVALID,
-                          ConformanceCode.DEPENDENCY_UNAVAILABLE, ConformanceCode.CASE_INVALID}
+    if any(issue.code in {ConformanceCode.SETUP_FAILED,
+                          ConformanceCode.DEPENDENCY_UNAVAILABLE,
+                          ConformanceCode.CASE_INVALID}
            for issue in report.issues):
         return 2
     return 0 if report.passed else 1
@@ -505,6 +512,12 @@ def main(argv=None) -> int:
         cases = _detector_cases(case_data) if kind is ConformanceKind.DETECTOR else _extractor_cases(case_data)
         report = (check_detector(args.module, options, cases) if kind is ConformanceKind.DETECTOR
                   else check_extractor(args.module, options, cases))
+    except SystemExit as error:
+        # argparse's built-in help is static, successful output rather than a
+        # machine-readable run receipt. Keep its standard exit-0 behavior.
+        if error.code == 0:
+            return 0
+        report = _failure_report(kind, ConformanceCode.SETUP_FAILED)
     except _CliSetupError:
         report = _failure_report(kind, ConformanceCode.SETUP_FAILED)
     except (ValueError, TypeError, KeyError, OverflowError):
