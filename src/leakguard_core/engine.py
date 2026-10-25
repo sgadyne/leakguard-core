@@ -105,7 +105,9 @@ def engine(command, text=None, cwd=None):
         process = subprocess.run(args, input=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, timeout=CONFIG['scan_timeout_seconds'] + 10)
         if process.returncode not in (0, 1):
             raise RuntimeError(f'Gitleaks failed with exit code {process.returncode}')
-        return json.loads(report.read_text(encoding='utf-8')) if report.exists() else []
+        if not report.is_file():
+            raise RuntimeError('Detection engine did not produce a report')
+        return json.loads(report.read_text(encoding='utf-8'))
 
 
 def scan_blob(data, path, conn=None):
@@ -489,7 +491,14 @@ def git_hook(kind, args):
                                 findings.extend(git_findings([{'File': str(repo / path), 'RuleID': item['rule'], 'StartLine': item['line'], 'Commit': revision}], repo))
                             else:
                                 findings.append(finding_details.describe(item))
-        report = save_report('git-' + kind, [{'status': 'scanned', 'findings': findings}, *issues], conn, {'repo': str(repo)})
+        unique = {}
+        rank = {'block': 3, 'review': 2, 'info': 1}
+        for item in findings:
+            key = (item['path'], item['part'], item['line'], item['rule'], item.get('commit'))
+            previous = unique.get(key)
+            if previous is None or rank.get(item['severity'], 3) > rank.get(previous['severity'], 3):
+                unique[key] = item
+        report = save_report('git-' + kind, [{'status': 'scanned', 'findings': list(unique.values())}, *issues], conn, {'repo': str(repo)})
         blocked = [f for f in report['findings'] if f['severity'] == 'block']
         print(presentation.render(report, report['report_path']), file=sys.stderr)
         if blocked or issues:

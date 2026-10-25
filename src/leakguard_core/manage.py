@@ -31,6 +31,8 @@ def report(profile, conn):
         if 'fixture' in data.get('label', '') or 'leakguard-test-' in data.get('repo', ''):
             continue
         for finding in data.get('findings', []):
+            if finding.get('severity') == 'info' or finding.get('detector_severity') == 'info':
+                continue
             name = policies.canonical(finding['path'], guard.CONFIG)
             if 'leakguard-test-' in name or 'leakguard-watch-fixture' in name or name.endswith('synthetic.py'):
                 continue

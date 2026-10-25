@@ -114,6 +114,13 @@ class ExtensionTests(unittest.TestCase):
             self.assertIn(b'fixture-marker', result.stderr)
             self.assertNotIn(b'SYNTHETIC_REVIEW_MARKER', result.stderr + result.stdout)
 
+    def test_missing_engine_report_fails_closed(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(prefix='leakguard-test-') as folder:
+            with patch.object(guard, 'STATE', pathlib.Path(folder)), patch('leakguard_core.engine.subprocess.run', return_value=SimpleNamespace(returncode=0)):
+                with self.assertRaises(RuntimeError):
+                    guard.engine(['stdin'], b'input')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

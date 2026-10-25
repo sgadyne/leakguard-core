@@ -1,5 +1,6 @@
 """Offline integration checks using synthetic secrets and disposable Git repos."""
 import io
+import os
 import json
 import pathlib
 import subprocess
@@ -154,6 +155,15 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'LeakGuard blocked', result.stderr)
         self.assertIn(b'function_ast_sha256.token', result.stderr)
+
+    def test_plugin_mode_preserves_metadata_proof_and_real_key_blocking(self):
+        module = self.repo / 'noop_fixture.py'
+        module.write_text('API_VERSION=1\nclass Detector:\n def detect(self,text,path,part): return []\ndef create_plugin(options): return Detector()\n')
+        config = self.repo / 'plugin-config.json'
+        config.write_text(json.dumps({'plugins': [{'module': 'noop_fixture'}]}))
+        paths = str(self.repo) + os.pathsep + os.environ.get('PYTHONPATH', '')
+        with patch.dict(os.environ, {'LEAKGUARD_CONFIG': str(config), 'PYTHONPATH': paths}):
+            self.test_staged_ast_metadata_uses_index_source_and_keeps_hex_keys_blocking()
 
     def test_existing_pre_push_hook_receives_original_stdin(self):
         hooks = self.repo / '.git' / 'hooks'

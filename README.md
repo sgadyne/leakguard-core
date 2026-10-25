@@ -40,6 +40,8 @@ Gitleaks provider-specific rules are extended with explicit client-secret/passwo
 
 There is no blanket pre-scan hash masking and no filename-wide hash exception. AST fingerprints are informational only when the digest matches the sibling function in the same commit/index version. `source_fingerprints` file hashes require matching file bytes from that version. Wrong/missing/ambiguous source, duplicate JSON keys and mixed values on one line do not grant exemptions. Real credentials alongside hashes still block.
 
+Explicit password fields do not need high entropy to be sensitive: weak literal passwords are detected too. Placeholder exceptions are limited to exact documented markers/environment references rather than broad `example-*` or `your-*` prefixes. Provider rules are independently evaluated. Duplicate Git/plugin observations retain the most restrictive severity.
+
 ## Plugins
 
 See [the plugin API](PLUGIN_API.md). Plugins are optional trusted Python code explicitly named by module in external configuration. Nothing is downloaded/discovered automatically. Detector results have a narrow schema without matched values. Plugins cannot waive unrelated findings. An optional extractor interface supports additional formats. Host-specific rules, scopes, material references and examples belong in separately distributed extension packages.

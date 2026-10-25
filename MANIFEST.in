@@ -1,4 +1,4 @@
-include LICENSE README.md PLUGIN_API.md CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md RELEASING.md
+include LICENSE README.md PLUGIN_API.md CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md RELEASING.md VALIDATION.md
 recursive-include src *.py *.toml
 recursive-include tests *.py
 recursive-include examples *.py *.json
