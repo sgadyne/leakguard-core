@@ -167,12 +167,15 @@ fixed redacted error.
 Managed hook launchers use isolated Python startup and pin the trusted core
 installation before importing the hook entry point. Built-in parser and
 configured extension workers likewise pin core imports, so the input
-repository's working directory or a later `PYTHONPATH` cannot replace LeakGuard
-inside those workers. At hook installation, LeakGuard captures a bounded set of
-absolute Python search paths for explicitly configured extensions, excluding
-the target repository and installer working directory. Reinstall managed hooks
-after upgrading LeakGuard to refresh an existing launcher; the installer keeps
-the normal hook backup and chaining behavior.
+repository's working directory cannot replace LeakGuard inside those workers.
+At hook installation, LeakGuard captures a bounded set of absolute Python
+search paths for explicitly configured extensions, excluding the target
+repository and installer working directory. Bounded absolute operator
+`PYTHONPATH` roots may also supply a configured plugin; the pinned plugin worker
+searches those paths after its core and interpreter paths. No unconfigured
+plugins are discovered. Reinstall managed hooks after upgrading LeakGuard to
+refresh an existing launcher; the installer keeps the normal hook backup and
+chaining behavior.
 
 This worker and launcher isolation does not sandbox Python API callers or
 ordinary `leakguard` and `leakguard-manage` console entry points; those use the

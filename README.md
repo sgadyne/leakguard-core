@@ -60,13 +60,17 @@ documented in [compatibility notes](COMPATIBILITY.md).
 
 Managed hook launchers pin the installed core and use isolated Python startup so
 the repository working directory and later `PYTHONPATH` values cannot replace
-the scanner. Hook installation records bounded absolute Python search paths for
-explicitly configured extensions, excluding the target repository and installer
-working directory. Reinstall managed hooks after upgrading to refresh existing
-launchers. Built-in parser and extension workers also pin their core imports;
-ordinary console commands and Python API callers still use their selected
-interpreter environment. Plugins remain explicitly configured trusted code with
-the scanner account's permissions; worker isolation is not an OS sandbox.
+the hook or scanner core. Hook installation records bounded absolute Python
+search paths for explicitly configured extensions, excluding the target
+repository and installer working directory. Bounded absolute operator
+`PYTHONPATH` roots may also supply a plugin that the configuration names; the
+plugin worker searches for it after pinned core and interpreter paths. This does
+not discover unconfigured plugins. Reinstall managed hooks after upgrading to
+refresh existing launchers. Built-in parser and extension workers also pin
+their core imports; ordinary console commands and Python API callers still use
+their selected interpreter environment. Plugins remain explicitly configured
+trusted code with the scanner account's permissions; worker isolation is not
+an OS sandbox.
 
 `leakguard-manage explain` prints the current repository's latest redacted typed report; `--format json` supplies its schema object to CLI consumers. To read an archived schema-0 report or a saved schema-1 report explicitly, use `explain --report PATH`. Explicit report input is capped at 64 MB and rejects malformed or unsupported schemas with a fixed redacted error. Findings retain commit and line so historical Git content is not confused with the working tree.
 
