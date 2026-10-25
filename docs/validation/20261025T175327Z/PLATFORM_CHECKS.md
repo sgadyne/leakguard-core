@@ -10,9 +10,11 @@ empty private configuration, disposable state/repositories, and the pinned
 Gitleaks installer. They do not scan user data, modify global Git or Python
 configuration, install hooks globally, or publish artifacts.
 
-The source identity is frozen at commit
-`ce1ea500fd832ea7c15a0a3558918fbf674f0eb4`, tree
-`bde92968ad8cdb29fc620b1bae22a4499dc5a953`.
+The source identity for native follow-up is the final implementation-validation
+commit `9111c9caa7426148d2412244be00542ac2989bde`, tree
+`0474c80494fddb24a833adbd1481d55612d415df`. Its production package subtree
+`9d3597b34f0471645869b77c396d3136dfd5dc1a` is unchanged from the earlier
+`ce1ea500` four-cell Linux matrix. The later changes add corpus/tool validation.
 The Linux Gitleaks 8.30.1 executable used for reference acceptance has SHA-256
 `88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509`. This is
 not an expected macOS/Windows binary hash: the native installer verifies the
@@ -34,7 +36,8 @@ macOS or Windows behavior.
 
 ## Frozen Linux reference artifacts and receipts
 
-These hashes identify reference builds from the frozen source commit; they are
+These hashes identify reference builds from the earlier production freeze
+`ce1ea500fd832ea7c15a0a3558918fbf674f0eb4`; they are
 Linux results, not native macOS/Windows evidence. The Python 3.13 wheel rows ran
 their installed tests on Python 3.13.15 (the receipt's `python` field is the
 Python 3.11.2 builder; see `target_python_version`). `run_acceptance.py
@@ -50,7 +53,7 @@ origin and private work directory.
 | Linux/Python 3.13 wheel/base | `evidence-wheel-py313-base-ce1ea50.json` | `443b87ea390af7715c55b3e047ba701632e1fa9430d8353fa82e497e34bcedc0` | `aa88cbcd89130a17f994d1e2ef4968cbb84f6ed124848deae3c8364de55f268e` | `8fa89436854bbe631b39a36047490a26f00944ff3241d0fb8c007e21075e9fe9` | `292d2724e4d24dc4d3a8a8c8b863a7efcdbf936df195fadab92394d544f6bc6f` | 249 total; 243 passed, 6 skipped (2 Job Object + 4 optional-document tests). |
 | Linux/Python 3.13 wheel/docs | `evidence-wheel-py313-docs-ce1ea50.json` | `3bb489fa0e59ebd9cf259fd1111a0c02fedeec39f6a4520bf7acc3225768c67e` | `5310a38c64a06bd722ba7f77dd232f3b768d2cee794a5887886e56057f225a51` | `baee0db37bf0ea0092b6a6b8196f481c355f2474a534e230d279f9158731a627` | `e1a6773a6f0d527d742a0f17405016d681abdca23a203d90c8b06ba580fda017` | 249 total; 247 passed, 2 skipped (Windows Job Object tests). |
 
-Linux source references from the same commit are `evidence-source-py311-base-ce1ea50.json`
+Linux source references from that earlier commit are `evidence-source-py311-base-ce1ea50.json`
 (Python 3.11.2, 249 total, 243 passed, 6 skipped) and
 `lead-source-ce1ea50-docs-summary.json` (Python 3.11.2 with `pypdf` 6.21.2 and
 `olefile` 0.47, 249 total, 247 passed, 2 Windows Job Object skips). The base
@@ -66,6 +69,12 @@ their work directories. Do not reduce results to “all passed”: preserve
 core and example wheels under its `work_directory` and record those hashes next
 to the receipt.
 
+The final `9111c9c` Linux Python 3.11 document source suite and Python 3.13
+document wheel suite each execute 251 tests: 249 passed, two Windows-only skips.
+See [final installed acceptance](evidence-wheel-py313-docs-final-9111c9c.json)
+for exact artifact hashes and [final source acceptance](lead-source-9111c9c-py311-docs-summary.json).
+These additional Linux receipts do not establish native platform behavior.
+
 ## macOS commands
 
 Run this block from a checkout containing the frozen commit, once with
@@ -78,8 +87,8 @@ state, Git config, installed environment, and output under the receipt tree.
 set -euo pipefail
 PY=python3.11                 # Repeat with python3.13
 TAG=macos-py311               # Use macos-py313 for Python 3.13
-EXPECTED=ce1ea500fd832ea7c15a0a3558918fbf674f0eb4
-EXPECTED_TREE=bde92968ad8cdb29fc620b1bae22a4499dc5a953
+EXPECTED=9111c9caa7426148d2412244be00542ac2989bde
+EXPECTED_TREE=0474c80494fddb24a833adbd1481d55612d415df
 test -z "$(git status --porcelain)"
 CHECKOUT="$PWD"
 RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/leakguard-${TAG}-XXXXXX")"
@@ -165,8 +174,8 @@ function Invoke-Acceptance {
 }
 $PyVersion = '3.11'             # Repeat with 3.13
 $Tag = 'windows-py311'          # Use windows-py313 for Python 3.13
-$Expected = 'ce1ea500fd832ea7c15a0a3558918fbf674f0eb4'
-$ExpectedTree = 'bde92968ad8cdb29fc620b1bae22a4499dc5a953'
+$Expected = '9111c9caa7426148d2412244be00542ac2989bde'
+$ExpectedTree = '0474c80494fddb24a833adbd1481d55612d415df'
 if ((git status --porcelain)) { throw 'source-tree-not-clean' }
 $Checkout = (Get-Location).Path
 $RunRoot = Join-Path ([IO.Path]::GetTempPath()) ("leakguard-$Tag-" + [guid]::NewGuid().ToString('N'))
@@ -263,7 +272,7 @@ nested directories.
   failures/errors. Preserve each command's exact process return code alongside
   its receipt; a passing wheel/base row cannot substitute for source/docs or
   wheel/docs.
-- `/home/dev/projects/leakguard-core-20261025T175327Z/heavy.py` is a Linux-local
+- `<private-run-root>/heavy.py` is a Linux-local
   admission wrapper and is not the native macOS/Windows runner. Before starting
   a full native `run_acceptance.py` job, coordinate with the lead to reserve one
   of the two shared heavy slots. Never run more than two CPU-heavy matrix jobs

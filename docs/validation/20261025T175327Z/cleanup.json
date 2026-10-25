@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "updated_utc": "2026-10-25T21:25:34.771092+00:00",
+  "worker_boxes_removed": [
+    "leakguard-20261025T175327Z-semantics",
+    "leakguard-20261025T175327Z-surface",
+    "leakguard-20261025T175327Z-evidence"
+  ],
+  "all_worker_roots_absent": true,
+  "dry_runs_inspected": true,
+  "useful_branches_bundled_before_removal": true,
+  "validated_artifacts_copied_before_removal": true,
+  "transient_cleanup": "complete",
+  "retained_lead": "Active Codex checkout retained for review and to avoid removing its working directory; bounded supervisor stops after completion/lead exit or deadline.",
+  "original_snapshot_preserved": true,
+  "private_audit_receipt": "cleanup-owned-boxes.json",
+  "transient_bytes_removed": 598666700,
+  "transient_plan_sha256": "f80464067cf251199acfd5d9d76e271c5145a33740475f1b437263ff3248fdae",
+  "live_owned_job_wrappers_or_ilmr_children": 0,
+  "retained_artifact_archives": 28,
+  "lead_temporary_files_cleaned": true,
+  "lead_down_clean_plan": "sha256:4f1454944d89",
+  "lead_checkout_removed": false,
+  "retained_resources": {
+    "active-lead-checkout": "Current Codex working directory, integrated branch and review files; deliberately retained.",
+    "final.bundle-and-checkpoints": "Integrated delivery plus complete worker branch histories.",
+    "artifacts": "28 exact validated wheel/sdist/example distributions; private test builds, not published.",
+    "receipts-and-validation-docs": "Redacted summaries, full private job/measurement records and actual source identities.",
+    "diagnostic-harnesses": "11 small finite synthetic measurement scripts retained privately; old worker paths may need substitution to rerun.",
+    "source-snapshot-and-source-bundle": "Original remote snapshot, manifest and baseline source retained unchanged.",
+    "supervisor-session-audit": "Bounded lead/supervisor scripts, state and logs; supervisor stops after completion/lead exit or fixed deadline.",
+    "coordination-manifests-and-lock-records": "Run scope, exact IDs/paths/grants, handoffs and inactive admission lock files retained as audit metadata."
+  },
+  "heavy_invocation_receipts_checked": 327,
+  "running_heavy_invocation_records": 0
+}

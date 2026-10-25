@@ -1,0 +1,10 @@
+{
+  "verified_utc": "2026-10-25T20:57:09.666963+00:00",
+  "source_commit": "afe67930b1001f1e087edd4da57241fe86dc6ddc",
+  "expected_commit": "afe67930b1001f1e087edd4da57241fe86dc6ddc",
+  "manifest_file_count": 42,
+  "mismatched_files": [],
+  "tracked_and_untracked_clean": true,
+  "remote_snapshot_preserved": true,
+  "scope": "read-only remote source snapshot verification; implementation uses prepared lane clones"
+}

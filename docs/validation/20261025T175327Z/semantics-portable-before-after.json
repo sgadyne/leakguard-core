@@ -1,0 +1,389 @@
+{
+  "baseline_exit_zero_means": "diagnostic executed, not correctness pass",
+  "comparison_limit": "baseline warm positive cache drops findings; timing is not equivalent correct work or a speedup claim",
+  "config": "fresh empty configuration per probe",
+  "git_version": "git version 2.39.5",
+  "gitleaks_sha256": "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509",
+  "gitleaks_version": "8.30.1",
+  "medians_seconds": {
+    "baseline": {
+      "cold": 15.357,
+      "warm": 0.0027
+    },
+    "integrated": {
+      "cold": 16.717,
+      "warm": 0.2787
+    }
+  },
+  "ordering": "paired baseline then integrated for each repetition",
+  "os_page_cache_flushed": false,
+  "platform": "Linux",
+  "python": "3.11.2",
+  "runs_per_source": 3,
+  "temporary_environment": "ILMR-provided private ephemeral TMPDIR for each run",
+  "test_cache_used": false,
+  "cleanup": {
+    "created_source_paths_exist": {
+      "portable-benchmark-baseline": false,
+      "portable-benchmark-integrated": false
+    },
+    "initial_empty_temp_path_removed": true,
+    "no_running_probe_processes": true,
+    "raw_log_mode": "0600",
+    "worktrees_removed": true
+  },
+  "results": [
+    {
+      "diagnostics": {
+        "50_text_files": [
+          {
+            "counts": {
+              "scanned": 50
+            },
+            "seconds": 15.2149
+          },
+          {
+            "counts": {
+              "unchanged": 50
+            },
+            "seconds": 0.0027
+          }
+        ],
+        "cache": {
+          "first_findings": 1,
+          "first_status": "scanned",
+          "second_findings": 0,
+          "second_status": "unchanged"
+        },
+        "git_no_text_document": {
+          "blocks_incomplete_scan": false,
+          "extraction_status": "skipped-binary-or-no-text",
+          "hook_exit_code": 0
+        },
+        "installed_hook": {
+          "blocks_staged_synthetic": false,
+          "commit_exit_code": 0,
+          "executable": false,
+          "output_redacted": true
+        }
+      },
+      "exit_code": 0,
+      "heavy_receipt": "job-b398aed133334f73a050cfdd67020aaf.json",
+      "sample": 1,
+      "source": "baseline",
+      "source_after": {
+        "commit": "afe67930b1001f1e087edd4da57241fe86dc6ddc",
+        "tracked_or_untracked_changes": false,
+        "tree": "a49b938937af2c954050773d7d8955f51b040b28"
+      },
+      "source_before": {
+        "commit": "afe67930b1001f1e087edd4da57241fe86dc6ddc",
+        "tracked_or_untracked_changes": false,
+        "tree": "a49b938937af2c954050773d7d8955f51b040b28"
+      },
+      "wrapper_wall_seconds": 16.741635,
+      "command": [
+        "python3.11",
+        "tools/reproduce_review.py",
+        "--benchmark"
+      ]
+    },
+    {
+      "diagnostics": {
+        "50_text_files": [
+          {
+            "counts": {
+              "scanned": 50
+            },
+            "seconds": 17.469
+          },
+          {
+            "counts": {
+              "unchanged": 50
+            },
+            "seconds": 0.2787
+          }
+        ],
+        "cache": {
+          "first_findings": 1,
+          "first_status": "scanned",
+          "same_finding_ids": true,
+          "second_findings": 1,
+          "second_status": "reused"
+        },
+        "git_no_text_document": {
+          "blocks_incomplete_scan": true,
+          "decision": "incomplete",
+          "hook_exit_code": 2,
+          "issues": [
+            "extract-failed",
+            "policy-omission"
+          ],
+          "outcome": "skipped"
+        },
+        "installed_hook": {
+          "blocks_staged_synthetic": true,
+          "commit_exit_code": 1,
+          "executable": true,
+          "output_redacted": true
+        }
+      },
+      "exit_code": 0,
+      "heavy_receipt": "job-cd04707bfeb24e86bf908d524ad208fa.json",
+      "sample": 1,
+      "source": "integrated",
+      "source_after": {
+        "commit": "cc48a6cf84f063c21ac9e51f954f1c5352799755",
+        "tracked_or_untracked_changes": false,
+        "tree": "47790a446ff9ac122825d6e3e26ba1a0754b8179"
+      },
+      "source_before": {
+        "commit": "cc48a6cf84f063c21ac9e51f954f1c5352799755",
+        "tracked_or_untracked_changes": false,
+        "tree": "47790a446ff9ac122825d6e3e26ba1a0754b8179"
+      },
+      "wrapper_wall_seconds": 20.298807,
+      "command": [
+        "python3.11",
+        "tools/reproduce_review.py",
+        "--benchmark",
+        "--assert-fixed"
+      ]
+    },
+    {
+      "diagnostics": {
+        "50_text_files": [
+          {
+            "counts": {
+              "scanned": 50
+            },
+            "seconds": 15.357
+          },
+          {
+            "counts": {
+              "unchanged": 50
+            },
+            "seconds": 0.0027
+          }
+        ],
+        "cache": {
+          "first_findings": 1,
+          "first_status": "scanned",
+          "second_findings": 0,
+          "second_status": "unchanged"
+        },
+        "git_no_text_document": {
+          "blocks_incomplete_scan": false,
+          "extraction_status": "skipped-binary-or-no-text",
+          "hook_exit_code": 0
+        },
+        "installed_hook": {
+          "blocks_staged_synthetic": false,
+          "commit_exit_code": 0,
+          "executable": false,
+          "output_redacted": true
+        }
+      },
+      "exit_code": 0,
+      "heavy_receipt": "job-19cdc2aaaefd4a37a4f1a66b29c5d400.json",
+      "sample": 2,
+      "source": "baseline",
+      "source_after": {
+        "commit": "afe67930b1001f1e087edd4da57241fe86dc6ddc",
+        "tracked_or_untracked_changes": false,
+        "tree": "a49b938937af2c954050773d7d8955f51b040b28"
+      },
+      "source_before": {
+        "commit": "afe67930b1001f1e087edd4da57241fe86dc6ddc",
+        "tracked_or_untracked_changes": false,
+        "tree": "a49b938937af2c954050773d7d8955f51b040b28"
+      },
+      "wrapper_wall_seconds": 16.843426,
+      "command": [
+        "python3.11",
+        "tools/reproduce_review.py",
+        "--benchmark"
+      ]
+    },
+    {
+      "diagnostics": {
+        "50_text_files": [
+          {
+            "counts": {
+              "scanned": 50
+            },
+            "seconds": 16.717
+          },
+          {
+            "counts": {
+              "unchanged": 50
+            },
+            "seconds": 0.3071
+          }
+        ],
+        "cache": {
+          "first_findings": 1,
+          "first_status": "scanned",
+          "same_finding_ids": true,
+          "second_findings": 1,
+          "second_status": "reused"
+        },
+        "git_no_text_document": {
+          "blocks_incomplete_scan": true,
+          "decision": "incomplete",
+          "hook_exit_code": 2,
+          "issues": [
+            "extract-failed",
+            "policy-omission"
+          ],
+          "outcome": "skipped"
+        },
+        "installed_hook": {
+          "blocks_staged_synthetic": true,
+          "commit_exit_code": 1,
+          "executable": true,
+          "output_redacted": true
+        }
+      },
+      "exit_code": 0,
+      "heavy_receipt": "job-b6a8bf1b96924dbda9882ac14974c7a0.json",
+      "sample": 2,
+      "source": "integrated",
+      "source_after": {
+        "commit": "cc48a6cf84f063c21ac9e51f954f1c5352799755",
+        "tracked_or_untracked_changes": false,
+        "tree": "47790a446ff9ac122825d6e3e26ba1a0754b8179"
+      },
+      "source_before": {
+        "commit": "cc48a6cf84f063c21ac9e51f954f1c5352799755",
+        "tracked_or_untracked_changes": false,
+        "tree": "47790a446ff9ac122825d6e3e26ba1a0754b8179"
+      },
+      "wrapper_wall_seconds": 19.596244,
+      "command": [
+        "python3.11",
+        "tools/reproduce_review.py",
+        "--benchmark",
+        "--assert-fixed"
+      ]
+    },
+    {
+      "diagnostics": {
+        "50_text_files": [
+          {
+            "counts": {
+              "scanned": 50
+            },
+            "seconds": 15.9296
+          },
+          {
+            "counts": {
+              "unchanged": 50
+            },
+            "seconds": 0.0026
+          }
+        ],
+        "cache": {
+          "first_findings": 1,
+          "first_status": "scanned",
+          "second_findings": 0,
+          "second_status": "unchanged"
+        },
+        "git_no_text_document": {
+          "blocks_incomplete_scan": false,
+          "extraction_status": "skipped-binary-or-no-text",
+          "hook_exit_code": 0
+        },
+        "installed_hook": {
+          "blocks_staged_synthetic": false,
+          "commit_exit_code": 0,
+          "executable": false,
+          "output_redacted": true
+        }
+      },
+      "exit_code": 0,
+      "heavy_receipt": "job-56406262c18a4a1882f849cc84dd9b6d.json",
+      "sample": 3,
+      "source": "baseline",
+      "source_after": {
+        "commit": "afe67930b1001f1e087edd4da57241fe86dc6ddc",
+        "tracked_or_untracked_changes": false,
+        "tree": "a49b938937af2c954050773d7d8955f51b040b28"
+      },
+      "source_before": {
+        "commit": "afe67930b1001f1e087edd4da57241fe86dc6ddc",
+        "tracked_or_untracked_changes": false,
+        "tree": "a49b938937af2c954050773d7d8955f51b040b28"
+      },
+      "wrapper_wall_seconds": 17.44501,
+      "command": [
+        "python3.11",
+        "tools/reproduce_review.py",
+        "--benchmark"
+      ]
+    },
+    {
+      "diagnostics": {
+        "50_text_files": [
+          {
+            "counts": {
+              "scanned": 50
+            },
+            "seconds": 16.5906
+          },
+          {
+            "counts": {
+              "unchanged": 50
+            },
+            "seconds": 0.2751
+          }
+        ],
+        "cache": {
+          "first_findings": 1,
+          "first_status": "scanned",
+          "same_finding_ids": true,
+          "second_findings": 1,
+          "second_status": "reused"
+        },
+        "git_no_text_document": {
+          "blocks_incomplete_scan": true,
+          "decision": "incomplete",
+          "hook_exit_code": 2,
+          "issues": [
+            "extract-failed",
+            "policy-omission"
+          ],
+          "outcome": "skipped"
+        },
+        "installed_hook": {
+          "blocks_staged_synthetic": true,
+          "commit_exit_code": 1,
+          "executable": true,
+          "output_redacted": true
+        }
+      },
+      "exit_code": 0,
+      "heavy_receipt": "job-52406e7b086349aaa3cb0f15d0feaff8.json",
+      "sample": 3,
+      "source": "integrated",
+      "source_after": {
+        "commit": "cc48a6cf84f063c21ac9e51f954f1c5352799755",
+        "tracked_or_untracked_changes": false,
+        "tree": "47790a446ff9ac122825d6e3e26ba1a0754b8179"
+      },
+      "source_before": {
+        "commit": "cc48a6cf84f063c21ac9e51f954f1c5352799755",
+        "tracked_or_untracked_changes": false,
+        "tree": "47790a446ff9ac122825d6e3e26ba1a0754b8179"
+      },
+      "wrapper_wall_seconds": 19.29683,
+      "command": [
+        "python3.11",
+        "tools/reproduce_review.py",
+        "--benchmark",
+        "--assert-fixed"
+      ]
+    }
+  ],
+  "admission_refusal_excluded": "Initial explicit TMPDIR override refused by ILMR before execution; removed for all actual samples."
+}

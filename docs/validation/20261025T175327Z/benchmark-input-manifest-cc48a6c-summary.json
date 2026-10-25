@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "source_commit": "cc48a6cf84f063c21ac9e51f954f1c5352799755",
+  "benchmark_receipt": "evidence-benchmark-seed20261025-cc48a6c.json",
+  "input_manifest_digest": "f2d16315f847170b2cc4d0c08f05ee9ce09e71f923723c2fc6cfeb73256f009e",
+  "manifest_canonicalization": "SHA256 UTF-8 JSON sorted keys, compact separators, list sorted by logical_input",
+  "scope": "Actual persisted ContentIdentity for file-count and document-part curves only; excludes Git-hook latency and scan-identity probes. Logical names omit private temporary roots.",
+  "distinct_input_contexts": 1575,
+  "file_input_contexts": 1566,
+  "document_input_contexts": 9,
+  "persisted_observations": 4707,
+  "all_file_contexts_seen_three_times": true,
+  "all_document_contexts_seen_once": true
+}

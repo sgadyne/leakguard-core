@@ -1,0 +1,56 @@
+{
+  "interpretation": [
+    "All timestamps use monotonic_ns and exclude database opening/schema migration.",
+    "BEGIN IMMEDIATE execute duration includes SQLite lock wait plus Python/SQLite overhead; it is not an exact internal wait counter.",
+    "Successful BEGIN return establishes a held writer lock; the interval from that return to commit invocation is a directly observed definite-hold window.",
+    "For implicit reserve transactions, first-write return to context-exit invocation is the definite-hold window; BEGIN trace precedes lock acquisition.",
+    "Commit-call/context-exit durations include commit work and release; exact VFS lock acquisition/release instants are not instrumented.",
+    "No lock duration is inferred from total scan time; no scans or detectors run.",
+    "Connection instrumentation adds overhead; samples are finite synthetic measurements, not a portable performance guarantee."
+  ],
+  "platform": "Linux",
+  "production_edits": false,
+  "python": "3.11.2",
+  "source_commit": "ce1ea500fd832ea7c15a0a3558918fbf674f0eb4",
+  "source_tree": "bde92968ad8cdb29fc620b1bae22a4499dc5a953",
+  "sql_or_fixture_values_recorded": false,
+  "sqlite_version": "3.40.1",
+  "started_utc": "2026-10-25T20:41:49.680279+00:00",
+  "summary": {
+    "cycle_begin_call": {
+      "maximum_seconds": 5.2185e-05,
+      "median_seconds": 3.50275e-05,
+      "minimum_seconds": 2.0498e-05,
+      "samples": 10
+    },
+    "cycle_transaction_window": {
+      "maximum_seconds": 0.006273782,
+      "median_seconds": 0.0022572825,
+      "minimum_seconds": 0.002107495,
+      "samples": 10
+    },
+    "deadline_timeout_begin_call": {
+      "maximum_seconds": 0.120053216,
+      "median_seconds": 0.119846134,
+      "minimum_seconds": 0.119845159,
+      "samples": 3
+    },
+    "release_contention_begin_call": {
+      "maximum_seconds": 0.129007931,
+      "median_seconds": 0.128756583,
+      "minimum_seconds": 0.128739976,
+      "samples": 3
+    },
+    "reserve_transaction_window": {
+      "maximum_seconds": 0.004488983,
+      "median_seconds": 0.0016402455,
+      "minimum_seconds": 0.001443434,
+      "samples": 20
+    }
+  },
+  "private_original_receipt": "semantics-sqlite-lock-measurement.json",
+  "method": "Actual SQLiteScanStore with a runtime-only Connection subclass; control categories and monotonic boundaries only; no SQL or fixture content.",
+  "controlled_release_cases": 3,
+  "controlled_deadline_timeout_cases": 3,
+  "all_timeout_retries_succeeded": true
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "source_commit": "9111c9caa7426148d2412244be00542ac2989bde",
+  "source_stable": true,
+  "python": "3.11.2",
+  "parsers": {
+    "pypdf": "unavailable",
+    "olefile": "unavailable"
+  },
+  "focused_suite": {
+    "command": "python -m unittest discover -s tests -p test_corpus.py -v",
+    "total": 10,
+    "passed": 7,
+    "skipped": 3,
+    "failures": 0,
+    "errors": 0,
+    "heavy_job_receipt": "job-5fff44f34b1843489e13c97806ce44ba.json"
+  },
+  "direct_corpus_summary": {
+    "labeled_cases": 48,
+    "covered": 43,
+    "uncovered": 5,
+    "failed": 0,
+    "metric_eligible_cases": 32,
+    "metric_not_scored_cases": 11,
+    "true_positive": 11,
+    "true_negative": 21,
+    "false_positive": 0,
+    "false_negative": 0,
+    "github_pat_true_positive": 1,
+    "uncovered_cases": [
+      "pdf-text-positive",
+      "pdf-image-only",
+      "msg-subject-positive",
+      "msg-body-positive",
+      "unsupported-compound"
+    ],
+    "heavy_job_receipt": "job-76434cec310b453cad44f0812e384b60.json"
+  },
+  "provenance": "Lead summary of executed worker output and immutable heavy-job source/exit receipts; no separate full stdout log was persisted by that worker. Parser-unavailable cases are uncovered and excluded from scoring."
+}
