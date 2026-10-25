@@ -154,14 +154,14 @@ $ErrorActionPreference = 'Stop'
 function Invoke-Checked {
     param([string]$Executable, [string[]]$Arguments)
     & $Executable @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "command-failed:$Executable:$LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw ("command-failed:{0}:{1}" -f $Executable, $LASTEXITCODE) }
 }
 function Invoke-Acceptance {
     param([string]$Name, [string]$Executable, [string[]]$Arguments)
     & $Executable @Arguments
     $Code = [int]$LASTEXITCODE
     [IO.File]::AppendAllText($ReturnCodes, "$Name=$Code`n", [Text.Encoding]::ASCII)
-    if ($Code -ne 0) { throw "acceptance-failed:$Name:$Code" }
+    if ($Code -ne 0) { throw ("acceptance-failed:{0}:{1}" -f $Name, $Code) }
 }
 $PyVersion = '3.11'             # Repeat with 3.13
 $Tag = 'windows-py311'          # Use windows-py313 for Python 3.13
