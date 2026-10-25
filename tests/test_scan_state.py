@@ -17,11 +17,12 @@ class ReplayTests(unittest.TestCase):
             source.write_bytes(b'first content')
             calls = []
 
-            def scan(data, path, conn=None):
-                calls.append(data)
-                return engine.safe_findings([{'RuleID': 'literal-password', 'StartLine': 1}], path), 'scanned'
+            from leakguard_core import backends
+            def scan(text, **kwargs):
+                calls.append(text)
+                return (backends.BackendFinding('literal-password', 1, 1),)
 
-            with patch.object(engine, 'STATE', state), patch.object(engine, 'scan_blob', side_effect=scan):
+            with patch.object(engine, 'STATE', state), patch.object(backends, 'detect', side_effect=scan), patch('leakguard_core.scan_policy.runtime_identity', return_value=('synthetic-runtime', True)):
                 conn = engine.db()
                 try:
                     first = engine.scan_file(source, conn)

@@ -1,6 +1,5 @@
 """Local offline secret scanning, resumable disk audits, and Git guards."""
 import argparse
-import bisect
 import datetime as dt
 import hashlib
 import json
@@ -13,7 +12,7 @@ import tempfile
 import time
 import uuid
 
-from .documents import DOCUMENT_SUFFIXES, extract
+from .documents import DOCUMENT_SUFFIXES
 from . import catalog
 from . import policies
 from . import finding_details
@@ -101,120 +100,91 @@ def safe_findings(raw, path_override=None, part='text', digest=''):
 
 
 def engine(command, text=None, cwd=None):
+    """Deprecated narrow backend adapter; native Git orchestration was removed."""
     _legacy()
-    # --redact runs before sanitization. Raw report files never leave the private state directory.
-    with tempfile.TemporaryDirectory(prefix='scan-', dir=STATE) as temp:
-        assert pathlib.Path(temp).resolve().is_relative_to(STATE.resolve())
-        report = pathlib.Path(temp) / 'redacted.json'
-        args = [str(EXE), *command, '--config', str(RULES), '--redact=100', '--no-banner', '--no-color', '--log-level', 'fatal', '--report-format', 'json', '--report-path', str(report), '--timeout', str(CONFIG['scan_timeout_seconds'])]
-        process = subprocess.run(args, input=text, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, timeout=CONFIG['scan_timeout_seconds'] + 10)
-        if process.returncode not in (0, 1):
-            raise RuntimeError(f'Gitleaks failed with exit code {process.returncode}')
-        if not report.is_file():
-            raise RuntimeError('Detection engine did not produce a report')
-        return json.loads(report.read_text(encoding='utf-8'))
+    from . import backends
+    if command != ['stdin']:
+        raise RuntimeError('legacy-backend-unsupported')
+    try:
+        decoded = text.decode('utf-8', errors='strict') if isinstance(text, bytes) else text or ''
+        return [{'RuleID': item.rule, 'StartLine': item.start_line, 'EndLine': item.end_line}
+                for item in backends.detect(decoded, binary=EXE, rules=RULES, timeout=CONFIG['scan_timeout_seconds'])]
+    except Exception:
+        raise RuntimeError('detector-failed') from None
+
+
+def _legacy_config():
+    _legacy()
+    config = dict(CONFIG)
+    config['gitleaks_executable'] = str(EXE)
+    config['gitleaks_config'] = str(RULES)
+    return config
+
+
+def _legacy_service(conn=None):
+    from .scan_store import SQLiteScanStore
+    config = _legacy_config()
+    store = SQLiteScanStore.from_connection(conn, state_dir=STATE, config=config) if conn is not None else None
+    service = ScanService(config, store=store)
+    # Preserve trusted in-memory detector fixtures in the deprecated internal
+    # wrapper. Configured deployment always uses supervised module handles.
+    service._plugins = PLUGINS
+    service._cache_eligible = service._cache_eligible and not PLUGINS
+    return service
+
+
+def _legacy_result(result):
+    from . import models as m
+    findings = []
+    for finding in result.findings:
+        item = {'id': finding.id, 'path': finding.source.path, 'part': finding.part_id,
+                'line': finding.start_line, 'end_line': finding.end_line, 'rule': finding.rule,
+                'severity': finding.severity.value, 'detector_severity': finding.detector_severity.value,
+                'classification': finding.classification.value, 'proof_id': finding.proof_id}
+        if finding.source.commit:
+            item['commit'] = finding.source.commit
+        findings.append(finding_details.describe(item))
+    required = next((issue for issue in result.issues if issue.required), None)
+    if result.outcome is m.ScanOutcome.REUSED:
+        status = 'unchanged'
+    elif required:
+        status = 'missing' if required.code is m.ErrorCode.INPUT_MISSING else 'error-' + required.code.value
+    elif result.outcome is m.ScanOutcome.SCANNED:
+        status = 'scanned'
+    else:
+        status = 'skipped-binary-or-no-text'
+    return {'path': result.source.path, 'status': status, 'findings': findings,
+            'coverage': result.coverage.value,
+            'issues': [{'path': issue.source.path if issue.source else result.source.path,
+                        'status': issue.code.value, 'required': issue.required,
+                        'part': issue.part_id, 'omission_id': issue.omission_id} for issue in result.issues],
+            'last_executed_at': result.last_executed_at.isoformat() if result.last_executed_at else None,
+            'last_verified_at': result.last_verified_at.isoformat() if result.last_verified_at else None}
 
 
 def scan_blob(data, path, conn=None):
-    _legacy()
-    digest = hashlib.sha256(data).hexdigest()
-    found = []
-    extracted = False
-    provided = plugins.extract(PLUGINS, data, path)
-    if provided is not None:
-        parts = provided
-    elif pathlib.Path(path).suffix.lower() in DOCUMENT_SUFFIXES:
-        worker = subprocess.run([sys.executable, '-X', 'utf8', '-m', 'leakguard_core.extract_worker', pathlib.Path(path).suffix.lower()], input=data, capture_output=True, timeout=25)
-        if worker.returncode:
-            raise ValueError('Document extraction failed or reached a configured limit')
-        parts = json.loads(worker.stdout)
-    else:
-        parts = list(extract(data, path))
-    if conn is not None:
-        rendered = '\n'.join(text for _, text in parts)
-        for material in catalog.match_materials(conn, policies.canonical(path, CONFIG), rendered, STATE):
-            extra = safe_findings([{'RuleID': 'known-material-' + material['kind'], 'StartLine': material['line']}], str(path), digest=digest)[0]
-            extra['material_name'] = material['name']
-            if material['kind'] == 'license':
-                extra['severity'] = 'review'
-            found.append(extra)
-    # One scanner invocation per bounded document batch; preserve source part/line mapping.
-    batch = []; starts = []; offset = 1; size = 0
-
-    def flush():
-        if not batch:
-            return
-        raw = engine(['stdin'], '\n'.join(text for _, text in batch).encode('utf-8'))
-        for finding in raw:
-            index = max(0, bisect.bisect_right(starts, finding.get('StartLine', 1)) - 1)
-            finding['StartLine'] = finding.get('StartLine', 1) - starts[index] + 1
-            found.extend(safe_findings([finding], str(path), batch[index][0], digest))
-
-    for part, text in parts:
-        extracted = True
-        if text:
-            for item in plugins.detect(PLUGINS, text, str(path), part):
-                extra = safe_findings([{'RuleID': item.rule, 'StartLine': item.line}], str(path), part, digest)[0]
-                extra['severity'] = item.severity
-                found.append(extra)
-            if batch and size + len(text) > 2_000_000:
-                flush(); batch = []; starts = []; offset = 1; size = 0
-            starts.append(offset); batch.append((part, text)); offset += text.count('\n') + 1; size += len(text)
-    flush()
-    return found, 'scanned' if extracted else 'skipped-binary-or-no-text'
+    """Deprecated tuple result adapter over the shared per-part service."""
+    from . import models as m
+    service = _legacy_service(conn)
+    try:
+        report = service.scan((m.BytesInput(data, str(path)),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(120, 1, max_file_bytes=CONFIG['max_file_bytes']), use_cache=False)
+        if not report.results:
+            return [], 'error-state-failed'
+        result = _legacy_result(report.results[0])
+        return result['findings'], result['status']
+    finally:
+        service.close()
 
 
 def scan_file(path, conn, use_cache=True):
-    path = pathlib.Path(path)
-    result = {'path': str(path), 'findings': []}
+    """Deprecated dictionary result adapter; content/proof/runtime reuse is shared."""
+    from . import models as m
+    service = _legacy_service(conn)
     try:
-        stat = path.stat()
-        if not path.is_file() or path.is_symlink():
-            result['status'] = 'skipped-nonregular'
-            return result
-        if stat.st_size > CONFIG['max_file_bytes']:
-            catalog.metadata_only(conn, str(path), stat.st_size, CONFIG)
-            result['status'] = 'skipped-size'
-            return result
-        # Stat metadata is admission information, never content identity.
-        data = path.read_bytes()
-        digest = hashlib.sha256(data).hexdigest()
-        old = conn.execute('SELECT digest,status,policy,payload,executed_at FROM cache WHERE path=?', (str(path),)).fetchone()
-        # Until the service has a full dependency closure, contextual/plugin/material
-        # scans deliberately run again. Their unchanged primary bytes prove too little.
-        eligible = path.suffix.lower() != '.json' and not PLUGINS and not conn.execute('SELECT 1 FROM material_sources LIMIT 1').fetchone()
-        if use_cache and eligible and old and old[:3] == (digest, 'scanned', SCAN_POLICY) and old[3]:
-            after = path.stat()
-            if (after.st_size, after.st_mtime_ns) == (stat.st_size, stat.st_mtime_ns):
-                result.update(status='unchanged', findings=json.loads(old[3]), last_executed_at=old[4], last_verified_at=now())
-                catalog.observe(conn, str(path), data, CONFIG)
-                return result
-        digest = catalog.observe(conn, str(path), data, CONFIG)
-        result['findings'], result['status'] = scan_blob(data, str(path), conn)
-        def sibling(module):
-            sibling_path = path.parent / module
-            if sibling_path.is_symlink() or not sibling_path.resolve().is_relative_to(path.parent.resolve()):
-                return None
-            if sibling_path.stat().st_size > finding_details.MAX_CONTEXT_BYTES:
-                return None
-            return sibling_path.read_bytes()
-        result['findings'] = [finding_details.describe(f, data, sibling) for f in result['findings']]
-        after = path.stat()
-        if (after.st_size, after.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
-            result['status'] = 'changed-during-scan'
-        result['last_executed_at'] = now()
-        result['last_verified_at'] = result['last_executed_at'] if result['status'] == 'scanned' else None
-        conn.execute('INSERT OR REPLACE INTO cache(path,size,mtime,status,policy,digest,payload,executed_at) VALUES(?,?,?,?,?,?,?,?)', (str(path), stat.st_size, stat.st_mtime_ns, result['status'], SCAN_POLICY, digest, json.dumps(result['findings']), result['last_executed_at']))
-        conn.commit()  # Release SQLite's writer lock before the next potentially slow document.
-    except Exception as error:
-        result['status'] = 'error'
-        result['error_type'] = type(error).__name__
-        if isinstance(error, FileNotFoundError):
-            catalog.event(conn, str(path), 'deleted', CONFIG)
-            result['status'] = 'missing'
-        if isinstance(error, subprocess.TimeoutExpired):
-            result['status'] = 'timeout'
-    return result
+        report = service.scan((m.FileInput(pathlib.Path(path)),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(120, 1, max_file_bytes=CONFIG['max_file_bytes']), use_cache=use_cache)
+        return _legacy_result(report.results[0]) if report.results else {'path': str(path), 'status': 'error-state-failed', 'findings': []}
+    finally:
+        service.close()
 
 
 def save_report(label, results, conn, extra=None):
@@ -234,7 +204,9 @@ def save_report(label, results, conn, extra=None):
                 finding['severity'] = 'inventory'
             finding['priority'] = 'inventory' if finding['profile'] == 'companion' else ('info' if finding['severity'] == 'info' else ('review' if finding['severity'] == 'review' or finding['rule'] == 'generic-api-key' else 'high'))
             findings.append(finding)
-        if status.startswith(('error', 'skipped', 'changed', 'timeout')):
+        if result.get('issues'):
+            issues.extend(result['issues'])
+        elif status.startswith(('error', 'skipped', 'changed', 'timeout', 'missing')):
             issues.append({k: v for k, v in result.items() if k not in {'findings'}})
     new_count = 0
     for finding in findings:
@@ -260,124 +232,45 @@ def save_report(label, results, conn, extra=None):
     return report
 
 
+def _legacy_report_from_typed(report, label):
+    conn = db()
+    try:
+        results = [_legacy_result(result) for result in report.results]
+        for issue in report.issues:
+            results.append({'path': issue.source.path if issue.source else '', 'status': ('error-' if issue.required else 'skipped-') + issue.code.value, 'findings': [], 'required': issue.required, 'omission_id': issue.omission_id})
+        return save_report(label, results, conn, {'pending_files': report.coverage.pending_files, 'pending_directories': report.coverage.pending_directories, 'complete_cycle': report.coverage.enumeration_complete and report.coverage.required_complete, 'bounded': not report.coverage.enumeration_complete, 'decision': report.decision.verdict.value})
+    finally:
+        conn.close()
+
+
 def scan_paths(paths, budget, max_files, use_cache=True):
-    conn = db(); results = []; start = time.monotonic()
-    pending = list(paths)
-    while pending and len(results) < max_files and time.monotonic() - start < budget:
-        path = pathlib.Path(pending.pop())
-        if excluded(path):
-            continue
-        if path.is_dir() and not path.is_symlink():
-            try:
-                pending.extend(str(p) for p in path.iterdir() if not excluded(p))
-            except OSError as error:
-                results.append({'path': str(path), 'status': 'error-directory', 'error_type': type(error).__name__})
-        elif candidate(path):
-            results.append(scan_file(path, conn, use_cache))
-    report = save_report('manual', results, conn, {'pending_paths': len(pending), 'bounded': bool(pending)})
-    conn.close()
-    return report
+    from . import models as m
+    service = ScanService(_legacy_config(), state_dir=STATE)
+    try:
+        report = service.scan_paths(paths, policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(budget, max_files, max_file_bytes=CONFIG['max_file_bytes']), use_cache=use_cache)
+    finally:
+        service.close()
+    return _legacy_report_from_typed(report, 'manual')
 
 
 def audit(scope, budget, max_files):
-    conn = db(); root = CONFIG['audit_scopes'][scope]
-    results = []; started = time.monotonic(); dirs = 0
-    if not pathlib.Path(root).is_dir():
-        save_report('audit-' + scope, [], conn, {'root': root, 'offline': True})
-        return
-    cycle = conn.execute('SELECT completed FROM cycles WHERE scope=?', (scope,)).fetchone()
-    if not cycle or cycle[0]:
-        conn.execute('INSERT OR REPLACE INTO cycles VALUES(?,?,NULL)', (scope, now()))
-        conn.execute('INSERT OR IGNORE INTO directories(scope,path,priority) VALUES(?,?,?)', (scope, root, 10))
-    cycle_id = conn.execute('SELECT started FROM cycles WHERE scope=?', (scope,)).fetchone()[0]
-    for preferred in CONFIG.get('priority_paths', {}).get(scope, []):
-        inserted = conn.execute('INSERT OR IGNORE INTO priority_seeds VALUES(?,?,?)', (scope, preferred, cycle_id)).rowcount
-        if inserted:
-            conn.execute('INSERT OR IGNORE INTO directories(scope,path,priority) VALUES(?,?,0)', (scope, preferred))
-    conn.commit()
-    while len(results) < max_files and time.monotonic() - started < budget:
-        file_row = conn.execute('SELECT path,priority FROM files WHERE scope=? ORDER BY priority,rowid LIMIT 1', (scope,)).fetchone()
-        row = conn.execute('SELECT path,priority FROM directories WHERE scope=? ORDER BY priority,rowid LIMIT 1', (scope,)).fetchone()
-        if file_row and (not row or file_row[1] <= row[1]):
-            path = file_row[0]
-            results.append(scan_file(path, conn))
-            conn.execute('DELETE FROM files WHERE scope=? AND path=?', (scope, path)); conn.commit()
-            continue
-        if not row:
-            conn.execute('UPDATE cycles SET completed=? WHERE scope=?', (now(), scope)); conn.commit(); break
-        folder, priority = row
-        try:
-            with os.scandir(folder) as entries:
-                for entry_index, entry in enumerate(entries, 1):
-                    if excluded(entry.path) or entry.is_symlink():
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        conn.execute('INSERT OR IGNORE INTO directories(scope,path,priority) VALUES(?,?,?)', (scope, entry.path, priority + 1))
-                    elif entry.is_file(follow_symlinks=False) and candidate(entry.path):
-                        conn.execute('INSERT OR IGNORE INTO files(scope,path,priority) VALUES(?,?,?)', (scope, entry.path, priority))
-                    if entry_index % 1000 == 0:
-                        conn.commit()
-            dirs += 1
-        except OSError as error:
-            results.append({'path': folder, 'status': 'error-directory', 'error_type': type(error).__name__})
-        # The directory is removed only after enumeration, so an interrupted job can resume safely.
-        conn.execute('DELETE FROM directories WHERE scope=? AND path=?', (scope, folder)); conn.commit()
-    pending_files = conn.execute('SELECT count(*) FROM files WHERE scope=?', (scope,)).fetchone()[0]
-    pending_dirs = conn.execute('SELECT count(*) FROM directories WHERE scope=?', (scope,)).fetchone()[0]
-    save_report('audit-' + scope, results, conn, {'root': root, 'directories_enumerated': dirs, 'pending_files': pending_files, 'pending_directories': pending_dirs, 'complete_cycle': not (pending_files or pending_dirs)})
-    conn.close()
+    from . import models as m
+    service = ScanService(_legacy_config(), state_dir=STATE)
+    try:
+        report = service.audit(scope, limits=m.ScanLimits(budget, max_files, max_file_bytes=CONFIG['max_file_bytes']))
+    finally:
+        service.close()
+    return _legacy_report_from_typed(report, 'audit-' + scope)
 
 
 def drain():
-    queue = STATE / 'queue'; queue.mkdir(exist_ok=True)
-    paths = set(); consumed = []; events = []
-    for item in list(queue.glob('*.json'))[:20]:
-        try:
-            batch = json.loads(item.read_text(encoding='utf-8-sig'))
-            for value in batch if isinstance(batch, list) else [batch]:
-                if isinstance(value, dict):
-                    events.append(value)
-                    if value.get('kind') != 'deleted':
-                        paths.add(value['path'])
-                else:
-                    paths.add(value)
-            consumed.append(item)
-        except (OSError, ValueError):
-            continue
-    conn = db(); results = []; started = time.monotonic(); remaining = []
-    for value in events:
-        if not excluded(value['path']):
-            catalog.event(conn, value['path'], value.get('kind', 'changed'), CONFIG, old_path=value.get('old_path'), when=value.get('observed'))
-            # Fast local location inventory must not wait behind deep content scans.
-            if value.get('kind') != 'deleted' and policies.profile(value['path'], CONFIG) == 'companion':
-                try:
-                    event_path = pathlib.Path(value['path'])
-                    if event_path.is_file() and not event_path.is_symlink():
-                        catalog.metadata_only(conn, str(event_path), event_path.stat().st_size, CONFIG)
-                except OSError:
-                    pass
-    fresh = {item['path'] for item in events}
-    ordered = sorted(paths, key=lambda path: (policies.profile(path, CONFIG) != 'general', policies.classify(path) == 'history-or-log', path not in fresh, path))
-    spent = {'general': 0.0, 'companion': 0.0}
-    for index, path in enumerate(ordered):
-        if len(results) >= 150 or time.monotonic() - started >= 45:
-            remaining.extend(ordered[index:])
-            break
-        kind = policies.profile(path, CONFIG)
-        if spent[kind] >= (25 if kind == 'general' else 15):
-            remaining.append(path)
-            continue
-        if candidate(path) and pathlib.Path(path).is_file():
-            file_started = time.monotonic()
-            results.append(scan_file(path, conn, use_cache=False))
-            spent[kind] += time.monotonic() - file_started
-    if paths:
-        save_report('watch', results, conn, {'queued_paths': len(paths), 'remaining_paths': len(remaining)})
-    if remaining:
-        (queue / (uuid.uuid4().hex + '.json')).write_text(json.dumps(remaining), encoding='utf-8')
-    for item in consumed:
-        item.unlink(missing_ok=True)
-    conn.close()
+    from . import models as m
+    service = ScanService(_legacy_config(), state_dir=STATE)
+    try:
+        report = service.drain(limits=m.ScanLimits(45, 150, max_file_bytes=CONFIG['max_file_bytes']))
+    finally:
+        service.close()
+    return _legacy_report_from_typed(report, 'watch')
 
 
 def git(*args, cwd=None, check=True):
@@ -497,7 +390,7 @@ class ScanService:
             self._plugins = plugins.load(self.config.get('plugins', []))
             if self.config.get('script_checks'):
                 self._plugins.extend(plugins.load_scripts(self.config['script_checks']))
-            self._runtime, self._cache_eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()))
+            self._runtime, self._cache_eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins))
             # Until a verifiable plugin dependency closure is available, execution is
             # supported and persistent semantic reuse is deliberately disabled.
             self._cache_eligible = self._cache_eligible and not self._plugins
@@ -747,7 +640,7 @@ class ScanService:
         enumeration_complete = True
         finding_count = 0
         report_bytes = 0
-        runtime, eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()))
+        runtime, eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins))
         runtime_valid = runtime == self._runtime
         materials = None
         if policy.mode is m.ScanMode.INVENTORY:
@@ -827,7 +720,7 @@ class ScanService:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, required=True))
             results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, r.source, required=True),)) for r in results]
-        current_runtime, _ = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()))
+        current_runtime, _ = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins))
         if current_runtime != self._runtime:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
