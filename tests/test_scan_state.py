@@ -500,3 +500,84 @@ class FindingPageTests(unittest.TestCase):
                     self.assertNotIn('SyntheticMarkerNotACursor', str(error.exception))
                 finally:
                     store.close()
+
+
+class StoreBudgetTests(unittest.TestCase):
+    def test_sqlite_writer_contention_obeys_short_scan_deadline(self):
+        import sqlite3
+        import time
+        from leakguard_core import models as m, backends
+        from leakguard_core.scan_store import SQLiteScanStore
+        with tempfile.TemporaryDirectory(prefix='leakguard-busy-') as folder:
+            root = Path(folder)
+            source = root / 'candidate.txt'; source.write_text('synthetic')
+            store = SQLiteScanStore(root / 'store')
+            service = engine.ScanService({'gitleaks_executable': str(engine.EXE)}, store=store)
+            blocker = sqlite3.connect(root / 'store' / 'state.sqlite3')
+            blocker.execute('BEGIN IMMEDIATE')
+            try:
+                started = time.monotonic()
+                with patch.object(backends, 'detect', return_value=()), patch('leakguard_core.scan_policy.runtime_identity', return_value=(service._runtime, True)):
+                    report = service.scan((m.FileInput(source),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(0.15, 1))
+                elapsed = time.monotonic() - started
+                self.assertLess(elapsed, 1.0)
+                self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                self.assertTrue(any(issue.code is m.ErrorCode.STATE_FAILED for issue in report.issues))
+            finally:
+                blocker.rollback(); blocker.close(); service.close(); store.close()
+
+    def test_resolved_history_is_not_reopened_by_unreadability_or_events(self):
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with tempfile.TemporaryDirectory(prefix='leakguard-resolved-') as folder:
+                store = store_type(folder) if store_type is SQLiteScanStore else store_type()
+                try:
+                    positive = StoreLifecycleTests.make_result(self)
+                    clean = StoreLifecycleTests.make_result(self, findings=False)
+                    store.record_result(positive, generation=store.reserve(positive.source))
+                    store.record_result(clean, generation=store.reserve(positive.source))
+                    self.assertEqual(store.query_findings(), ())
+                    incomplete = StoreLifecycleTests.make_result(self, findings=False, complete=False)
+                    store.record_result(incomplete, generation=store.reserve(positive.source))
+                    store.record_event(positive.source.path, 'changed')
+                    self.assertEqual(store.query_findings(), ())
+                    store.record_result(positive, generation=store.reserve(positive.source))
+                    self.assertEqual(store.query_findings()[0]['state'], 'active')
+                finally:
+                    store.close()
+
+
+class AuditStoreBudgetTests(unittest.TestCase):
+    def test_audit_lease_contention_uses_original_short_deadline_and_clears_budget(self):
+        import sqlite3
+        import time
+        from leakguard_core import models as m
+        from leakguard_core.scan_store import SQLiteScanStore
+        with tempfile.TemporaryDirectory(prefix='leakguard-audit-busy-') as folder:
+            root = Path(folder)
+            corpus = root / 'corpus'; corpus.mkdir()
+            store = SQLiteScanStore(root / 'store')
+            service = engine.ScanService({'audit_scopes': {'synthetic': str(corpus)}, 'gitleaks_executable': str(engine.EXE)}, store=store)
+            blocker = sqlite3.connect(root / 'store' / 'state.sqlite3')
+            blocker.execute('BEGIN IMMEDIATE')
+            try:
+                started = time.monotonic()
+                with patch('leakguard_core.scan_policy.runtime_identity', return_value=(service._runtime, True)):
+                    report = service.audit('synthetic', limits=m.ScanLimits(0.15, 1))
+                self.assertLess(time.monotonic() - started, 1.0)
+                self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                self.assertIsNone(store._deadline)
+            finally:
+                blocker.rollback(); blocker.close(); service.close(); store.close()
+
+
+class PageIsolationTests(unittest.TestCase):
+    def test_page_source_mutation_does_not_corrupt_memory_store(self):
+        from leakguard_core.scan_store import MemoryScanStore
+        store = MemoryScanStore()
+        result = StoreLifecycleTests.make_result(self)
+        store.record_result(result, generation=store.reserve(result.source))
+        for state in ('current', 'history'):
+            row = store.query_findings_page(state=state).rows[0]
+            row['source']['path'] = '/synthetic/mutated'
+            self.assertEqual(store.query_findings_page(state=state).rows[0]['source']['path'], result.source.path)

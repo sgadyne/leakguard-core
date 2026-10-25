@@ -19,8 +19,28 @@ def _synchronized(method):
     @wraps(method)
     def locked(self, *args, **kwargs):
         with self._lock:
+            import time
+            deadline = getattr(self, '_deadlines', {}).get(threading.get_ident())
+            if method.__name__ not in {'set_deadline', 'close'} and deadline is not None and time.monotonic() >= deadline:
+                raise StateError()
             return method(self, *args, **kwargs)
     return locked
+
+
+def _bounded_sql(method):
+    @wraps(method)
+    def bounded(self, *args, **kwargs):
+        import sqlite3
+        try:
+            self._apply_budget()
+            return method(self, *args, **kwargs)
+        except sqlite3.Error:
+            try:
+                self.conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise StateError() from None
+    return bounded
 
 from . import models as m
 
@@ -80,7 +100,10 @@ def _query_position(state, profile, limit, cursor):
                 raise ValueError()
             encoded = cursor[4:]
             payload = json.loads(base64.b64decode(encoded + '=' * (-len(encoded) % 4), altchars=b'-_', validate=True))
-            if type(payload) is not list or len(payload) != 3 or payload[0] != 1 or payload[1] != fingerprint:
+            import re
+            if not re.fullmatch('[A-Za-z0-9_-]+', encoded):
+                raise ValueError()
+            if type(payload) is not list or len(payload) != 3 or type(payload[0]) is not int or payload[0] != 1 or payload[1] != fingerprint:
                 raise ValueError()
             position = payload[2]
             if state == 'current':
@@ -107,13 +130,14 @@ def _filter_page(rows, profile, config):
 
 @runtime_checkable
 class ScanStore(Protocol):
+    def set_deadline(self, deadline: float | None) -> None: ...
     def reserve(self, source: m.SourceRef, *, scope: str = '') -> int: ...
     def get_cached(self, cache_key: str) -> m.ScanResult | None: ...
     def record_result(self, result: m.ScanResult, *, generation: int,
                       cache_key: str | None = None, scope: str = '', work: WorkClaim | None = None,
                       material_observations: tuple = (), materials_checked: bool = False,
                       materials_complete: bool = False) -> str: ...
-    def record_report(self, report: m.ScanReport) -> None: ...
+    def record_report(self, report: m.ScanReport, *, repository: str | None = None) -> None: ...
     def latest_report(self, repository: str | None = None) -> m.ScanReport | None: ...
     def query_findings_page(self, *, state: str = 'current', profile: str | None = None, limit: int = 1000, cursor: str | None = None) -> FindingPage: ...
     def query_findings(self, *, state: str = 'current', profile: str | None = None) -> tuple[dict, ...]: ...
@@ -135,11 +159,13 @@ class MemoryScanStore:
     """No filesystem writes, JSON archive, SQLite connection or implicit mirror."""
     def __init__(self, *, config=None):
         self._lock = threading.RLock()
+        self._deadlines = {}
         self.config = config or {}
         self.generations = {}
         self.results = {}
         self.cache = {}
         self.reports = []
+        self.report_context = {}
         self.states = {}
         self._current_order = []
         self._history = []
@@ -150,6 +176,13 @@ class MemoryScanStore:
         self.material_sources = []
         self.material_locations = {}
         self._material_key = __import__('secrets').token_bytes(32)
+
+    @_synchronized
+    def set_deadline(self, deadline):
+        if deadline is None:
+            self._deadlines.pop(threading.get_ident(), None)
+        else:
+            self._deadlines[threading.get_ident()] = deadline
 
     @_synchronized
     def reserve(self, source, *, scope=''):
@@ -198,27 +231,30 @@ class MemoryScanStore:
         return scan_id
 
     @_synchronized
-    def record_report(self, report):
+    def record_report(self, report, *, repository=None):
         if type(report) is not m.ScanReport:
             raise StateError()
         self.reports.append(report)
+        repositories = {result.source.repository for result in report.results if result.source.repository}
+        self.report_context[report.run_id] = repository if repository is not None else next(iter(repositories)) if len(repositories) == 1 else None
 
     @_synchronized
     def latest_report(self, repository=None):
         return next((report for report in reversed(self.reports)
-                     if repository is None or any(result.source.repository == repository for result in report.results)), None)
+                     if repository is None or self.report_context.get(report.run_id) == repository), None)
 
     @_synchronized
     def query_findings_page(self, *, state='current', profile=None, limit=1000, cursor=None):
         import bisect
+        import copy
         fingerprint, position = _query_position(state, profile, limit, cursor)
         if state == 'current':
             offset = bisect.bisect_right(self._current_order, tuple(position))
             keys = self._current_order[offset:offset + limit + 1]
-            rows = [dict(self.states[key]) for key in keys[:limit]]
+            rows = [copy.deepcopy(self.states[key]) for key in keys[:limit]]
             next_cursor = _query_cursor(fingerprint, list(keys[limit - 1])) if len(keys) > limit else None
         else:
-            rows = [dict(row) for row in self._history[position:position + limit]]
+            rows = [copy.deepcopy(row) for row in self._history[position:position + limit]]
             next_cursor = _query_cursor(fingerprint, position + limit) if position + limit < len(self._history) else None
         return FindingPage(_filter_page(rows, profile, self.config), next_cursor)
 
@@ -472,6 +508,9 @@ CREATE TABLE IF NOT EXISTS finding_history(id INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE TABLE IF NOT EXISTS current_inputs(input_key TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0,last_complete_scan_id TEXT,latest_attempt_id TEXT,current_state TEXT,state_reason TEXT,policy_id TEXT,runtime_id TEXT);
 CREATE TABLE IF NOT EXISTS finding_state(input_key TEXT,finding_id TEXT,state TEXT,rule TEXT,path TEXT,payload TEXT NOT NULL,PRIMARY KEY(input_key,finding_id));
 CREATE INDEX IF NOT EXISTS finding_state_query ON finding_state(state,path,rule);
+CREATE INDEX IF NOT EXISTS finding_state_input_state ON finding_state(input_key,state,finding_id);
+CREATE INDEX IF NOT EXISTS scan_runs_repository ON scan_runs(repository,finished_at DESC);
+CREATE INDEX IF NOT EXISTS scan_runs_finished ON scan_runs(finished_at DESC);
 CREATE TABLE IF NOT EXISTS scan_cache(cache_key TEXT PRIMARY KEY,scan_id TEXT NOT NULL REFERENCES input_scans(scan_id));
 CREATE TABLE IF NOT EXISTS audit_cycles(scope TEXT PRIMARY KEY,generation INTEGER,started TEXT,completed TEXT,failed INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_until REAL);
 CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,PRIMARY KEY(scope,generation,path,kind));
@@ -567,6 +606,7 @@ class SQLiteScanStore:
         self.config = config or {}
         self.conn = open_database(state_dir)
         self.state_dir = __import__('pathlib').Path(state_dir)
+        self._deadline = None
 
     @classmethod
     def from_connection(cls, conn, *, state_dir, config=None):
@@ -575,14 +615,36 @@ class SQLiteScanStore:
         instance.conn = conn
         instance.state_dir = __import__('pathlib').Path(state_dir)
         instance.config = config or {}
+        instance._deadline = None
         return instance
 
+    def set_deadline(self, deadline):
+        self._deadline = deadline
+        self.conn.set_progress_handler(None, 0)
+        if deadline is None:
+            self.conn.execute('PRAGMA busy_timeout=30000')
+        else:
+            self._apply_budget()
+
+    def _apply_budget(self):
+        import time
+        if self._deadline is None:
+            return
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise StateError()
+        self.conn.set_progress_handler(None, 0)
+        self.conn.execute('PRAGMA busy_timeout=' + str(max(1, min(30_000, int(remaining * 1000)))))
+        self.conn.set_progress_handler(lambda: int(time.monotonic() >= self._deadline), 1000)
+
+    @_bounded_sql
     def reserve(self, source, *, scope=''):
         key = source_key(source, scope)
         with self.conn:
             self.conn.execute('INSERT INTO current_inputs(input_key,generation) VALUES(?,1) ON CONFLICT(input_key) DO UPDATE SET generation=generation+1', (key,))
             return self.conn.execute('SELECT generation FROM current_inputs WHERE input_key=?', (key,)).fetchone()[0]
 
+    @_bounded_sql
     def get_cached(self, cache_key):
         row = self.conn.execute('SELECT i.scan_id,i.payload FROM scan_cache c JOIN input_scans i ON i.scan_id=c.scan_id WHERE cache_key=?', (cache_key,)).fetchone()
         if row:
@@ -593,6 +655,7 @@ class SQLiteScanStore:
                 raise StateError() from None
         return None
 
+    @_bounded_sql
     def record_result(self, result, *, generation, cache_key=None, scope='', work=None, material_observations=(), materials_checked=False, materials_complete=False):
         if type(result) is not m.ScanResult:
             raise StateError()
@@ -611,15 +674,8 @@ class SQLiteScanStore:
                 if complete and result.identity.cache_eligible and cache_key:
                     self.conn.execute('INSERT OR REPLACE INTO scan_cache VALUES(?,?)', (cache_key, scan_id))
                 if result.source.kind is m.SourceKind.FILESYSTEM:
-                    states = {(key, row[0]): json.loads(row[1]) for row in self.conn.execute('SELECT finding_id,payload FROM finding_state WHERE input_key=?', (key,))}
                     comparable = previous[1:] == (result.identity.policy_id, result.identity.runtime_id)
-                    _transition(states, key, result, comparable)
-                    for (_, finding_id), row in states.items():
-                        self.conn.execute('INSERT OR REPLACE INTO finding_state VALUES(?,?,?,?,?,?)', (key, finding_id, row['state'], row['rule'], result.source.path, json.dumps(row, separators=(',', ':'))))
-                        if row['state'] in {'active', 'unknown'}:
-                            self.conn.execute('INSERT OR REPLACE INTO finding_current VALUES(?,?,?)', (key, finding_id, json.dumps(row, separators=(',', ':'))))
-                        else:
-                            self.conn.execute('DELETE FROM finding_current WHERE input_key=? AND finding_id=?', (key, finding_id))
+                    self._transition_sql(key, result, complete=complete, comparable=comparable)
                     self._record_location(result)
                 if materials_checked and result.source.kind is m.SourceKind.FILESYSTEM:
                     self._record_materials(result, material_observations, complete=materials_complete)
@@ -631,6 +687,29 @@ class SQLiteScanStore:
                 raise
             raise StateError() from None
 
+    def _transition_sql(self, key, result, *, complete, comparable):
+        """Update active evidence in SQL; never load resolved history into Python."""
+        self.conn.execute('CREATE TEMP TABLE IF NOT EXISTS new_evidence(id TEXT PRIMARY KEY)')
+        self.conn.execute('DELETE FROM new_evidence')
+        self.conn.executemany('INSERT OR IGNORE INTO new_evidence VALUES(?)', ((finding.id,) for finding in result.findings))
+        condition = "? AND json_extract(payload,'$.policy_id')=? AND json_extract(payload,'$.runtime_id')=?"
+        args = (bool(complete and comparable), result.identity.policy_id, result.identity.runtime_id)
+        state = "CASE WHEN " + condition + " THEN 'resolved' ELSE 'unknown' END"
+        reason = "CASE WHEN " + condition + " THEN 'complete-content-scan' ELSE ? END"
+        statement = "UPDATE finding_state SET state=" + state + ",payload=json_set(payload,'$.state'," + state + ",'$.resolved_at',CASE WHEN " + condition + " THEN ? ELSE NULL END,'$.state_reason'," + reason + ") WHERE input_key=? AND state IN ('active','unknown') AND NOT EXISTS(SELECT 1 FROM new_evidence WHERE id=finding_state.finding_id)"
+        self.conn.execute(statement, (*args, *args, *args, result.observed_at.isoformat(), *args, 'policy-obsolete' if complete else 'incomplete-scan', key))
+        self.conn.execute("DELETE FROM finding_current WHERE input_key=? AND NOT EXISTS(SELECT 1 FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id AND s.state IN ('active','unknown'))", (key,))
+        self.conn.execute('UPDATE finding_current SET payload=(SELECT s.payload FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id) WHERE input_key=?', (key,))
+        for finding in result.findings:
+            row = _query_row(finding, result)
+            row.update(state='active' if complete else 'unknown', state_reason='verified-present' if complete else 'partial-observation')
+            previous = self.conn.execute("SELECT json_extract(payload,'$.first_seen') FROM finding_state WHERE input_key=? AND finding_id=?", (key, finding.id)).fetchone()
+            if previous:
+                row['first_seen'] = previous[0]
+            payload = json.dumps(row, separators=(',', ':'))
+            self.conn.execute('INSERT INTO finding_state VALUES(?,?,?,?,?,?) ON CONFLICT(input_key,finding_id) DO UPDATE SET state=excluded.state,rule=excluded.rule,path=excluded.path,payload=excluded.payload', (key, finding.id, row['state'], finding.rule, result.source.path, payload))
+            self.conn.execute('INSERT INTO finding_current VALUES(?,?,?) ON CONFLICT(input_key,finding_id) DO UPDATE SET payload=excluded.payload', (key, finding.id, payload))
+
     def _record_location(self, result):
         from . import policies, catalog
         source = result.source
@@ -641,15 +720,17 @@ class SQLiteScanStore:
         # A failed/missing acquisition does not prove remediation or erase a
         # previous location. Absence confirmation is an explicit separate action.
 
-    def record_report(self, report):
+    @_bounded_sql
+    def record_report(self, report, *, repository=None):
         repositories = {r.source.repository for r in report.results if r.source.repository}
-        repository = next(iter(repositories)) if len(repositories) == 1 else None
+        repository = repository if repository is not None else next(iter(repositories)) if len(repositories) == 1 else None
         try:
             with self.conn:
                 self.conn.execute('INSERT OR REPLACE INTO scan_runs VALUES(?,?,?,?,?)', (report.run_id, repository, report.finished_at.isoformat(), report.policy_id, report.to_json()))
         except Exception:
             raise StateError() from None
 
+    @_bounded_sql
     def latest_report(self, repository=None):
         row = self.conn.execute('SELECT payload FROM scan_runs ' + ('WHERE repository=? ' if repository else '') + 'ORDER BY finished_at DESC,rowid DESC LIMIT 1', (repository,) if repository else ()).fetchone()
         try:
@@ -657,6 +738,7 @@ class SQLiteScanStore:
         except Exception:
             raise StateError() from None
 
+    @_bounded_sql
     def query_findings_page(self, *, state='current', profile=None, limit=1000, cursor=None):
         fingerprint, position = _query_position(state, profile, limit, cursor)
         if state == 'current':
@@ -669,6 +751,7 @@ class SQLiteScanStore:
             next_cursor = _query_cursor(fingerprint, selected[limit - 1][0]) if len(selected) > limit else None
         return FindingPage(_filter_page(rows, profile, self.config), next_cursor)
 
+    @_bounded_sql
     def query_findings(self, *, state='current', profile=None):
         """Compatibility wrapper returning the first bounded page only."""
         return self.query_findings_page(state=state, profile=profile).rows
@@ -681,9 +764,11 @@ class SQLiteScanStore:
         row = self.conn.execute('SELECT generation,owner,lease_until FROM audit_cycles WHERE scope=?', (lease.scope,)).fetchone()
         return bool(row and row[0] == lease.generation and row[1] == lease.owner and row[2] > time.time())
 
+    @_bounded_sql
     def lease_valid(self, lease):
         return self._lease_valid(lease)
 
+    @_bounded_sql
     def acquire_cycle(self, scope, root, *, lease_seconds):
         import time
         try:
@@ -706,6 +791,7 @@ class SQLiteScanStore:
             self.conn.rollback()
             raise StateError() from None
 
+    @_bounded_sql
     def enqueue_work(self, lease, entries, *, refresh=False):
         entries = tuple(entries)
         if len(entries) > 1000:
@@ -715,6 +801,7 @@ class SQLiteScanStore:
                 raise StateError()
             self.conn.executemany('INSERT INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,?) ON CONFLICT(scope,generation,path,kind) DO UPDATE SET done=CASE WHEN ? THEN 0 ELSE done END,attempts=CASE WHEN ? THEN 0 ELSE attempts END,failed=CASE WHEN ? THEN 0 ELSE failed END,claimed=CASE WHEN ? THEN NULL ELSE claimed END', ((lease.scope, lease.generation, path, kind, priority, refresh, refresh, refresh, refresh) for path, kind, priority in entries))
 
+    @_bounded_sql
     def claim_work(self, lease):
         try:
             self.conn.execute('BEGIN IMMEDIATE')
@@ -729,6 +816,7 @@ class SQLiteScanStore:
             self.conn.rollback()
             raise StateError() from None
 
+    @_bounded_sql
     def finish_directory(self, claim, *, success):
         with self.conn:
             if not self._lease_valid(claim.lease):
@@ -741,11 +829,13 @@ class SQLiteScanStore:
         complete = result.coverage is not m.CoverageState.INCOMPLETE
         self.conn.execute('UPDATE audit_work SET done=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (complete, not complete, not complete, work.lease.scope, work.lease.generation, work.path, work.kind, work.lease.owner))
 
+    @_bounded_sql
     def cycle_status(self, lease):
         rows = self.conn.execute('SELECT kind,count(*),sum(failed) FROM audit_work WHERE scope=? AND generation=? AND done=0 GROUP BY kind', (lease.scope, lease.generation)).fetchall()
         counts = {kind: count for kind, count, _ in rows}
         return {'complete': not rows, 'pending_files': counts.get('file', 0), 'pending_directories': counts.get('directory', 0), 'failed': sum(failed for _, _, failed in rows), 'cycle_id': str(lease.generation)}
 
+    @_bounded_sql
     def release_cycle(self, lease):
         with self.conn:
             if not self._lease_valid(lease):
@@ -754,6 +844,7 @@ class SQLiteScanStore:
             self.conn.execute('UPDATE audit_cycles SET completed=?,failed=?,owner=NULL,lease_until=0 WHERE scope=? AND generation=? AND owner=?', (datetime.now(timezone.utc).isoformat() if status['complete'] else None, status['failed'] > 0, lease.scope, lease.generation, lease.owner))
             self.conn.execute('UPDATE audit_work SET claimed=NULL WHERE scope=? AND generation=?', (lease.scope, lease.generation))
 
+    @_bounded_sql
     def invalidate_scope(self, root, *, reason='source-unavailable'):
         if reason not in {'source-unavailable', 'source-event', 'incomplete-scan'}:
             raise StateError()
@@ -768,6 +859,7 @@ class SQLiteScanStore:
                     self.conn.execute('UPDATE finding_state SET state=?,payload=? WHERE input_key=? AND finding_id=?', ('unknown', json.dumps(row, separators=(',', ':')), key, identity))
                     self.conn.execute('UPDATE finding_current SET payload=? WHERE input_key=? AND finding_id=?', (json.dumps(row, separators=(',', ':')), key, identity))
 
+    @_bounded_sql
     def material_snapshot(self, *, max_bytes=1_000_000, max_sources=100):
         from .catalog import snapshot_materials, MaterialSnapshot
         import os
@@ -803,12 +895,14 @@ class SQLiteScanStore:
         for item in observations:
             self.conn.execute('INSERT INTO material_locations VALUES(?,?,?,?,?,?,1) ON CONFLICT(host,name,path) DO UPDATE SET fingerprint=excluded.fingerprint,last_seen=excluded.last_seen,present=1', (catalog.HOST, item.name, path, item.fingerprint, when, when))
 
+    @_bounded_sql
     def record_metadata(self, path, size):
         if type(size) is not int or size < 0:
             raise StateError()
         from . import catalog
         catalog.metadata_only(self.conn, path, size, self.config)
 
+    @_bounded_sql
     def record_event(self, path, kind, *, old_path=None, when=None):
         if kind not in {'changed', 'created', 'deleted', 'renamed'}:
             raise StateError()

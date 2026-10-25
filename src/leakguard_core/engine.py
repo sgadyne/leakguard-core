@@ -351,8 +351,10 @@ def git_hook(kind, args):
         report = service.scan_git(repo, request=request, limits=m.ScanLimits(120, 1000, max_file_bytes=CONFIG['max_file_bytes']))
         print(presentation.render(report), file=sys.stderr)
         if report.decision.verdict is m.DecisionVerdict.INCOMPLETE:
+            print('LeakGuard could not complete this Git scan; Git operation blocked.', file=sys.stderr)
             return 2
         if report.decision.verdict is m.DecisionVerdict.BLOCK:
+            print('LeakGuard blocked this Git operation; values remain redacted.', file=sys.stderr)
             return 1
     except Exception:
         print('LeakGuard could not complete the scan (scan-failed); Git operation blocked.', file=sys.stderr)
@@ -470,7 +472,7 @@ class ScanService:
     def scan_git(self, repo, *, request, limits, cancel=None):
         from . import git_scanning, models as m
         session = git_scanning.GitInputs(pathlib.Path(repo), request, limits=limits, cancel=cancel)
-        return self._run(session, policy=m.ScanPolicy.git(), limits=limits, use_cache=False, cancel=cancel, enumeration=session.status, final_check=session.valid)
+        return self._run(session, policy=m.ScanPolicy.git(), limits=limits, use_cache=False, cancel=cancel, enumeration=session.status, final_check=session.valid, repository=str(session.repo))
 
     def audit(self, scope, *, limits, use_cache=True, cancel=None):
         from .settings import ConfigurationError
@@ -490,18 +492,35 @@ class ScanService:
         claims = {}
         deadline = time.monotonic() + limits.deadline_seconds
         enumerated = 0
+        def failure(code, source=None):
+            try:
+                return self._run((), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=False, cancel=cancel, enumeration=lambda: {'complete': False, 'issues': (m.CoverageIssue(code, source, required=True),)}, _deadline=deadline)
+            finally:
+                if hasattr(self.store, 'set_deadline'):
+                    try:
+                        self.store.set_deadline(None)
+                    except Exception:
+                        pass
         required_methods = ('acquire_cycle', 'claim_work', 'enqueue_work', 'finish_directory', 'cycle_status', 'lease_valid', 'release_cycle', 'invalidate_scope', 'record_event')
         if any(not hasattr(self.store, name) for name in required_methods):
-            return self._run((), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=False, cancel=cancel, enumeration=lambda: {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)})
+            return failure(m.ErrorCode.STATE_FAILED)
+        if hasattr(self.store, 'set_deadline'):
+            try:
+                self.store.set_deadline(deadline)
+            except Exception:
+                pass
         if root is not None and not root.is_dir():
-            self.store.invalidate_scope(root)
-            return self._run((), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=False, cancel=cancel, enumeration=lambda: {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, m.SourceRef(m.SourceKind.FILESYSTEM, str(root)), required=True),)})
+            try:
+                self.store.invalidate_scope(root)
+            except Exception:
+                pass
+            return failure(m.ErrorCode.SOURCE_UNAVAILABLE, m.SourceRef(m.SourceKind.FILESYSTEM, str(root)))
         try:
             lease = self.store.acquire_cycle(scope, root, lease_seconds=limits.deadline_seconds + 30)
         except Exception:
             lease = None
         if lease is None:
-            return self._run((), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=False, cancel=cancel, enumeration=lambda: {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)})
+            return failure(m.ErrorCode.STATE_FAILED)
         try:
             if ingest:
                 issues.extend(self._ingest_queue(lease))
@@ -559,9 +578,19 @@ class ScanService:
                 if metadata.get('failed'):
                     issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
                 return {**metadata, 'complete': metadata['complete'] and not any(issue.required for issue in issues), 'issues': tuple(issues)}
-            return self._run(work_inputs(), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=use_cache, cancel=cancel, enumeration=status, final_check=lambda: self.store.lease_valid(lease), work_claims=claims)
+            return self._run(work_inputs(), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=use_cache, cancel=cancel, enumeration=status, final_check=lambda: self.store.lease_valid(lease), work_claims=claims, _deadline=deadline)
+        except Exception:
+            return failure(m.ErrorCode.STATE_FAILED)
         finally:
-            self.store.release_cycle(lease)
+            try:
+                self.store.release_cycle(lease)
+            except Exception:
+                pass
+            if hasattr(self.store, 'set_deadline'):
+                try:
+                    self.store.set_deadline(None)
+                except Exception:
+                    pass
 
     def _ingest_queue(self, lease):
         from . import models as m
@@ -624,7 +653,26 @@ class ScanService:
             issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
         return issues
 
-    def _run(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None):
+    def _run(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None, _deadline=None, repository=None):
+        from .scan_store import StateError
+        if self._closed:
+            raise StateError('state-closed')
+        deadline = _deadline if _deadline is not None else time.monotonic() + limits.deadline_seconds
+        if hasattr(self.store, 'set_deadline'):
+            try:
+                self.store.set_deadline(deadline)
+            except Exception:
+                pass  # The bounded run will publish a sanitized state issue.
+        try:
+            return self._run_inner(inputs, policy=policy, limits=limits, use_cache=use_cache, cancel=cancel, enumeration=enumeration, final_check=final_check, work_claims=work_claims, _deadline=deadline, repository=repository)
+        finally:
+            if _deadline is None and hasattr(self.store, 'set_deadline'):
+                try:
+                    self.store.set_deadline(None)
+                except Exception:
+                    pass
+
+    def _run_inner(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None, _deadline=None, repository=None):
         from dataclasses import replace
         from . import models as m, scan_policy
         from .sources import SnapshotInput, acquire_file, acquire_bytes, AcquisitionError
@@ -634,7 +682,7 @@ class ScanService:
         policy = scan_policy.effective_policy(policy, self.config)
         policy_id = scan_policy.policy_identity(config=self.config, policy=policy, limits=limits)
         started = dt.datetime.now(dt.timezone.utc)
-        deadline = time.monotonic() + limits.deadline_seconds
+        deadline = _deadline
         results = []
         reservations = []
         material_results = []
@@ -718,8 +766,16 @@ class ScanService:
             if not enumeration_complete:
                 break
         if hasattr(iterator, 'close'):
-            iterator.close()
-        if final_check is not None and not final_check():
+            try:
+                iterator.close()
+            except Exception:
+                enumeration_complete = False
+                run_issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
+        try:
+            final_valid = final_check is None or final_check()
+        except Exception:
+            final_valid = False
+        if not final_valid:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, required=True))
             results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, r.source, required=True),)) for r in results]
@@ -728,7 +784,11 @@ class ScanService:
             enumeration_complete = False
             run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
             results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
-        if materials is not None and not materials.valid():
+        try:
+            materials_valid = materials is None or materials.valid()
+        except Exception:
+            materials_valid = False
+        if not materials_valid:
             results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, r.source, required=True),)) for r in results]
         for index, validate_snapshot in enumerate(snapshots):
             if validate_snapshot is not None and (time.monotonic() >= deadline or not validate_snapshot()):
@@ -754,7 +814,10 @@ class ScanService:
         coverage, decision = scan_policy.evaluate(tuple(results), policy=policy, policy_id=policy_id, enumeration_complete=enumeration_complete, issues=tuple(run_issues), pending_files=metadata.get('pending_files'), pending_directories=metadata.get('pending_directories'), cycle_id=metadata.get('cycle_id'))
         report = m.ScanReport(1, uuid.uuid4().hex, started, dt.datetime.now(dt.timezone.utc), policy_id, tuple(results), coverage, decision, tuple(run_issues))
         try:
-            self.store.record_report(report)
+            if repository is None:
+                self.store.record_report(report)
+            else:
+                self.store.record_report(report, repository=repository)
         except Exception:
             issue = m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True)
             coverage, decision = scan_policy.evaluate(report.results, policy=policy, policy_id=policy_id, enumeration_complete=False, issues=report.issues + (issue,), pending_files=coverage.pending_files, pending_directories=coverage.pending_directories, cycle_id=coverage.cycle_id)

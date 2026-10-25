@@ -19,7 +19,7 @@ class RequiredDocumentTests(unittest.TestCase):
             (repo / 'broken.docx').write_bytes(b'synthetic document')
             subprocess.run(['git', 'add', 'broken.docx'], cwd=repo, check=True)
             real_git = engine.git
-            with patch.object(engine, 'STATE', root / 'state'), patch.object(engine, 'git', side_effect=lambda *args, **kwargs: real_git(*args, **({'cwd': repo} | kwargs))), patch.object(engine, 'existing_hook', return_value=0), patch('sys.stderr', new_callable=io.StringIO):
+            with patch.object(engine, 'STATE', root / 'state'), patch.object(engine, 'git', side_effect=lambda *args, **kwargs: real_git(*args, **({'cwd': repo} | kwargs))), patch.object(engine, 'existing_hook', return_value=0), patch.object(engine.presentation, 'render', return_value='typed incomplete report'), patch('sys.stderr', new_callable=io.StringIO):
                 self.assertEqual(engine.git_hook('pre-commit', []), 2)
 
 
@@ -97,3 +97,23 @@ class GitSnapshotTests(unittest.TestCase):
             self.assertTrue(any(issue.code is m.ErrorCode.INPUT_CHANGED for issue in report.issues))
         finally:
             service.close()
+
+
+class EmptyGitReportTests(unittest.TestCase):
+    setUp = GitSnapshotTests.setUp
+    tearDown = GitSnapshotTests.tearDown
+    git = GitSnapshotTests.git
+    def test_empty_git_report_is_latest_for_the_explicit_repository(self):
+        from leakguard_core import models as m
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-empty-report-') as folder:
+                store = store_type(folder) if store_type is SQLiteScanStore else store_type()
+                service = engine.ScanService({'gitleaks_executable': str(engine.EXE)}, store=store)
+                try:
+                    report = service.scan_git(self.repo, request=m.GitRequest(m.GitRequestKind.INDEX), limits=m.ScanLimits(30, 10))
+                    self.assertEqual(report.results, ())
+                    self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW)
+                    self.assertEqual(store.latest_report(str(self.repo.resolve())).run_id, report.run_id)
+                finally:
+                    service.close(); store.close()
