@@ -91,6 +91,33 @@ print(json.dumps({"schema_version": 1, "findings": [
             self.assertEqual(error.exception.code, "detector-output-limit")
             self.assertNotIn(marker, str(error.exception))
 
+    def test_finding_count_is_checked_before_individual_rows(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-script-count-") as temporary:
+            script = self.write_script(Path(temporary), '''
+import json
+print(json.dumps({"schema_version": 1, "findings": [None, None]}))
+''')
+            detector = self.make_detector(script)
+            limits = models.ScanLimits(5, 1, max_findings=1)
+            with self.assertRaises(PluginError) as error:
+                tuple(plugins.detect(
+                    [detector], "fixture", "fixture.txt", "text", timeout=5, limits=limits,
+                ))
+        self.assertEqual(error.exception.code, "detector-output-limit")
+
+    def test_script_protocol_rejects_nonfinite_json_constants(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-script-nonfinite-") as temporary:
+            for constant in ("NaN", "Infinity", "-Infinity"):
+                with self.subTest(constant=constant):
+                    script = self.write_script(Path(temporary), f'''
+print('{{"schema_version":1,"findings":[{{"rule":"firm-demo-marker","line":{constant},"severity":"review"}}]}}')
+''')
+                    with self.assertRaises(PluginError) as error:
+                        tuple(plugins.detect(
+                            [self.make_detector(script)], "FIRM-DEMO-MARKER", "fixture.txt", "text", timeout=5,
+                        ))
+                    self.assertEqual(error.exception.code, "detector-output-invalid")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

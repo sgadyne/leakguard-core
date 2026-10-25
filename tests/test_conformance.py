@@ -7,10 +7,12 @@ import json
 import os
 import pathlib
 import sys
+import subprocess
 import tempfile
 import time
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
@@ -220,6 +222,38 @@ class ExtensionConformanceModelTests(unittest.TestCase):
             ExtractorCase('sample', b'fixture', 'sample.docx', 'office-word', 'extracted',
                           expected_issues=('SyntheticOnly~InputLabel',))
 
+    def test_invalid_options_and_empty_cases_are_setup_failures(self):
+        case = DetectorCase('valid-case', 'fixture', 'fixture.txt', 'text', 'text')
+        invalid_inputs = (
+            check_detector('fixture_detector', [], (case,)),
+            check_detector('fixture_detector', {'number': float('nan')}, (case,)),
+            check_detector('fixture_detector', {}, ()),
+            check_detector('fixture_detector', {}, 'not-a-case-sequence'),
+        )
+        for report in invalid_inputs:
+            with self.subTest(report=report.to_json()):
+                self.assertEqual(_exit_status(report), 2)
+                self.assertEqual(report.issues[0].code, ConformanceCode.CASE_INVALID)
+
+    def test_component_ids_match_the_sdk_eighty_character_limit(self):
+        component_id = 'p' * 80
+        report = ConformanceReport(component_id, ConformanceKind.DETECTOR, 0, 0, 0, 0)
+        self.assertEqual(report.component_id, component_id)
+        with self.assertRaises(ValueError):
+            ConformanceReport(component_id + 'p', ConformanceKind.DETECTOR, 0, 0, 0, 0)
+
+        source = f'''from leakguard_core.plugins import PluginManifest, RuleSpec
+API_VERSION=2
+MANIFEST=PluginManifest(id="{component_id}", implementation_version="1", kind="detector", rules=(RuleSpec("fixture-rule", "review"),))
+class Detector:
+ def detect(self,text,context): return []
+def create_plugin(options): return Detector()
+'''
+        case = DetectorCase('long-id-case', 'fixture', 'fixture.txt', 'text', 'text')
+        result = self.run_detector_fixture(source, (case,))
+        self.assertTrue(result.passed, result.to_json())
+        self.assertEqual(result.component_id, component_id)
+
     def test_case_repr_hides_detector_text_and_extractor_bytes(self):
         marker = 'SyntheticOnly~repr7Q3v'
         detector = DetectorCase('private-case', marker, 'fixture.txt', 'text', 'text')
@@ -262,6 +296,31 @@ class ExtensionConformanceModelTests(unittest.TestCase):
                 self.assertFalse(report.passed)
                 self.assertEqual(report.failed_cases, 1)
                 self.assertNotIn('SyntheticOnly~', report.to_json())
+
+    def test_extractor_response_count_is_checked_before_part_validation(self):
+        from leakguard_core import plugins
+        manifest = plugins.PluginManifest(
+            id='fixture-count-extractor', implementation_version='1', kind='extractor',
+            formats=('fixture-format',), part_kinds=('note',),
+        )
+        loaded = plugins.LoadedPlugin('fixture-module', {}, 2, manifest, True)
+        malformed_parts = {
+            'parts': [['foreign-1', 'first'], ['foreign-2', 'second']],
+            'disposition': 'extracted', 'issues': [],
+        }
+        with patch('leakguard_core.plugins._request', return_value=malformed_parts):
+            with self.assertRaises(plugins.PluginError) as error:
+                plugins.extract_component(
+                    loaded, b'fixture', 'fixture.note', format_id='fixture-format',
+                    limits=ExtractionLimits(max_parts=1),
+                )
+        self.assertEqual(error.exception.code, 'extract-part-limit')
+
+    def test_plugin_protocol_json_rejects_nonfinite_constants(self):
+        from leakguard_core.plugins import _loads
+        for constant in ('NaN', 'Infinity', '-Infinity'):
+            with self.subTest(constant=constant), self.assertRaises(ValueError):
+                _loads(('{{"findings":[],"extra":' + constant + '}}').encode())
 
     def test_extractor_exception_and_nontext_dispositions_have_closed_results(self):
         source = '''from leakguard_core.extraction import Extraction\nfrom leakguard_core.plugins import PluginManifest\nAPI_VERSION=2\nMANIFEST=PluginManifest(id="fixture-note", implementation_version="1", kind="extractor", formats=("fixture-format",), part_kinds=("note",))\nclass Extractor:\n def extract(self,data,context):\n  if data == b"boom": raise RuntimeError("SyntheticOnly~ExtractorFailure")\n  if data == b"encrypted": return Extraction("encrypted", ())\n  return Extraction("unsupported", ())\ndef create_plugin(options): return Extractor()\n'''
@@ -340,6 +399,49 @@ class ExtensionConformanceModelTests(unittest.TestCase):
                 with self.assertRaises(_CliSetupError):
                     _read_json(str(path), 5)
 
+    def test_cli_empty_cases_are_a_setup_failure(self):
+        with tempfile.TemporaryDirectory(prefix="leakguard-conformance-empty-") as temporary:
+            path = pathlib.Path(temporary) / "cases.json"
+            path.write_text('{"cases":[]}', encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                status = conformance_main([
+                    "--kind", "detector", "--module", "fixture_plugin", "--cases", str(path),
+                ])
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(output.getvalue())["issues"][0]["code"], "case-invalid")
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO admission is exercised on POSIX')
+    def test_cli_fifo_case_path_fails_promptly_with_one_safe_report(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-conformance-fifo-') as temporary:
+            fifo = pathlib.Path(temporary) / 'cases.fifo'
+            os.mkfifo(fifo)
+            process = subprocess.run(
+                [sys.executable, '-m', 'leakguard_core.conformance', '--kind', 'detector',
+                 '--module', 'fixture_plugin', '--cases', str(fifo)],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+        self.assertEqual(process.returncode, 2)
+        self.assertEqual(len(process.stdout.splitlines()), 1)
+        self.assertEqual(json.loads(process.stdout)['issues'][0]['code'], 'setup-failed')
+        self.assertEqual(process.stderr, '')
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO configuration admission is exercised on POSIX')
+    def test_config_fifo_path_fails_promptly_with_fixed_error(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-config-fifo-') as temporary:
+            fifo = pathlib.Path(temporary) / 'config.fifo'
+            os.mkfifo(fifo)
+            process = subprocess.run(
+                [sys.executable, '-c',
+                 'import sys\nfrom leakguard_core.settings import read_config, ConfigurationError\n'
+                 'try:\n read_config(sys.argv[1])\n print("accepted")\n'
+                 'except ConfigurationError:\n print("configuration-invalid")\n', str(fifo)],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stdout, 'configuration-invalid\n')
+        self.assertEqual(process.stderr, '')
+
     def test_component_contract_failure_is_one_while_dependency_absence_is_two(self):
         from leakguard_core import plugins
         case = DetectorCase("component-case", "fixture", "fixture.txt", "text", "text")
@@ -411,6 +513,22 @@ class ExtensionConformanceModelTests(unittest.TestCase):
         self.assertEqual((report.total_cases, report.passed_cases, report.failed_cases), (2, 2, 0))
         self.assertTrue(report.passed)
 
+    def test_v2_detector_response_count_is_checked_before_rows_are_validated(self):
+        from leakguard_core import plugins
+        manifest = plugins.PluginManifest(
+            id='fixture-count-check', implementation_version='1', kind='detector',
+            rules=(plugins.RuleSpec('fixture-rule', 'review'),),
+        )
+        loaded = plugins.LoadedPlugin('fixture-module', {}, 2, manifest, False)
+        malformed_rows = {'findings': [{}, {}]}
+        with patch('leakguard_core.plugins._request', return_value=malformed_rows):
+            with self.assertRaises(plugins.PluginError) as error:
+                tuple(plugins.detect(
+                    [loaded], 'fixture', 'fixture.txt', 'text',
+                    limits=models.ScanLimits(5, 1, max_findings=1),
+                ))
+        self.assertEqual(error.exception.code, 'detector-output-limit')
+
     def test_detector_invalid_output_and_plugin_exception_are_sanitized(self):
         invalid = '''from leakguard_core.plugins import Finding\nAPI_VERSION=1\nclass Detector:\n def detect(self,text,path,part): return [Finding("undeclared-rule",99,"review")]\ndef create_plugin(options): return Detector()\n'''
         case = DetectorCase('bad-output', 'SyntheticOnly~CaseText7x2', 'sample.txt', 'text', 'text')
@@ -452,6 +570,55 @@ class SupervisionConformanceTests(unittest.TestCase):
                     _supervision.run_worker(argv, data, **kwargs)
                 self.assertEqual(caught.exception.code, 'worker-input-invalid')
                 self.assertEqual(str(caught.exception), caught.exception.code)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX resource limits are exercised on native POSIX CI')
+    def test_posix_worker_enforces_real_allocation_bound(self):
+        code = """chunks = []
+try:
+    for _ in range(32):
+        chunks.append(bytearray(8 * 1024 * 1024))
+    print('unbounded')
+except MemoryError:
+    print('bounded')
+"""
+        result = _supervision.run_worker(
+            [sys.executable, '-c', code], b'', timeout=8, max_output_bytes=1024,
+            memory_bytes=64 * 1024 * 1024,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b'bounded\n')
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX launcher behavior is exercised on native POSIX CI')
+    def test_posix_launcher_does_not_use_preexec_and_supports_concurrent_workers(self):
+        original_popen = _supervision.subprocess.Popen
+        with patch.object(_supervision.subprocess, 'Popen', wraps=original_popen) as popen:
+            result = _supervision.run_worker(
+                [sys.executable, '-c', "print('single')"], b'', timeout=5,
+                memory_bytes=256 * 1024 * 1024,
+            )
+        self.assertEqual(result.stdout, b'single\n')
+        self.assertNotIn('preexec_fn', popen.call_args.kwargs)
+
+        def run_one(index):
+            return _supervision.run_worker(
+                [sys.executable, '-c', f"print('worker-{index}')"], b'', timeout=5,
+                memory_bytes=256 * 1024 * 1024,
+            )
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = tuple(executor.map(run_one, range(4)))
+        self.assertEqual([item.stdout for item in results], [b'worker-0\n', b'worker-1\n', b'worker-2\n', b'worker-3\n'])
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX launcher failure mapping is exercised on native POSIX CI')
+    def test_posix_resource_setup_failure_has_a_fixed_code(self):
+        with patch.object(_supervision, '_POSIX_LAUNCH', 'import os; os._exit(126)'):
+            with self.assertRaises(_supervision.WorkerError) as error:
+                _supervision.run_worker(
+                    [sys.executable, '-c', "print('unreachable')"], b'', timeout=5,
+                    memory_bytes=64 * 1024 * 1024,
+                )
+        self.assertEqual(error.exception.code, 'resource-bound-unavailable')
+        self.assertNotIn('unreachable', str(error.exception))
 
     def test_worker_output_limit_does_not_expose_stderr_or_partial_output(self):
         marker = 'SyntheticOnly~WorkerStderr7z9Q'
@@ -543,6 +710,67 @@ class ExtractionConformanceTests(unittest.TestCase):
         self.assertEqual(result.disposition, 'extracted')
         self.assertEqual([part.part_id for part in result.parts], ['office-word-1', 'office-word-2'])
         self.assertEqual([part.text for part in result.parts], ['body text', 'comment text'])
+
+    def test_word_formatting_runs_preserve_contiguous_logical_text(self):
+        document = (
+            '<w:document xmlns:w="urn:word"><w:body><w:p>'
+            '<w:r><w:t>ghp_ABC</w:t></w:r><w:r><w:t>123</w:t></w:r>'
+            '</w:p></w:body></w:document>'
+        )
+        result = extract(self.make_docx([('word/document.xml', document)]), 'split-run.docx', timeout=5)
+        self.assertEqual(result.disposition, 'extracted')
+        self.assertEqual([part.text for part in result.parts], ['ghp_ABC123'])
+
+        slide = (
+            '<p:sld xmlns:p="urn:ppt" xmlns:a="urn:drawing"><p:cSld><p:spTree>'
+            '<p:sp><p:txBody><a:p><a:r><a:t>ghp_ABC</a:t></a:r>'
+            '<a:r><a:t>123</a:t></a:r></a:p></p:txBody></p:sp>'
+            '</p:spTree></p:cSld></p:sld>'
+        )
+        presentation = extract(self.make_docx([('ppt/slides/slide1.xml', slide)]), 'split-run.pptx', timeout=5)
+        self.assertEqual(presentation.disposition, 'extracted')
+        self.assertEqual([part.text for part in presentation.parts], ['ghp_ABC123'])
+
+        rich_cell = (
+            '<x:worksheet xmlns:x="urn:sheet"><x:sheetData><x:row><x:c><x:is>'
+            '<x:r><x:t>ghp_ABC</x:t></x:r><x:r><x:t>123</x:t></x:r>'
+            '</x:is></x:c></x:row></x:sheetData></x:worksheet>'
+        )
+        spreadsheet = extract(self.make_docx([('xl/worksheets/sheet1.xml', rich_cell)]), 'rich-cell.xlsx', timeout=5)
+        self.assertEqual(spreadsheet.disposition, 'extracted')
+        self.assertEqual([part.text for part in spreadsheet.parts], ['ghp_ABC123'])
+
+    def test_word_paragraph_and_sheet_cell_boundaries_do_not_join_text(self):
+        document = (
+            '<w:document xmlns:w="urn:word"><w:body>'
+            '<w:p><w:r><w:t>ghp_</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t>ABC123</w:t></w:r></w:p>'
+            '</w:body></w:document>'
+        )
+        word = extract(self.make_docx([('word/document.xml', document)]), 'paragraphs.docx', timeout=5)
+        self.assertEqual(word.disposition, 'extracted')
+        self.assertEqual(word.parts[0].text, 'ghp_\nABC123')
+        self.assertNotIn('ghp_ABC123', word.parts[0].text)
+
+        across_parts = extract(self.make_docx([
+            ('word/document.xml', '<w:document xmlns:w="urn:word"><w:body><w:p><w:r><w:t>ghp_</w:t></w:r></w:p></w:body></w:document>'),
+            ('word/comments1.xml', '<w:comments xmlns:w="urn:word"><w:comment><w:p><w:r><w:t>ABC123</w:t></w:r></w:p></w:comment></w:comments>'),
+        ]), 'separate-parts.docx', timeout=5)
+        self.assertEqual(across_parts.disposition, 'extracted')
+        self.assertEqual([part.part_id for part in across_parts.parts], ['office-word-1', 'office-word-2'])
+        self.assertEqual([part.text for part in across_parts.parts], ['ghp_', 'ABC123'])
+        self.assertTrue(all('ghp_ABC123' not in part.text for part in across_parts.parts))
+
+        worksheet = (
+            '<x:worksheet xmlns:x="urn:sheet"><x:sheetData><x:row>'
+            '<x:c><x:is><x:t>ghp_</x:t></x:is></x:c>'
+            '<x:c><x:is><x:t>ABC123</x:t></x:is></x:c>'
+            '</x:row></x:sheetData></x:worksheet>'
+        )
+        sheet = extract(self.make_docx([('xl/worksheets/sheet1.xml', worksheet)]), 'cells.xlsx', timeout=5)
+        self.assertEqual(sheet.disposition, 'extracted')
+        self.assertEqual(sheet.parts[0].text, 'ghp_\nABC123')
+        self.assertNotIn('ghp_ABC123', sheet.parts[0].text)
 
     def test_malformed_docx_is_an_explicit_error(self):
         data = self.make_docx([('[Content_Types].xml', '<Types/>')])

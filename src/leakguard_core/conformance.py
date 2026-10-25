@@ -12,13 +12,17 @@ import argparse
 import base64
 import hashlib
 import json
+import math
+import os
 import re
 from pathlib import Path
+import stat
 import sys
 from typing import Mapping, Sequence
 
 
 _TOKEN = re.compile(r"[a-z][a-z0-9-]{0,63}\Z", re.ASCII)
+_COMPONENT_TOKEN = re.compile(r"[a-z][a-z0-9-]{0,79}\Z", re.ASCII)
 _RULE = re.compile(r"[a-z][a-z0-9-]{0,79}\Z", re.ASCII)
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 _MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z", re.ASCII)
@@ -55,6 +59,41 @@ class ConformanceCode(str, Enum):
 def _token(value: str, label: str) -> None:
     if type(value) is not str or not _TOKEN.fullmatch(value):
         raise ValueError(label)
+
+
+def _component_token(value: str) -> None:
+    if type(value) is not str or not _COMPONENT_TOKEN.fullmatch(value):
+        raise ValueError("component-invalid")
+
+
+def _validated_options(options: Mapping) -> dict:
+    """Admit only bounded JSON values before passing options to a worker."""
+    if not isinstance(options, Mapping):
+        raise ValueError("case-invalid")
+    value = dict(options)
+    pending = [(value, 0)]
+    seen = 0
+    while pending:
+        item, depth = pending.pop()
+        seen += 1
+        if seen > 100_000 or depth > 32:
+            raise ValueError("case-invalid")
+        if type(item) is dict:
+            for key, nested in item.items():
+                if type(key) is not str:
+                    raise ValueError("case-invalid")
+                pending.append((nested, depth + 1))
+        elif type(item) is list:
+            pending.extend((nested, depth + 1) for nested in item)
+        elif type(item) is float:
+            if not math.isfinite(item):
+                raise ValueError("case-invalid")
+        elif type(item) not in {str, int, bool, type(None)}:
+            raise ValueError("case-invalid")
+    encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > 1_048_576:
+        raise ValueError("case-invalid")
+    return value
 
 
 @dataclass(frozen=True)
@@ -177,7 +216,7 @@ class ConformanceReport:
     issues: tuple[ConformanceIssue, ...] = ()
 
     def __post_init__(self):
-        _token(self.component_id, "component-invalid")
+        _component_token(self.component_id)
         if type(self.kind) is not ConformanceKind:
             raise TypeError("kind")
         values = (self.total_cases, self.passed_cases, self.failed_cases, self.skipped_cases)
@@ -231,8 +270,7 @@ def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases
     try:
         if type(module) is not str or len(module) > 240 or not _MODULE.fullmatch(module):
             raise ValueError
-        if not isinstance(options, Mapping) or any(type(key) is not str for key in options):
-            raise ValueError
+        normalized_options = _validated_options(options)
         if not isinstance(cases, Sequence) or isinstance(cases, (str, bytes)):
             raise ValueError
         normalized_cases = tuple(cases)
@@ -249,13 +287,13 @@ def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases
         return ConformanceReport(
             component_id="invalid-component", kind=kind, total_cases=0,
             passed_cases=0, failed_cases=0, skipped_cases=0,
-            issues=(ConformanceIssue("setup", ConformanceCode.COMPONENT_INVALID),),
+            issues=(ConformanceIssue("setup", ConformanceCode.CASE_INVALID),),
         )
 
     try:
         from . import plugins
         try:
-            loaded = plugins.load([{"module": module, "options": dict(options)}])
+            loaded = plugins.load([{"module": module, "options": normalized_options}])
         except plugins.PluginError as error:
             count = len(normalized_cases)
             issue = _plugin_issue(error.code, "component-load", None, kind)
@@ -399,14 +437,23 @@ def _object(pairs):
 
 
 def _read_json(path: str, maximum: int):
+    descriptor = None
     try:
-        with Path(path).open("rb") as stream:
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
+            raise ValueError
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
             raw = stream.read(maximum + 1)
         if len(raw) > maximum:
             raise ValueError
         return json.loads(raw, object_pairs_hook=_object, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
     except Exception:
         raise _CliSetupError from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _required_keys(value, keys):
