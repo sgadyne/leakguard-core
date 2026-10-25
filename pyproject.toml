@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leakguard-core"
+version = "0.1.0"
+description = "Offline secret scanning, Git guards, and auditable file inventory with explicit plugins"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{name = "LeakGuard contributors"}]
+dependencies = []
+
+[project.optional-dependencies]
+documents = ["pypdf>=6,<7", "olefile>=0.47,<1"]
+
+[project.scripts]
+leakguard = "leakguard_core.engine:run"
+leakguard-manage = "leakguard_core.manage:main"
+leakguard-install-hooks = "leakguard_core.hooks:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+leakguard_core = ["rules.toml"]

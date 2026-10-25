@@ -1,0 +1,12 @@
+{
+  "audit_scopes": {},
+  "profiles": {"general": {"sources": []}, "companion": {"sources": []}},
+  "scope_aliases": {},
+  "exclude_components": [".git"],
+  "exclude_roots": [],
+  "priority_paths": {},
+  "watch_scopes": {},
+  "plugins": [],
+  "max_file_bytes": 20971520,
+  "scan_timeout_seconds": 45
+}

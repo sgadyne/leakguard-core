@@ -1,0 +1,8 @@
+include LICENSE README.md PLUGIN_API.md CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md RELEASING.md
+recursive-include src *.py *.toml
+recursive-include tests *.py
+recursive-include examples *.py *.json
+recursive-include scripts *.ps1
+recursive-include tools *.py
+recursive-include .github *.yml
+global-exclude __pycache__ *.py[cod]

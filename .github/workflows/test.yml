@@ -1,0 +1,22 @@
+name: Synthetic checks
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e ".[documents]"
+      - run: python tools/install_gitleaks.py .tools
+      - name: Test with isolated runtime state
+        shell: bash
+        run: |
+          export LEAKGUARD_STATE_DIR="$RUNNER_TEMP/leakguard-state"
+          export PATH="$PWD/.tools:$PATH"
+          python -m unittest discover -s tests -v
+          python -m compileall -q src

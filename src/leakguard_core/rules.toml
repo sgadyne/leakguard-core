@@ -1,0 +1,34 @@
+title = "Generic offline credential detection"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "literal-client-secret"
+description = "Literal value assigned to an explicit client-secret field"
+regex = '''(?i)(?:^|[\s{,.])["']?(?:client[_-]?secret|clientsecret)["']?\s*[:=]\s*["']([a-z0-9_~.\-]{20,160})["']'''
+secretGroup = 1
+keywords = ["secret"]
+  [[rules.allowlists]]
+  regexTarget = "secret"
+  regexes = ['''(?i)^(?:your-client-secret|example-client-secret|placeholder-value|test-secret-placeholder)$''']
+
+[[rules]]
+id = "literal-password"
+description = "Quoted literal value assigned to an explicit password field"
+regex = '''(?i)(?:^|[\s{,.])["']?(?:password|passwd)["']?\s*[:=]\s*["']([^"'\r\n]{8,120})["']'''
+secretGroup = 1
+keywords = ["password", "passwd"]
+  [[rules.allowlists]]
+  regexTarget = "secret"
+  regexes = ['''(?i)^(?:\$\{[a-z_][a-z0-9_]*\}|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password)$''']
+
+[[rules]]
+id = "xml-password"
+description = "Literal password in XML application settings"
+regex = '''(?i)\b(?:key|name)\s*=\s*["'](?:[^"'\r\n]{0,40}[_:.])?(?:password|passwd|pwd)["']\s+value\s*=\s*["']([^"'\r\n]{8,120})["']'''
+secretGroup = 1
+keywords = ["password", "passwd", "pwd"]
+  [[rules.allowlists]]
+  regexTarget = "secret"
+  regexes = ['''(?i)^(?:\$\{[a-z_][a-z0-9_]*\}|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password)$''']

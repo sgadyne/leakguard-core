@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.tools/
+.test-state/
+.pytest_cache/
+build/
+dist/
+state/
+config.local.json
+*.sqlite3*
+*.pem
+*.key
