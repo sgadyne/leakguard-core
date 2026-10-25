@@ -455,3 +455,48 @@ class LegacyAdapterTests(unittest.TestCase):
         snapshot = MaterialSnapshot((MaterialReference('private', 'credential', 'first\nsecond\n', 'opaque'),), 'opaque')
         observed = material_observations(snapshot, 'text', 'header\nfirst\nsecond\nfooter')
         self.assertEqual((observed[0].line, observed[0].end_line), (2, 3))
+
+
+class FindingPageTests(unittest.TestCase):
+    def test_current_and_history_pages_are_bounded_and_filter_bound(self):
+        from dataclasses import replace
+        from leakguard_core import models as m
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore, StateError
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-page-') as folder:
+                store = store_type(folder) if store_type is SQLiteScanStore else store_type()
+                try:
+                    expected = set()
+                    for number in range(5):
+                        result = StoreLifecycleTests.make_result(self)
+                        source = replace(result.source, path='/synthetic/candidate-' + str(number) + '.txt')
+                        finding = replace(result.findings[0], source=source, id=format(number + 1, '064x'))
+                        result = replace(result, source=source, findings=(finding,))
+                        store.record_result(result, generation=store.reserve(source))
+                        expected.add(finding.id)
+                    for state in ('current', 'history'):
+                        cursor = None
+                        observed = []
+                        pages = 0
+                        while True:
+                            page = store.query_findings_page(state=state, limit=2, cursor=cursor)
+                            self.assertLessEqual(page.page_count, 2)
+                            self.assertEqual(page.has_more, page.next_cursor is not None)
+                            observed.extend(row['id'] for row in page.rows)
+                            pages += 1
+                            if not page.has_more:
+                                break
+                            cursor = page.next_cursor
+                            with self.assertRaises(StateError):
+                                store.query_findings_page(state=state, profile='general', limit=2, cursor=cursor)
+                        self.assertEqual(pages, 3)
+                        self.assertEqual(set(observed), expected)
+                        self.assertEqual(len(observed), len(expected))
+                    for invalid in (True, 0, 10_001):
+                        with self.assertRaises(StateError):
+                            store.query_findings_page(limit=invalid)
+                    with self.assertRaises(StateError) as error:
+                        store.query_findings_page(cursor='SyntheticMarkerNotACursor')
+                    self.assertNotIn('SyntheticMarkerNotACursor', str(error.exception))
+                finally:
+                    store.close()

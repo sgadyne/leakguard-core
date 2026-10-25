@@ -54,6 +54,57 @@ class WorkClaim:
     kind: str
 
 
+@dataclass(frozen=True)
+class FindingPage:
+    rows: tuple[dict, ...]
+    next_cursor: str | None
+
+    @property
+    def page_count(self):
+        return len(self.rows)
+
+    @property
+    def has_more(self):
+        return self.next_cursor is not None
+
+
+def _query_position(state, profile, limit, cursor):
+    import base64
+    if state not in {'current', 'history'} or type(limit) is not int or not 1 <= limit <= 10_000 or profile is not None and (type(profile) is not str or not 1 <= len(profile) <= 80):
+        raise StateError('state-query-invalid')
+    fingerprint = hashlib.sha256(json.dumps([state, profile], separators=(',', ':')).encode()).hexdigest()
+    position = ['', ''] if state == 'current' else 0
+    if cursor is not None:
+        try:
+            if type(cursor) is not str or not cursor.startswith('lg1.') or len(cursor) > 1024:
+                raise ValueError()
+            encoded = cursor[4:]
+            payload = json.loads(base64.b64decode(encoded + '=' * (-len(encoded) % 4), altchars=b'-_', validate=True))
+            if type(payload) is not list or len(payload) != 3 or payload[0] != 1 or payload[1] != fingerprint:
+                raise ValueError()
+            position = payload[2]
+            if state == 'current':
+                if type(position) is not list or len(position) != 2 or any(type(x) is not str or not 0 < len(x) <= 256 for x in position):
+                    raise ValueError()
+            elif type(position) is not int or position < 0:
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError):
+            raise StateError('state-query-invalid') from None
+    return fingerprint, position
+
+
+def _query_cursor(fingerprint, position):
+    import base64
+    return 'lg1.' + base64.urlsafe_b64encode(json.dumps([1, fingerprint, position], separators=(',', ':')).encode()).decode().rstrip('=')
+
+
+def _filter_page(rows, profile, config):
+    if profile is None:
+        return tuple(rows)
+    from .policies import profile as select_profile
+    return tuple(row for row in rows if ('git' if row['source']['kind'] in {'git-index', 'git-commit'} else select_profile(row['source']['path'], config)) == profile)
+
+
 @runtime_checkable
 class ScanStore(Protocol):
     def reserve(self, source: m.SourceRef, *, scope: str = '') -> int: ...
@@ -64,6 +115,7 @@ class ScanStore(Protocol):
                       materials_complete: bool = False) -> str: ...
     def record_report(self, report: m.ScanReport) -> None: ...
     def latest_report(self, repository: str | None = None) -> m.ScanReport | None: ...
+    def query_findings_page(self, *, state: str = 'current', profile: str | None = None, limit: int = 1000, cursor: str | None = None) -> FindingPage: ...
     def query_findings(self, *, state: str = 'current', profile: str | None = None) -> tuple[dict, ...]: ...
     def material_snapshot(self, *, max_bytes: int = 1_000_000, max_sources: int = 100): ...
     def acquire_cycle(self, scope: str, root, *, lease_seconds: float) -> WorkLease | None: ...
@@ -89,6 +141,8 @@ class MemoryScanStore:
         self.cache = {}
         self.reports = []
         self.states = {}
+        self._current_order = []
+        self._history = []
         self.current = {}
         self.cycles = {}
         self.work = {}
@@ -115,6 +169,7 @@ class MemoryScanStore:
             raise StateError()
         scan_id = uuid.uuid4().hex
         self.results[scan_id] = result
+        self._history.extend(_query_row(finding, result) for finding in result.findings)
         key = source_key(result.source, scope)
         if self.generations.get(key) != generation or work is not None and not self.lease_valid(work.lease):
             return scan_id
@@ -124,6 +179,16 @@ class MemoryScanStore:
             prior = self.current.get(key)
             comparable = prior is not None and prior.identity.policy_id == result.identity.policy_id and prior.identity.runtime_id == result.identity.runtime_id
             _transition(self.states, key, result, comparable)
+            import bisect
+            for state_key, row in self.states.items():
+                if state_key[0] != key:
+                    continue
+                position = bisect.bisect_left(self._current_order, state_key)
+                present = position < len(self._current_order) and self._current_order[position] == state_key
+                if row['state'] in {'active', 'unknown'} and not present:
+                    self._current_order.insert(position, state_key)
+                elif row['state'] == 'resolved' and present:
+                    self._current_order.pop(position)
             self.current[key] = result
             if result.content:
                 self.locations[result.source.path] = {'size': result.content.size_bytes, 'digest': result.content.digest, 'present': True}
@@ -144,17 +209,23 @@ class MemoryScanStore:
                      if repository is None or any(result.source.repository == repository for result in report.results)), None)
 
     @_synchronized
-    def query_findings(self, *, state='current', profile=None):
-        if state not in {'current', 'history'}:
-            raise ValueError('invalid state')
-        if state == 'history':
-            rows = [_query_row(f, result) for result in self.results.values() for f in result.findings]
+    def query_findings_page(self, *, state='current', profile=None, limit=1000, cursor=None):
+        import bisect
+        fingerprint, position = _query_position(state, profile, limit, cursor)
+        if state == 'current':
+            offset = bisect.bisect_right(self._current_order, tuple(position))
+            keys = self._current_order[offset:offset + limit + 1]
+            rows = [dict(self.states[key]) for key in keys[:limit]]
+            next_cursor = _query_cursor(fingerprint, list(keys[limit - 1])) if len(keys) > limit else None
         else:
-            rows = [dict(row) for row in self.states.values() if row['state'] in {'active', 'unknown'}]
-        if profile:
-            from .policies import profile as select_profile
-            rows = [row for row in rows if select_profile(row['source']['path'], self.config) == profile]
-        return tuple(rows)
+            rows = [dict(row) for row in self._history[position:position + limit]]
+            next_cursor = _query_cursor(fingerprint, position + limit) if position + limit < len(self._history) else None
+        return FindingPage(_filter_page(rows, profile, self.config), next_cursor)
+
+    @_synchronized
+    def query_findings(self, *, state='current', profile=None):
+        """Compatibility wrapper returning the first bounded page only."""
+        return self.query_findings_page(state=state, profile=profile).rows
 
     @_synchronized
     def close(self):
@@ -253,7 +324,7 @@ class MemoryScanStore:
         root = Path(root).absolute()
         for row in self.states.values():
             path = Path(row['source']['path']).absolute()
-            if root == path or root in path.parents:
+            if row['state'] in {'active', 'unknown'} and (root == path or root in path.parents):
                 row.update(state='unknown', resolved_at=None, state_reason=reason)
 
     @_synchronized
@@ -288,7 +359,7 @@ class MemoryScanStore:
         if kind not in {'changed', 'created', 'deleted', 'renamed'}:
             raise StateError()
         for row in self.states.values():
-            if row['source']['path'] in {path, old_path}:
+            if row['state'] in {'active', 'unknown'} and row['source']['path'] in {path, old_path}:
                 row.update(state='unknown', resolved_at=None, state_reason='source-event')
 
 def _source_data(source):
@@ -317,7 +388,7 @@ def _transition(states, key, result, comparable):
     found = {item.id for item in result.findings}
     when = result.observed_at.isoformat()
     for (input_key, evidence), row in list(states.items()):
-        if input_key != key or evidence in found:
+        if input_key != key or evidence in found or row['state'] == 'resolved':
             continue
         row_comparable = row['policy_id'] == result.identity.policy_id and row['runtime_id'] == result.identity.runtime_id
         if complete and comparable and row_comparable:
@@ -396,6 +467,8 @@ CREATE TABLE IF NOT EXISTS scan_runs(run_id TEXT PRIMARY KEY,repository TEXT,fin
 CREATE TABLE IF NOT EXISTS input_scans(scan_id TEXT PRIMARY KEY,input_key TEXT,source_kind TEXT,path TEXT,generation INTEGER,policy_id TEXT,runtime_id TEXT,context_id TEXT,coverage TEXT,observed_at TEXT,payload TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS input_scans_path ON input_scans(path,observed_at);
 CREATE TABLE IF NOT EXISTS scan_findings(scan_id TEXT,finding_id TEXT,payload TEXT NOT NULL,PRIMARY KEY(scan_id,finding_id));
+CREATE TABLE IF NOT EXISTS finding_current(input_key TEXT,finding_id TEXT,payload TEXT NOT NULL,PRIMARY KEY(input_key,finding_id));
+CREATE TABLE IF NOT EXISTS finding_history(id INTEGER PRIMARY KEY AUTOINCREMENT,scan_id TEXT,finding_id TEXT,payload TEXT NOT NULL,UNIQUE(scan_id,finding_id));
 CREATE TABLE IF NOT EXISTS current_inputs(input_key TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0,last_complete_scan_id TEXT,latest_attempt_id TEXT,current_state TEXT,state_reason TEXT,policy_id TEXT,runtime_id TEXT);
 CREATE TABLE IF NOT EXISTS finding_state(input_key TEXT,finding_id TEXT,state TEXT,rule TEXT,path TEXT,payload TEXT NOT NULL,PRIMARY KEY(input_key,finding_id));
 CREATE INDEX IF NOT EXISTS finding_state_query ON finding_state(state,path,rule);
@@ -432,6 +505,7 @@ def open_database(state_dir):
             finally:
                 destination.close()
         conn.execute('BEGIN IMMEDIATE')
+        new_views = not conn.execute("SELECT 1 FROM sqlite_master WHERE name='finding_history'").fetchone()
         # Recheck after obtaining the writer lock: concurrent openers can observe
         # only an old schema or a fully committed new schema.
         version = conn.execute('PRAGMA user_version').fetchone()[0]
@@ -453,6 +527,10 @@ def open_database(state_dir):
         if version < 2:
             _import_legacy_findings(conn)
             conn.execute('DELETE FROM cache')
+        if new_views:
+            conn.execute("INSERT OR IGNORE INTO finding_current SELECT input_key,finding_id,payload FROM finding_state WHERE state IN ('active','unknown')")
+            conn.execute("INSERT OR IGNORE INTO finding_history(scan_id,finding_id,payload) SELECT 'legacy',finding_id,payload FROM finding_state WHERE json_extract(payload,'$.state_reason')='legacy-unverified'")
+            conn.execute("INSERT OR IGNORE INTO finding_history(scan_id,finding_id,payload) SELECT f.scan_id,f.finding_id,json_patch(f.payload,json_object('state','unknown','first_seen',i.observed_at,'last_seen',i.observed_at,'last_verified',CASE i.coverage WHEN 'complete' THEN i.observed_at ELSE NULL END,'resolved_at',NULL,'state_reason','historical-observation','policy_id',i.policy_id,'runtime_id',i.runtime_id)) FROM scan_findings f JOIN input_scans i ON i.scan_id=f.scan_id")
         conn.execute('PRAGMA user_version=2')
         conn.commit()
         conn.execute('PRAGMA journal_mode=WAL')
@@ -526,6 +604,7 @@ class SQLiteScanStore:
                 self.conn.execute('INSERT INTO input_scans VALUES(?,?,?,?,?,?,?,?,?,?,?)', (scan_id, key, result.source.kind.value, result.source.path, generation, result.identity.policy_id, result.identity.runtime_id, result.identity.context_id, result.coverage.value, result.observed_at.isoformat(), _result_json(result)))
                 for finding in result.findings:
                     self.conn.execute('INSERT INTO scan_findings VALUES(?,?,?)', (scan_id, finding.id, json.dumps(_finding_data(finding), separators=(',', ':'))))
+                    self.conn.execute('INSERT INTO finding_history(scan_id,finding_id,payload) VALUES(?,?,?)', (scan_id, finding.id, json.dumps(_query_row(finding, result), separators=(',', ':'))))
                 previous = self.conn.execute('SELECT generation,policy_id,runtime_id FROM current_inputs WHERE input_key=?', (key,)).fetchone()
                 if not previous or previous[0] != generation or work is not None and not self._lease_valid(work.lease):
                     return scan_id
@@ -537,6 +616,10 @@ class SQLiteScanStore:
                     _transition(states, key, result, comparable)
                     for (_, finding_id), row in states.items():
                         self.conn.execute('INSERT OR REPLACE INTO finding_state VALUES(?,?,?,?,?,?)', (key, finding_id, row['state'], row['rule'], result.source.path, json.dumps(row, separators=(',', ':'))))
+                        if row['state'] in {'active', 'unknown'}:
+                            self.conn.execute('INSERT OR REPLACE INTO finding_current VALUES(?,?,?)', (key, finding_id, json.dumps(row, separators=(',', ':'))))
+                        else:
+                            self.conn.execute('DELETE FROM finding_current WHERE input_key=? AND finding_id=?', (key, finding_id))
                     self._record_location(result)
                 if materials_checked and result.source.kind is m.SourceKind.FILESYSTEM:
                     self._record_materials(result, material_observations, complete=materials_complete)
@@ -574,18 +657,21 @@ class SQLiteScanStore:
         except Exception:
             raise StateError() from None
 
-    def query_findings(self, *, state='current', profile=None):
+    def query_findings_page(self, *, state='current', profile=None, limit=1000, cursor=None):
+        fingerprint, position = _query_position(state, profile, limit, cursor)
         if state == 'current':
-            rows = [json.loads(row[0]) for row in self.conn.execute("SELECT payload FROM finding_state WHERE state IN ('active','unknown') ORDER BY path,rule,finding_id")]
-        elif state == 'history':
-            rows = [_query_row(f, r) for (payload,) in self.conn.execute('SELECT payload FROM input_scans ORDER BY observed_at') for r in [_result_from(json.loads(payload))] for f in r.findings]
-            rows.extend(json.loads(row[0]) for row in self.conn.execute("SELECT payload FROM finding_state WHERE json_extract(payload,'$.state_reason')='legacy-unverified'"))
+            selected = self.conn.execute('SELECT input_key,finding_id,payload FROM finding_current WHERE (input_key,finding_id)>(?,?) ORDER BY input_key,finding_id LIMIT ?', (position[0], position[1], limit + 1)).fetchall()
+            rows = [json.loads(row[2]) for row in selected[:limit]]
+            next_cursor = _query_cursor(fingerprint, list(selected[limit - 1][:2])) if len(selected) > limit else None
         else:
-            raise ValueError('invalid state')
-        if profile:
-            from .policies import profile as select_profile
-            rows = [row for row in rows if select_profile(row['source']['path'], self.config) == profile]
-        return tuple(rows)
+            selected = self.conn.execute('SELECT id,payload FROM finding_history WHERE id>? ORDER BY id LIMIT ?', (position, limit + 1)).fetchall()
+            rows = [json.loads(row[1]) for row in selected[:limit]]
+            next_cursor = _query_cursor(fingerprint, selected[limit - 1][0]) if len(selected) > limit else None
+        return FindingPage(_filter_page(rows, profile, self.config), next_cursor)
+
+    def query_findings(self, *, state='current', profile=None):
+        """Compatibility wrapper returning the first bounded page only."""
+        return self.query_findings_page(state=state, profile=profile).rows
 
     def close(self):
         self.conn.close()
@@ -680,6 +766,7 @@ class SQLiteScanStore:
                 if path == root or root in path.parents:
                     row.update(state='unknown', resolved_at=None, state_reason=reason)
                     self.conn.execute('UPDATE finding_state SET state=?,payload=? WHERE input_key=? AND finding_id=?', ('unknown', json.dumps(row, separators=(',', ':')), key, identity))
+                    self.conn.execute('UPDATE finding_current SET payload=? WHERE input_key=? AND finding_id=?', (json.dumps(row, separators=(',', ':')), key, identity))
 
     def material_snapshot(self, *, max_bytes=1_000_000, max_sources=100):
         from .catalog import snapshot_materials, MaterialSnapshot
@@ -728,7 +815,8 @@ class SQLiteScanStore:
         from . import catalog
         catalog.event(self.conn, path, kind, self.config, old_path=old_path, when=when)
         with self.conn:
-            for key, identity, payload in self.conn.execute('SELECT input_key,finding_id,payload FROM finding_state WHERE path=? OR path=?', (path, old_path)).fetchall():
+            for key, identity, payload in self.conn.execute('SELECT input_key,finding_id,payload FROM finding_state WHERE (path=? OR path=?) AND state IN ("active","unknown")', (path, old_path)).fetchall():
                 row = json.loads(payload)
                 row.update(state='unknown', resolved_at=None, state_reason='source-event')
                 self.conn.execute('UPDATE finding_state SET state=?,payload=? WHERE input_key=? AND finding_id=?', ('unknown', json.dumps(row, separators=(',', ':')), key, identity))
+                self.conn.execute('UPDATE finding_current SET payload=? WHERE input_key=? AND finding_id=?', (json.dumps(row, separators=(',', ':')), key, identity))
