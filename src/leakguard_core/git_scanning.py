@@ -21,8 +21,12 @@ def git_output(repo, *args, maximum=16_000_000, timeout=45, check=True):
             'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES')
     environment = worker_environment({key: os.environ[key] for key in keys if key in os.environ})
     environment['GIT_TERMINAL_PROMPT'] = '0'
+    # Scan the objects that will be transmitted, independent of local history
+    # rewriting conveniences and executable index-monitor configuration.
+    environment['GIT_NO_REPLACE_OBJECTS'] = '1'
+    environment['GIT_GRAFT_FILE'] = os.devnull
     try:
-        process = run_worker(['git', *args], b'', cwd=repo, env=environment,
+        process = run_worker(['git', '-c', 'core.fsmonitor=false', *args], b'', cwd=repo, env=environment,
                              max_output_bytes=maximum, memory_bytes=None, timeout=max(0.001, timeout))
         if process.returncode and check:
             raise AcquisitionError('git-range-incomplete')
@@ -72,10 +76,18 @@ class GitInputs:
                         raise AcquisitionError('git-input-invalid')
                     if set(local) == {'0'}:
                         continue
-                    # Validate a commit tip, not an arbitrary object or revision expression.
-                    if self._git('cat-file', '-t', local, maximum=128)[1].strip() != b'commit':
+                    # OIDs are validated before bounded peeling. Annotated tags
+                    # to commits are valid push tips; trees/blobs fail closed.
+                    code, peeled = self._git('rev-parse', '--verify', local + '^{commit}', maximum=128, check=False)
+                    local = peeled.decode('ascii').strip() if not code else ''
+                    if not _oid(local):
                         raise AcquisitionError('git-input-invalid')
-                    available = set(remote) != {'0'} and self._git('cat-file', '-e', remote + '^{commit}', check=False)[0] == 0
+                    available = False
+                    if set(remote) != {'0'}:
+                        code, peeled = self._git('rev-parse', '--verify', remote + '^{commit}', maximum=128, check=False)
+                        if not code:
+                            remote = peeled.decode('ascii').strip()
+                            available = bool(_oid(remote))
                     ancestor = available and self._git('merge-base', '--is-ancestor', remote, local, check=False)[0] == 0
                     args = ['rev-list', '--topo-order', '--reverse', '--max-count=' + str(MAX_COMMITS + 1), local]
                     if ancestor:

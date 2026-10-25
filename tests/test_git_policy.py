@@ -117,3 +117,68 @@ class EmptyGitReportTests(unittest.TestCase):
                     self.assertEqual(store.latest_report(str(self.repo.resolve())).run_id, report.run_id)
                 finally:
                     service.close(); store.close()
+
+
+class OriginalGitObjectTests(unittest.TestCase):
+    setUp = GitSnapshotTests.setUp
+    tearDown = GitSnapshotTests.tearDown
+    git = GitSnapshotTests.git
+
+    def scan_tip(self, tip):
+        from leakguard_core import models as m
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+        try:
+            return service.scan_git(self.repo, request=m.GitRequest(m.GitRequestKind.PUSH, (m.RefUpdate('refs/heads/main', tip, 'refs/heads/main', '0' * 40),)), limits=m.ScanLimits(30, 100))
+        finally:
+            service.close()
+
+    def test_replacement_ref_cannot_hide_original_commit_secret(self):
+        from leakguard_core import models as m
+        (self.repo / 'candidate.txt').write_text('password = "SyntheticOnlyOriginalM7kQ2vR9"\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'synthetic original')
+        original = self.git('rev-parse', 'HEAD').decode().strip()
+        (self.repo / 'candidate.txt').write_text('ordinary text\n')
+        self.git('add', '.')
+        tree = self.git('write-tree').decode().strip()
+        replacement = self.git('commit-tree', tree, '-m', 'synthetic replacement').decode().strip()
+        self.git('replace', original, replacement)
+        # Demonstrate that ordinary local plumbing observes the clean replacement.
+        self.assertEqual(self.git('show', original + ':candidate.txt'), b'ordinary text\n')
+        report = self.scan_tip(original)
+        self.assertEqual(report.decision.verdict, m.DecisionVerdict.BLOCK)
+        self.assertTrue(any(f.rule == 'literal-password' for result in report.results for f in result.findings))
+        self.assertTrue(any(result.source.commit == original for result in report.results))
+
+    def test_local_graft_cannot_hide_intermediate_secret_commit(self):
+        from leakguard_core import models as m
+        (self.repo / 'candidate.txt').write_text('password = "SyntheticOnlyGraftedM7kQ2vR9"\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'synthetic root')
+        original = self.git('rev-parse', 'HEAD').decode().strip()
+        (self.repo / 'candidate.txt').write_text('ordinary text\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'synthetic clean child')
+        tip = self.git('rev-parse', 'HEAD').decode().strip()
+        (self.repo / '.git' / 'info').mkdir(exist_ok=True)
+        (self.repo / '.git' / 'info' / 'grafts').write_text(tip + '\n')
+        self.assertEqual(self.git('rev-list', tip).decode().splitlines(), [tip])
+        report = self.scan_tip(tip)
+        self.assertEqual(report.decision.verdict, m.DecisionVerdict.BLOCK)
+        self.assertTrue(any(result.source.commit == original for result in report.results))
+
+    def test_annotated_tag_peels_to_commit_and_noncommit_tag_fails_closed(self):
+        from leakguard_core import models as m
+        (self.repo / 'candidate.txt').write_text('ordinary text\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'synthetic root')
+        self.git('tag', '-a', 'synthetic-tag', '-m', 'synthetic annotation')
+        tip = self.git('rev-parse', 'synthetic-tag').decode().strip()
+        report = self.scan_tip(tip)
+        self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW)
+        self.assertTrue(report.results)
+        blob = self.git('rev-parse', 'HEAD:candidate.txt').decode().strip()
+        self.git('tag', '-a', 'synthetic-blob-tag', blob, '-m', 'synthetic blob annotation')
+        report = self.scan_tip(self.git('rev-parse', 'synthetic-blob-tag').decode().strip())
+        self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+        self.assertTrue(any(issue.code is m.ErrorCode.GIT_INPUT_INVALID for issue in report.issues))
