@@ -38,29 +38,8 @@ def now():
 
 
 def db():
-    STATE.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(STATE / 'state.sqlite3', timeout=30)
-    conn.execute('PRAGMA journal_mode=WAL')
-    conn.executescript('''
-        CREATE TABLE IF NOT EXISTS cache(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER, status TEXT);
-        CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY, path TEXT, rule TEXT, line INTEGER, part TEXT, severity TEXT, first_seen TEXT, last_seen TEXT);
-        CREATE TABLE IF NOT EXISTS directories(scope TEXT, path TEXT, PRIMARY KEY(scope,path));
-        CREATE TABLE IF NOT EXISTS files(scope TEXT, path TEXT, PRIMARY KEY(scope,path));
-        CREATE TABLE IF NOT EXISTS cycles(scope TEXT PRIMARY KEY, started TEXT, completed TEXT);
-    ''')
-    for table in ['directories', 'files']:
-        columns = {row[1] for row in conn.execute('PRAGMA table_info(' + table + ')')}
-        if 'priority' not in columns:
-            conn.execute('ALTER TABLE ' + table + ' ADD COLUMN priority INTEGER NOT NULL DEFAULT 100')
-    if 'policy' not in {row[1] for row in conn.execute('PRAGMA table_info(cache)')}:
-        conn.execute('ALTER TABLE cache ADD COLUMN policy TEXT')
-    for column, declaration in [('digest', 'TEXT'), ('payload', 'TEXT'), ('executed_at', 'TEXT')]:
-        if column not in {row[1] for row in conn.execute('PRAGMA table_info(cache)')}:
-            conn.execute('ALTER TABLE cache ADD COLUMN ' + column + ' ' + declaration)
-    catalog.initialize(conn)
-    conn.execute('CREATE TABLE IF NOT EXISTS priority_seeds(scope TEXT,path TEXT,cycle TEXT,PRIMARY KEY(scope,path,cycle))')
-    conn.commit()
-    return conn
+    from .scan_store import open_database
+    return open_database(STATE)
 
 
 def excluded(path):

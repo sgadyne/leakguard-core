@@ -1,0 +1,172 @@
+"""Bounded byte acquisition and version-pinned contextual proof readers."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import stat
+
+from . import models as m
+
+
+class AcquisitionError(RuntimeError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def content_identity(data):
+    return m.ContentIdentity('sha256', hashlib.sha256(data).hexdigest(), len(data))
+
+
+def _bounded_file(path, maximum):
+    try:
+        if not stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
+            raise AcquisitionError('input-nonregular')
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        with os.fdopen(os.open(path, flags), 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise AcquisitionError('input-nonregular')
+            if before.st_size > maximum:
+                raise AcquisitionError('input-limit')
+            data = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+        observed = os.stat(path, follow_symlinks=False)
+        if len(data) > maximum:
+            raise AcquisitionError('input-limit')
+        if _signature(before) != _signature(after) or _signature(after) != _signature(observed):
+            raise AcquisitionError('input-changed')
+        return data
+    except AcquisitionError:
+        raise
+    except FileNotFoundError:
+        raise AcquisitionError('input-missing') from None
+    except OSError:
+        raise AcquisitionError('input-unreadable') from None
+
+
+def _signature(value):
+    return value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
+def _reference_names(data):
+    if len(data) > 1_000_000:
+        return ()
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError()
+            value[key] = item
+        return value
+    try:
+        value = json.loads(data.decode('utf-8-sig'), object_pairs_hook=unique)
+        if not isinstance(value, dict):
+            return ()
+        names = set()
+        fingerprints = value.get('source_fingerprints')
+        if isinstance(fingerprints, dict):
+            names.update(fingerprints)
+        for key, item in value.items():
+            if isinstance(item, dict) and isinstance(item.get('function_ast_sha256'), dict):
+                names.add(key)
+        return tuple(sorted(name for name in names if isinstance(name, str)))
+    except (ValueError, UnicodeError, RecursionError):
+        return ()
+
+
+class ProofContext:
+    """A bounded reader memoizes exact sibling versions and missing sentinels."""
+    def __init__(self, reader, *, validator=None):
+        self._reader = reader
+        self._validator = validator
+        self.dependencies = {}
+
+    def read(self, name):
+        reference = PurePosixPath(name.replace('\\', '/'))
+        if reference.is_absolute() or '..' in reference.parts or ':' in str(reference):
+            return None
+        key = str(reference)
+        if key not in self.dependencies:
+            try:
+                data = self._reader(key)
+            except (OSError, AcquisitionError):
+                data = None
+            if data is not None and len(data) > 1_000_000:
+                data = None
+            self.dependencies[key] = data
+        return self.dependencies[key]
+
+    def prepare(self, data, path):
+        if Path(path).suffix.lower() == '.json':
+            for name in _reference_names(data):
+                self.read(name)
+
+    @property
+    def identity(self):
+        values = [(name, hashlib.sha256(data).hexdigest() if data is not None else 'missing')
+                  for name, data in sorted(self.dependencies.items())]
+        return hashlib.sha256(json.dumps(['proof-context-v1', values], separators=(',', ':')).encode()).hexdigest()
+
+    def valid(self):
+        if not self._validator:
+            return True
+        for name, original in self.dependencies.items():
+            try:
+                current = self._validator(name)
+            except (OSError, AcquisitionError):
+                current = None
+            if current != original:
+                return False
+        return True
+
+
+@dataclass(frozen=True)
+class SnapshotInput:
+    source: m.SourceRef
+    data: bytes
+    context: ProofContext
+    revalidate: object = None
+
+    @property
+    def content(self):
+        return content_identity(self.data)
+
+    def valid(self):
+        return self.context.valid() and (self.revalidate is None or self.revalidate())
+
+
+def acquire_file(path: Path, *, max_bytes: int):
+    path = path.absolute()
+    source = m.SourceRef(m.SourceKind.FILESYSTEM, str(path))
+    if path.is_symlink():
+        raise AcquisitionError('input-nonregular')
+    data = _bounded_file(path, max_bytes)
+    root = path.parent.resolve()
+
+    def sibling(name):
+        candidate = path.parent / name
+        if candidate.is_symlink() or not candidate.resolve().is_relative_to(root):
+            return None
+        return _bounded_file(candidate, 1_000_000)
+
+    context = ProofContext(sibling, validator=sibling)
+    context.prepare(data, str(path))
+
+    def valid():
+        try:
+            return _bounded_file(path, max_bytes) == data
+        except AcquisitionError:
+            return False
+
+    return SnapshotInput(source, data, context, valid)
+
+
+def acquire_bytes(data, logical_path, *, max_bytes):
+    if len(data) > max_bytes:
+        raise AcquisitionError('input-limit')
+    # Caller-supplied bytes never receive a filesystem or Git proof capability.
+    return SnapshotInput(m.SourceRef(m.SourceKind.BYTES, logical_path), data, ProofContext(lambda name: None))
