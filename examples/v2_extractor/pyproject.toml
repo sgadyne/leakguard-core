@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leakguard-example-extractor"
+version = "1.0.0"
+description = "Synthetic LeakGuard v2 extractor example"
+requires-python = ">=3.11"
+dependencies = ["leakguard-core>=0.2.0,<0.3.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
