@@ -511,11 +511,24 @@ class ScanService:
         return self._run(inputs, policy=policy, limits=limits, use_cache=use_cache, cancel=cancel)
 
     def scan_paths(self, paths, *, policy, limits, use_cache=True, cancel=None):
+        from itertools import islice
         from . import models as m
+        from .sources import directory_signature, AcquisitionError
         state = {'complete': True, 'issues': _IssueBudget(min(32768, limits.max_report_bytes // 16)), 'pending_files': None, 'pending_directories': 0}
         deadline = time.monotonic() + limits.deadline_seconds
-        pending = [pathlib.Path(path) for path in paths]
+        pending = [pathlib.Path(path) for path in islice(iter(paths), limits.max_directory_entries + 1)]
+        if len(pending) > limits.max_directory_entries:
+            pending.pop()
+            state['complete'] = False
+            state['issues'].append(m.CoverageIssue(m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+        signatures = {}
+        retry = set()
         admitted = 0
+
+        def changed(path, code=m.ErrorCode.INPUT_CHANGED):
+            state['complete'] = False
+            retry.add(path)
+            state['issues'].append(m.CoverageIssue(code, m.SourceRef(m.SourceKind.FILESYSTEM, str(path.absolute())), required=True))
 
         def walk():
             nonlocal admitted
@@ -528,11 +541,13 @@ class ScanService:
                     state['issues'].append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, m.SourceRef(m.SourceKind.FILESYSTEM, str(path.absolute())), omission_id='operator-exclusion'))
                     continue
                 if path.is_dir() and not path.is_symlink():
+                    finished = False
                     try:
+                        before = directory_signature(path)
+                        signatures[path] = before
                         with os.scandir(path) as entries:
                             for entry in entries:
                                 if time.monotonic() >= deadline or admitted >= limits.max_directory_entries or (cancel and cancel()):
-                                    pending.append(path)
                                     state['complete'] = False
                                     return
                                 admitted += 1
@@ -544,17 +559,36 @@ class ScanService:
                                     pending.append(child)
                                 else:
                                     yield m.FileInput(child)
-                    except OSError:
-                        state['complete'] = False
-                        state['issues'].append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, m.SourceRef(m.SourceKind.FILESYSTEM, str(path.absolute())), required=True))
+                        finished = True
+                        if directory_signature(path) != before:
+                            changed(path)
+                    except (OSError, AcquisitionError):
+                        changed(path, m.ErrorCode.ENUMERATION_FAILED)
+                    finally:
+                        if not finished:
+                            state['complete'] = False
+                            retry.add(path)
                 else:
                     yield m.FileInput(path)
-            state['pending_directories'] = len(pending)
 
         def enumeration():
-            state['pending_directories'] = len(pending)
+            # Recheck even directories whose iterator closed before a later
+            # detector ran. These are sequential observations, not a tree lock.
+            checked = set()
+            for path, expected in signatures.items():
+                if time.monotonic() >= deadline or (cancel and cancel()):
+                    state['complete'] = False
+                    state['issues'].append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+                    break
+                try:
+                    if directory_signature(path) != expected:
+                        changed(path)
+                except AcquisitionError:
+                    changed(path, m.ErrorCode.SOURCE_UNAVAILABLE)
+                checked.add(path)
+            state['pending_directories'] = len(set(pending) | retry | (set(signatures) - checked))
             return {**state, 'complete': state['complete'] and not state['issues'].truncated}
-        return self._run(walk(), policy=policy, limits=limits, use_cache=use_cache, cancel=cancel, enumeration=enumeration)
+        return self._run(walk(), policy=policy, limits=limits, use_cache=use_cache, cancel=cancel, enumeration=enumeration, _deadline=deadline, _clear_deadline=True)
 
     def _excluded(self, path):
         path = pathlib.Path(path).absolute()
@@ -618,6 +652,7 @@ class ScanService:
     def _work_batch(self, scope, root, *, limits, use_cache, cancel, ingest=False):
         from . import models as m
         from .scan_store import StateError
+        from .sources import directory_signature, AcquisitionError
         issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
         lease = None
         claims = {}
@@ -633,7 +668,7 @@ class ScanService:
                         self.store.set_deadline(None)
                     except Exception:
                         pass
-        required_methods = ('acquire_cycle', 'claim_work', 'enqueue_work', 'finish_directory', 'cycle_status', 'lease_valid', 'release_cycle', 'invalidate_scope', 'record_event')
+        required_methods = ('acquire_cycle', 'claim_work', 'enqueue_work', 'finish_directory', 'directory_page', 'record_directory_checks', 'cycle_status', 'lease_valid', 'release_cycle', 'invalidate_scope', 'record_event')
         if root is not None:
             required_methods += ('reconcile_cycle',)
         if any(not hasattr(self.store, name) for name in required_methods):
@@ -671,7 +706,7 @@ class ScanService:
                     path = pathlib.Path(claim.path)
                     if self._excluded(path):
                         issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), omission_id='operator-exclusion'))
-                        self.store.finish_directory(claim, success=True)
+                        self.store.finish_directory(claim, success=True, omitted=True)
                         continue
                     if claim.kind == 'file':
                         claims[str(path.absolute())] = claim
@@ -680,6 +715,7 @@ class ScanService:
                     entries_batch = []
                     exhausted = True
                     try:
+                        before = directory_signature(path)
                         with os.scandir(path) as entries:
                             for entry in entries:
                                 if time.monotonic() >= deadline or enumerated >= limits.max_directory_entries or (cancel and cancel()):
@@ -693,15 +729,21 @@ class ScanService:
                                 kind = 'directory' if entry.is_dir(follow_symlinks=False) else 'file'
                                 entries_batch.append((str(child.absolute()), kind, 100 if kind == 'file' else 101))
                                 if len(entries_batch) >= 256:
-                                    self.store.enqueue_work(lease, entries_batch)
+                                    self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'directory'))
+                                    self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'file'), refresh=True)
                                     entries_batch.clear()
                         if entries_batch:
-                            self.store.enqueue_work(lease, entries_batch)
-                        self.store.finish_directory(claim, success=True if exhausted else None)
+                            self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'directory'))
+                            self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'file'), refresh=True)
+                        stable = directory_signature(path) == before
+                        self.store.finish_directory(claim, success=True if exhausted and stable else None, signature=before if exhausted and stable else None)
+                        if not stable:
+                            issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
+                            return
                         if not exhausted:
                             issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
                             return
-                    except OSError:
+                    except (OSError, AcquisitionError):
                         self.store.finish_directory(claim, success=False)
                         self.store.invalidate_scope(path)
                         issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
@@ -709,6 +751,40 @@ class ScanService:
 
             def status():
                 metadata = self.store.cycle_status(lease)
+                checked = 0
+                while not metadata.get('pending_files') and checked < limits.max_directory_entries:
+                    if time.monotonic() >= deadline or cancel is not None and cancel():
+                        issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+                        break
+                    page = self.store.directory_page(lease, limit=min(256, limits.max_directory_entries - checked))
+                    if not page:
+                        break
+                    checks = []
+                    invalid = False
+                    for snapshot in page:
+                        if time.monotonic() >= deadline or cancel is not None and cancel():
+                            issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+                            break
+                        code = m.ErrorCode.INPUT_CHANGED
+                        try:
+                            valid = snapshot.signature is not None and directory_signature(snapshot.path) == snapshot.signature
+                        except AcquisitionError:
+                            valid = False
+                            code = m.ErrorCode.SOURCE_UNAVAILABLE
+                        checks.append((snapshot.path, snapshot.signature, valid))
+                        checked += 1
+                        if not valid:
+                            invalid = True
+                            self.store.invalidate_scope(snapshot.path)
+                            issues.append(m.CoverageIssue(code, m.SourceRef(m.SourceKind.FILESYSTEM, snapshot.path), required=True))
+                    if checks:
+                        self.store.record_directory_checks(lease, checks)
+                    if invalid or len(checks) < len(page):
+                        break
+                if time.monotonic() < deadline:
+                    metadata = self.store.cycle_status(lease)
+                else:
+                    metadata = {**metadata, 'complete': False}
                 if metadata.get('failed'):
                     issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
                 return {**metadata, 'complete': metadata['complete'] and not any(issue.required for issue in issues), 'issues': tuple(issues)}

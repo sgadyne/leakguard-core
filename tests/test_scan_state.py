@@ -1041,3 +1041,191 @@ class AdvertisedDeadlineFailureTests(unittest.TestCase):
                     self.assertLess(len(report.to_json()), 2048)
             finally:
                 service.close()
+
+
+class DirectoryMutationTests(unittest.TestCase):
+    @staticmethod
+    def buffered_scandir(original):
+        from contextlib import contextmanager
+        @contextmanager
+        def buffered(path):
+            with original(path) as entries:
+                snapshot = tuple(entries)
+            yield iter(snapshot)
+        return buffered
+
+    def test_path_enumeration_change_after_first_yield_is_incomplete(self):
+        from leakguard_core import models as m, backends, scan_policy
+        with tempfile.TemporaryDirectory(prefix='leakguard-directory-change-') as folder:
+            root = Path(folder)
+            (root / 'first.txt').write_text('synthetic first')
+            service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+            original = os.scandir
+            def detect(*args, **kwargs):
+                (root / 'late.txt').write_text('synthetic late')
+                return (backends.BackendFinding('literal-password', 1, 1),)
+            try:
+                with patch('os.scandir', side_effect=self.buffered_scandir(original)), patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(backends, 'detect', side_effect=detect):
+                    report = service.scan_paths((root,), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                self.assertEqual(report.counts.findings, 1)
+                self.assertFalse(report.coverage.enumeration_complete)
+                self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                self.assertGreater(report.coverage.pending_directories, 0)
+                self.assertTrue(any(issue.code is m.ErrorCode.INPUT_CHANGED for issue in report.issues))
+            finally:
+                service.close()
+
+    def test_completed_directory_is_revalidated_after_later_detection(self):
+        from leakguard_core import models as m, backends, scan_policy
+        with tempfile.TemporaryDirectory(prefix='leakguard-directory-final-') as folder:
+            root = Path(folder)
+            first = root / 'first'; first.mkdir()
+            second = root / 'second'; second.mkdir()
+            (first / 'candidate.txt').write_text('first')
+            (second / 'candidate.txt').write_text('second')
+            service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+            def detect(text, **kwargs):
+                if text == 'second':
+                    (first / 'late.txt').write_text('synthetic late')
+                return (backends.BackendFinding('literal-password', 1, 1),)
+            try:
+                with patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(backends, 'detect', side_effect=detect):
+                    report = service.scan_paths((second, first), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                self.assertEqual(report.counts.findings, 2)
+                self.assertFalse(report.coverage.enumeration_complete)
+                self.assertTrue(any(issue.code is m.ErrorCode.INPUT_CHANGED for issue in report.issues))
+            finally:
+                service.close()
+
+    def test_audit_change_stays_pending_across_store_restart_then_rescans(self):
+        from leakguard_core import models as m, backends, scan_policy
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-audit-directory-change-') as folder:
+                root = Path(folder)
+                corpus = root / 'corpus'; corpus.mkdir()
+                (corpus / 'first.txt').write_text('synthetic first')
+                state = root / 'state'
+                store = store_type(state) if store_type is SQLiteScanStore else store_type()
+                config = {'gitleaks_executable': str(engine.EXE), 'audit_scopes': {'synthetic': str(corpus)}}
+                service = engine.ScanService(config, store=store)
+                original = os.scandir
+                def detect(*args, **kwargs):
+                    (corpus / 'late.txt').write_text('synthetic late')
+                    return (backends.BackendFinding('literal-password', 1, 1),)
+                try:
+                    with patch('os.scandir', side_effect=self.buffered_scandir(original)), patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(backends, 'detect', side_effect=detect):
+                        changed = service.audit('synthetic', limits=m.ScanLimits(30, 10))
+                    self.assertEqual(changed.counts.findings, 1)
+                    self.assertFalse(changed.coverage.enumeration_complete)
+                    self.assertGreater(changed.coverage.pending_directories, 0)
+                    self.assertEqual(changed.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                    service.close()
+                    if store_type is SQLiteScanStore:
+                        store.close()
+                        store = store_type(state)
+                    service = engine.ScanService(config, store=store)
+                    with patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                        resumed = service.audit('synthetic', limits=m.ScanLimits(30, 10), use_cache=False)
+                    self.assertTrue(resumed.coverage.enumeration_complete)
+                    self.assertIn(str(corpus / 'late.txt'), {result.source.path for result in resumed.results})
+                finally:
+                    service.close(); store.close()
+
+
+class DirectoryValidationPagingTests(unittest.TestCase):
+    def test_validation_pages_resume_across_sqlite_restart_and_memory_leases(self):
+        from leakguard_core import models as m, scan_policy
+        from leakguard_core.sources import directory_signature
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-directory-pages-') as folder:
+                root = Path(folder)
+                corpus = root / 'corpus'; corpus.mkdir()
+                paths = [corpus]
+                for index in range(3):
+                    path = corpus / str(index); path.mkdir(); paths.append(path)
+                state = root / 'state'
+                store = store_type(state) if store_type is SQLiteScanStore else store_type()
+                lease = store.acquire_cycle('audit:synthetic', None, lease_seconds=60)
+                store.enqueue_work(lease, tuple((str(path), 'directory', 0) for path in paths))
+                for _ in paths:
+                    claim = store.claim_work(lease)
+                    store.finish_directory(claim, success=True, signature=directory_signature(claim.path))
+                store.release_cycle(lease, allow_complete=False)
+                counts = []
+                try:
+                    for _ in paths:
+                        if store_type is SQLiteScanStore:
+                            store.close(); store = store_type(state)
+                        service = engine.ScanService({'gitleaks_executable': str(engine.EXE), 'audit_scopes': {'synthetic': str(corpus)}}, store=store)
+                        try:
+                            with patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)):
+                                report = service.audit('synthetic', limits=m.ScanLimits(30, 1, max_directory_entries=1))
+                            counts.append(report.coverage.pending_directories)
+                        finally:
+                            service.close()
+                    self.assertEqual(counts, [3, 2, 1, 0])
+                    self.assertTrue(report.coverage.enumeration_complete)
+                finally:
+                    store.close()
+
+    def test_new_work_revokes_previously_checked_directory_signature(self):
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        from leakguard_core.sources import directory_signature
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            with self.subTest(store=store_type.__name__), tempfile.TemporaryDirectory(prefix='leakguard-directory-invalidation-') as folder:
+                root = Path(folder)
+                store = store_type(root / 'state') if store_type is SQLiteScanStore else store_type()
+                try:
+                    lease = store.acquire_cycle('synthetic', None, lease_seconds=60)
+                    store.enqueue_work(lease, ((str(root), 'directory', 0),))
+                    claim = store.claim_work(lease)
+                    store.finish_directory(claim, success=True, signature=directory_signature(root))
+                    page = store.directory_page(lease, limit=1)
+                    store.record_directory_checks(lease, ((page[0].path, page[0].signature, True),))
+                    self.assertEqual(store.directory_page(lease), ())
+                    store.release_cycle(lease, allow_complete=False)
+                    lease = store.acquire_cycle('synthetic', None, lease_seconds=60)
+                    store.enqueue_work(lease, ((str(root / 'new.txt'), 'file', 0),))
+                    self.assertEqual(store.directory_page(lease, limit=1)[0].path, str(root))
+                    self.assertFalse(store.cycle_status(lease)['complete'])
+                    page = store.directory_page(lease, limit=1)
+                    store.record_directory_checks(lease, ((page[0].path, page[0].signature, True),))
+                    claim = store.claim_work(lease)
+                    from dataclasses import replace
+                    from leakguard_core import models as m
+                    source = m.SourceRef(m.SourceKind.FILESYSTEM, claim.path)
+                    result = StoreLifecycleTests.make_result(self)
+                    result = replace(result, source=source, findings=(replace(result.findings[0], source=source),))
+                    store.record_result(result, generation=store.reserve(source), work=claim)
+                    self.assertEqual(store.directory_page(lease, limit=1)[0].path, str(root))
+                    # A superseded lease cannot certify the final traversal.
+                    old = lease
+                    if store_type is MemoryScanStore:
+                        store.cycles['synthetic']['lease_until'] = 0
+                    else:
+                        store.conn.execute('UPDATE audit_cycles SET lease_until=0'); store.conn.commit()
+                    lease = store.acquire_cycle('synthetic', None, lease_seconds=60)
+                    from leakguard_core.scan_store import StateError
+                    with self.assertRaises(StateError):
+                        store.record_directory_checks(old, ((page[0].path, page[0].signature, True),))
+                    self.assertEqual(store.directory_page(lease, limit=1)[0].path, str(root))
+                finally:
+                    store.close()
+
+    def test_unavailable_directory_signature_is_explicit_incomplete_coverage(self):
+        from leakguard_core import models as m, backends, scan_policy, sources
+        with tempfile.TemporaryDirectory(prefix='leakguard-directory-unavailable-') as folder:
+            root = Path(folder)
+            (root / 'candidate.txt').write_text('synthetic')
+            expected = sources.directory_signature(root)
+            service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
+            try:
+                with patch.object(sources, 'directory_signature', side_effect=(expected, expected, sources.AcquisitionError('source-unavailable'))), patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                    report = service.scan_paths((root,), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 10))
+                self.assertEqual(report.counts.findings, 1)
+                self.assertFalse(report.coverage.enumeration_complete)
+                self.assertTrue(any(issue.code is m.ErrorCode.SOURCE_UNAVAILABLE for issue in report.issues))
+            finally:
+                service.close()

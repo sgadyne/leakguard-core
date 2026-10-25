@@ -212,6 +212,20 @@ def acquire_bytes(data, logical_path, *, max_bytes):
     return SnapshotInput(m.SourceRef(m.SourceKind.BYTES, logical_path), data, ProofContext(lambda name: None))
 
 
+def directory_signature(path):
+    """A change detector for one traversal, never an atomic tree snapshot."""
+    try:
+        value = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISDIR(value.st_mode) or getattr(value, 'st_file_attributes', 0) & 0x400 or not value.st_ino:
+            raise AcquisitionError('source-unavailable')
+        signature = (value.st_dev, value.st_ino, value.st_mode, value.st_mtime_ns, value.st_ctime_ns)
+        if any(type(item) is not int for item in signature):
+            raise AcquisitionError('source-unavailable')
+        return signature
+    except (OSError, AttributeError):
+        raise AcquisitionError('source-unavailable') from None
+
+
 @dataclass(frozen=True)
 class DirectoryIdentity:
     path: str

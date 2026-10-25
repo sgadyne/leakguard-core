@@ -75,6 +75,20 @@ class WorkClaim:
 
 
 @dataclass(frozen=True)
+class DirectorySnapshot:
+    path: str
+    signature: tuple[int, int, int, int, int] | None
+
+
+def _directory_signature(value):
+    if value is None:
+        return None
+    if type(value) is not tuple or len(value) != 5 or any(type(item) is not int for item in value):
+        raise StateError()
+    return value
+
+
+@dataclass(frozen=True)
 class FindingPage:
     rows: tuple[dict, ...]
     next_cursor: str | None
@@ -148,7 +162,9 @@ class ScanStore(Protocol):
     def lease_valid(self, lease: WorkLease) -> bool: ...
     def enqueue_work(self, lease: WorkLease, entries, *, refresh: bool = False) -> None: ...
     def claim_work(self, lease: WorkLease) -> WorkClaim | None: ...
-    def finish_directory(self, claim: WorkClaim, *, success: bool | None) -> None: ...
+    def finish_directory(self, claim: WorkClaim, *, success: bool | None, signature=None, omitted=False) -> None: ...
+    def directory_page(self, lease: WorkLease, *, limit: int = 256) -> tuple[DirectorySnapshot, ...]: ...
+    def record_directory_checks(self, lease: WorkLease, checks: tuple) -> None: ...
     def cycle_status(self, lease: WorkLease) -> dict: ...
     def release_cycle(self, lease: WorkLease, *, allow_complete: bool = True) -> None: ...
     def reconcile_cycle(self, lease: WorkLease, root) -> None: ...
@@ -285,7 +301,7 @@ class MemoryScanStore:
         fresh = current is None or current['completed'] is not None
         generation = (current['generation'] + 1) if current and fresh else current['generation'] if current else 1
         owner = uuid.uuid4().hex
-        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None, 'started': datetime.now(timezone.utc).isoformat() if fresh else current['started']}
+        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None, 'started': datetime.now(timezone.utc).isoformat() if fresh else current['started'], 'has_checked': bool(current and not fresh and current.get('has_checked'))}
         self.cycles[scope] = cycle
         lease = WorkLease(scope, generation, owner)
         for key, work in self.work.items():
@@ -305,10 +321,14 @@ class MemoryScanStore:
     def enqueue_work(self, lease, entries, *, refresh=False):
         if not self.lease_valid(lease):
             raise StateError()
+        changed = False
         for path, kind, priority in entries:
             key = (lease.scope, lease.generation, path, kind)
             if refresh or key not in self.work:
-                self.work[key] = {'priority': priority, 'attempts': 0, 'failed': False, 'done': False, 'claimed': None, 'verified': False}
+                self.work[key] = {'priority': priority, 'attempts': 0, 'failed': False, 'done': False, 'claimed': None, 'verified': False, 'directory_signature': None, 'directory_checked': False}
+                changed = True
+        if changed:
+            self._reset_directory_checks(lease)
 
     @_synchronized
     def claim_work(self, lease):
@@ -321,21 +341,69 @@ class MemoryScanStore:
         row['claimed'] = lease.owner
         return WorkClaim(lease, key[2], key[3])
 
+    def _reset_directory_checks(self, lease):
+        cycle = self.cycles[lease.scope]
+        if not cycle.get('has_checked'):
+            return
+        for key, row in self.work.items():
+            if key[:2] == (lease.scope, lease.generation) and key[3] == 'directory' and row.get('directory_signature') != 'omitted':
+                row['directory_checked'] = False
+        cycle['has_checked'] = False
+
     @_synchronized
-    def finish_directory(self, claim, *, success):
+    def finish_directory(self, claim, *, success, signature=None, omitted=False):
         if not self.lease_valid(claim.lease):
             raise StateError()
+        signature = _directory_signature(signature)
         row = self.work[(claim.lease.scope, claim.lease.generation, claim.path, claim.kind)]
+        self._reset_directory_checks(claim.lease)
         row['done'] = success is True
+        row['directory_signature'] = 'omitted' if omitted else signature
+        row['directory_checked'] = bool(omitted)
         if success is False:
             row['attempts'] += 1
             row['failed'] = row['attempts'] >= 3
+
+    @_synchronized
+    def directory_page(self, lease, *, limit=256):
+        import heapq
+        import time
+        if not self.lease_valid(lease) or type(limit) is not int or not 1 <= limit <= 1000:
+            raise StateError()
+        deadline = self._deadlines.get(threading.get_ident())
+        def pending():
+            for key, row in self.work.items():
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise StateError()
+                if key[:2] == (lease.scope, lease.generation) and key[3] == 'directory' and row['done'] and not row.get('directory_checked') and row.get('directory_signature') != 'omitted':
+                    yield key[2], row.get('directory_signature')
+        return tuple(DirectorySnapshot(path, signature) for path, signature in heapq.nsmallest(limit, pending(), key=lambda row: row[0]))
+
+    @_synchronized
+    def record_directory_checks(self, lease, checks):
+        from itertools import islice
+        checks = tuple(islice(iter(checks), 1001))
+        if not self.lease_valid(lease) or len(checks) > 1000:
+            raise StateError()
+        if any(not valid for _, _, valid in checks):
+            self._reset_directory_checks(lease)
+        for path, expected, valid in checks:
+            expected = _directory_signature(expected)
+            row = self.work.get((lease.scope, lease.generation, path, 'directory'))
+            if row is None or row.get('directory_signature') != expected or not row['done']:
+                raise StateError()
+            if valid and expected is not None:
+                row['directory_checked'] = True
+                self.cycles[lease.scope]['has_checked'] = True
+            else:
+                row.update(done=False, claimed=None, failed=False, attempts=0, directory_signature=None, directory_checked=False)
 
     @_synchronized
     def _finish_work(self, work, result):
         if work is None:
             return
         row = self.work[(work.lease.scope, work.lease.generation, work.path, work.kind)]
+        self._reset_directory_checks(work.lease)
         row['done'] = result.coverage is not m.CoverageState.INCOMPLETE
         row['verified'] = result.coverage is m.CoverageState.COMPLETE
         if not row['done']:
@@ -344,7 +412,7 @@ class MemoryScanStore:
 
     @_synchronized
     def cycle_status(self, lease):
-        pending = [(key, row) for key, row in self.work.items() if key[:2] == (lease.scope, lease.generation) and not row['done']]
+        pending = [(key, row) for key, row in self.work.items() if key[:2] == (lease.scope, lease.generation) and (not row['done'] or key[3] == 'directory' and not row.get('directory_checked'))]
         return {'complete': not pending, 'pending_files': sum(key[3] == 'file' for key, _ in pending), 'pending_directories': sum(key[3] == 'directory' for key, _ in pending), 'failed': sum(row['failed'] for _, row in pending), 'cycle_id': str(lease.generation)}
 
     @_synchronized
@@ -596,7 +664,7 @@ CREATE INDEX IF NOT EXISTS scan_runs_finished ON scan_runs(finished_at DESC);
 CREATE TABLE IF NOT EXISTS source_anchors(input_key TEXT PRIMARY KEY,payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scan_cache(cache_key TEXT PRIMARY KEY,scan_id TEXT NOT NULL REFERENCES input_scans(scan_id));
 CREATE TABLE IF NOT EXISTS audit_cycles(scope TEXT PRIMARY KEY,generation INTEGER,started TEXT,completed TEXT,failed INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_until REAL);
-CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,verified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,generation,path,kind));
+CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,verified INTEGER NOT NULL DEFAULT 0,directory_signature TEXT,directory_checked INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,generation,path,kind));
 '''
 
 
@@ -640,13 +708,14 @@ def open_database(state_dir):
             'cache': [('policy', 'TEXT'), ('digest', 'TEXT'), ('payload', 'TEXT'), ('executed_at', 'TEXT')],
             'directories': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
             'files': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
-            'audit_work': [('done', 'INTEGER NOT NULL DEFAULT 0'), ('claimed', 'TEXT'), ('verified', 'INTEGER NOT NULL DEFAULT 0')],
+            'audit_work': [('done', 'INTEGER NOT NULL DEFAULT 0'), ('claimed', 'TEXT'), ('verified', 'INTEGER NOT NULL DEFAULT 0'), ('directory_signature', 'TEXT'), ('directory_checked', 'INTEGER NOT NULL DEFAULT 0')],
             'current_inputs': [('reserved_at', 'TEXT')],
         }.items():
             present = {row[1] for row in conn.execute('PRAGMA table_info(' + table + ')')}
             for column, declaration in additions:
                 if column not in present:
                     conn.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + declaration)
+        conn.execute('CREATE INDEX IF NOT EXISTS audit_directory_checks ON audit_work(scope,generation,kind,directory_checked,done,path)')
         if version < 2:
             _import_legacy_findings(conn)
             conn.execute('DELETE FROM cache')
@@ -885,7 +954,13 @@ class SQLiteScanStore:
         with self.conn:
             if not self._lease_valid(lease):
                 raise StateError()
-            self.conn.executemany('INSERT INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,?) ON CONFLICT(scope,generation,path,kind) DO UPDATE SET done=CASE WHEN ? THEN 0 ELSE done END,attempts=CASE WHEN ? THEN 0 ELSE attempts END,failed=CASE WHEN ? THEN 0 ELSE failed END,claimed=CASE WHEN ? THEN NULL ELSE claimed END', ((lease.scope, lease.generation, path, kind, priority, refresh, refresh, refresh, refresh) for path, kind, priority in entries))
+            before = self.conn.total_changes
+            if refresh:
+                self.conn.executemany('INSERT INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,?) ON CONFLICT(scope,generation,path,kind) DO UPDATE SET done=0,attempts=0,failed=0,claimed=NULL,directory_signature=NULL,directory_checked=0', ((lease.scope, lease.generation, path, kind, priority) for path, kind, priority in entries))
+            else:
+                self.conn.executemany('INSERT OR IGNORE INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,?)', ((lease.scope, lease.generation, path, kind, priority) for path, kind, priority in entries))
+            if self.conn.total_changes != before:
+                self._reset_directory_checks(lease)
 
     @_bounded_sql
     def claim_work(self, lease):
@@ -902,22 +977,57 @@ class SQLiteScanStore:
             self.conn.rollback()
             raise StateError() from None
 
+    def _reset_directory_checks(self, lease):
+        self.conn.execute("UPDATE audit_work SET directory_checked=0 WHERE scope=? AND generation=? AND kind='directory' AND directory_checked=1 AND (directory_signature IS NULL OR directory_signature<>'omitted')", (lease.scope, lease.generation))
+
     @_bounded_sql
-    def finish_directory(self, claim, *, success):
+    def finish_directory(self, claim, *, success, signature=None, omitted=False):
+        signature = _directory_signature(signature)
         with self.conn:
             if not self._lease_valid(claim.lease):
                 raise StateError()
-            self.conn.execute('UPDATE audit_work SET done=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (success is True, success is False, success is False, claim.lease.scope, claim.lease.generation, claim.path, claim.kind, claim.lease.owner))
+            self._reset_directory_checks(claim.lease)
+            self.conn.execute('UPDATE audit_work SET done=?,directory_signature=?,directory_checked=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (success is True, 'omitted' if omitted else json.dumps(signature) if signature else None, bool(omitted), success is False, success is False, claim.lease.scope, claim.lease.generation, claim.path, claim.kind, claim.lease.owner))
+
+    @_bounded_sql
+    def directory_page(self, lease, *, limit=256):
+        if not self._lease_valid(lease) or type(limit) is not int or not 1 <= limit <= 1000:
+            raise StateError()
+        rows = self.conn.execute("SELECT path,directory_signature FROM audit_work WHERE scope=? AND generation=? AND kind='directory' AND done=1 AND directory_checked=0 AND (directory_signature IS NULL OR directory_signature<>'omitted') ORDER BY path LIMIT ?", (lease.scope, lease.generation, limit)).fetchall()
+        return tuple(DirectorySnapshot(path, _directory_signature(tuple(json.loads(signature))) if signature else None) for path, signature in rows)
+
+    @_bounded_sql
+    def record_directory_checks(self, lease, checks):
+        from itertools import islice
+        checks = tuple(islice(iter(checks), 1001))
+        if len(checks) > 1000:
+            raise StateError()
+        with self.conn:
+            if not self._lease_valid(lease):
+                raise StateError()
+            if any(not valid for _, _, valid in checks):
+                self._reset_directory_checks(lease)
+            for path, expected, valid in checks:
+                expected = _directory_signature(expected)
+                row = self.conn.execute("SELECT directory_signature,done FROM audit_work WHERE scope=? AND generation=? AND path=? AND kind='directory'", (lease.scope, lease.generation, path)).fetchone()
+                actual = tuple(json.loads(row[0])) if row and row[0] and row[0] != 'omitted' else None
+                if not row or not row[1] or actual != expected:
+                    raise StateError()
+                if valid and expected is not None:
+                    self.conn.execute("UPDATE audit_work SET directory_checked=1 WHERE scope=? AND generation=? AND path=? AND kind='directory'", (lease.scope, lease.generation, path))
+                else:
+                    self.conn.execute("UPDATE audit_work SET done=0,claimed=NULL,failed=0,attempts=0,directory_signature=NULL,directory_checked=0 WHERE scope=? AND generation=? AND path=? AND kind='directory'", (lease.scope, lease.generation, path))
 
     def _finish_work(self, work, result):
         if work is None:
             return
         complete = result.coverage is not m.CoverageState.INCOMPLETE
+        self._reset_directory_checks(work.lease)
         self.conn.execute('UPDATE audit_work SET done=?,verified=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (complete, result.coverage is m.CoverageState.COMPLETE, not complete, not complete, work.lease.scope, work.lease.generation, work.path, work.kind, work.lease.owner))
 
     @_bounded_sql
     def cycle_status(self, lease):
-        rows = self.conn.execute('SELECT kind,count(*),sum(failed) FROM audit_work WHERE scope=? AND generation=? AND done=0 GROUP BY kind', (lease.scope, lease.generation)).fetchall()
+        rows = self.conn.execute("SELECT kind,count(*),sum(failed) FROM audit_work WHERE scope=? AND generation=? AND (done=0 OR (kind='directory' AND directory_checked=0)) GROUP BY kind", (lease.scope, lease.generation)).fetchall()
         counts = {kind: count for kind, count, _ in rows}
         return {'complete': not rows, 'pending_files': counts.get('file', 0), 'pending_directories': counts.get('directory', 0), 'failed': sum(failed for _, _, failed in rows), 'cycle_id': str(lease.generation)}
 
