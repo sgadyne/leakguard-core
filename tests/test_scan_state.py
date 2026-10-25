@@ -979,3 +979,30 @@ class SourceAdmissionTests(unittest.TestCase):
             self.assertLess(len(report.to_json()), 2048)
         finally:
             service.close()
+
+
+class IncrementalReportAdmissionTests(unittest.TestCase):
+    def test_long_provenance_many_findings_never_serializes_complete_candidate(self):
+        from dataclasses import replace
+        from leakguard_core import models as m, scan_store
+        base = StoreLifecycleTests.make_result(self)
+        source = m.SourceRef(m.SourceKind.FILESYSTEM, '/' + 'x' * 4000)
+        finding = replace(base.findings[0], source=source)
+        # The source string is shared in memory, but whole-candidate JSON would
+        # repeat it 100,000 times and allocate hundreds of megabytes.
+        candidate = replace(base, source=source, findings=(finding,) * 100000)
+        serialized_counts = []
+        actual = scan_store._result_json
+        def guarded(result):
+            serialized_counts.append(len(result.findings))
+            if len(result.findings) > 20:
+                raise AssertionError('unadmitted result materialized')
+            return actual(result)
+        with patch.object(scan_store, '_result_json', side_effect=guarded):
+            admitted, size, truncated = engine._admit_result(candidate, 65536)
+        self.assertTrue(truncated)
+        self.assertGreater(len(admitted.findings), 0)
+        self.assertLessEqual(len(admitted.findings), 20)
+        self.assertLessEqual(size, 65536)
+        self.assertEqual(size, len(actual(admitted).encode()))
+        self.assertTrue(all(count <= 20 for count in serialized_counts))

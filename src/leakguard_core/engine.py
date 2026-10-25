@@ -419,8 +419,26 @@ def _admit_result(result, available):
     from dataclasses import replace
     from . import models as m
     from .scan_store import _result_json
-    size = len(_result_json(result).encode('utf-8'))
-    if size <= available:
+    # Never materialize the entire candidate merely to measure it. A bounded
+    # base plus one record at a time has exactly the same canonical JSON cost.
+    base = replace(result, findings=(), issues=())
+    size = len(_result_json(base).encode('utf-8'))
+    exceeded = size > available
+    if not exceeded:
+        for index, finding in enumerate(result.findings):
+            cost = len(json.dumps(m._finding_dict(finding), ensure_ascii=True, separators=(',', ':')).encode('utf-8')) + bool(index)
+            if size + cost > available:
+                exceeded = True
+                break
+            size += cost
+    if not exceeded:
+        for index, issue in enumerate(result.issues):
+            cost = _IssueBudget._size(issue) + bool(index)
+            if size + cost > available:
+                exceeded = True
+                break
+            size += cost
+    if not exceeded:
         return result, size, False
     marker = m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, required=True)
     bounded = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome,
