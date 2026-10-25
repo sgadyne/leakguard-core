@@ -369,6 +369,19 @@ class PublicApiTests(unittest.TestCase):
                 store.close()
 
             environment = {"LEAKGUARD_CONFIG": "", "LEAKGUARD_STATE_DIR": str(state_dir)}
+            stdout = __import__("io").StringIO()
+            stderr = __import__("io").StringIO()
+            with patch.dict(os.environ, environment), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = manage.main(["report", "general", "--limit", "2", "--format", "json"])
+            self.assertEqual(code, 0)
+            filtered = json.loads(stdout.getvalue())
+            self.assertEqual(filtered["page_count"], 0)
+            self.assertTrue(filtered["has_more"])
+            self.assertIsInstance(filtered["next_cursor"], str)
+            self.assertEqual(filtered["findings"], [])
+            self.assertEqual(stderr.getvalue(), "")
+
             for state in ("current", "history"):
                 cursor = None
                 observed = []
