@@ -365,6 +365,31 @@ class FinalGitAcceptanceTests(unittest.TestCase):
             self.assertIn(b'synthetic-hook-plugin', committed.stderr)
             self.assertIn(b'LeakGuard blocked', committed.stderr)
 
+    @unittest.skipIf(__import__('os').name != 'posix', 'POSIX FIFO and owned process-group cleanup')
+    def test_installed_pre_commit_refuses_fifo_rule_config_without_waiting(self):
+        import json
+        import os
+        import signal
+        from leakguard_core import hooks
+        fifo = self.repo / 'private-rules.fifo'; os.mkfifo(fifo)
+        config = self.repo / 'private-config.json'
+        config.write_text(json.dumps({'gitleaks_config': str(fifo)}))
+        (self.repo / 'candidate.txt').write_text('ordinary clean content\n')
+        self.git('add', 'candidate.txt')
+        self.git('config', 'core.hooksPath', '.git/hooks')
+        hooks.install_at(self.repo / '.git' / 'hooks')
+        committed = subprocess.Popen(['git', 'commit', '-qm', 'synthetic nonregular rules'], cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env={**os.environ, 'LEAKGUARD_CONFIG': str(config)})
+        try:
+            output, error = committed.communicate(timeout=3)
+        finally:
+            if committed.poll() is None:
+                os.killpg(committed.pid, signal.SIGKILL)
+                committed.communicate()
+        self.assertNotEqual(committed.returncode, 0)
+        self.assertIn(b'operation-failed', error)
+        self.assertNotIn(b'Traceback', output + error)
+        self.assertNotIn(str(fifo).encode(), output + error)
+
     def test_installed_pre_push_rejects_secret_in_actual_orphan_root(self):
         from leakguard_core import hooks
         marker = 'SyntheticOnlyOrphanRootM7kQ2vR9xL4nD8'
