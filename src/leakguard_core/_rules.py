@@ -42,15 +42,25 @@ def _field(value, name, default=None):
     return matches[0] if matches else default
 
 
+def _resolved(path):
+    # Explicit config symlinks may select regular rule files. A symlink loop
+    # raises RuntimeError on Python 3.11, whose message contains the local path;
+    # isolate that resolution error without swallowing caller budget failures.
+    try:
+        return Path(path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        raise RuleConfigError() from None
+
+
 def inspect(path, *, cwd=None, check=None):
     from .sources import _bounded_file, AcquisitionError
-    base = Path(cwd) if cwd is not None else Path.cwd()
-    current = Path(path).resolve()
     files = []
     relative_files = []
     external = False
     relative_name = None
     try:
+        base = Path(cwd) if cwd is not None else Path.cwd()
+        current = _resolved(path)
         # The pinned backend follows at most two external inheritance edges.
         for depth in range(3):
             if check is not None:
@@ -72,7 +82,7 @@ def inspect(path, *, cwd=None, check=None):
             if depth == 2:
                 break
             relative = Path(reference)
-            current = (relative if relative.is_absolute() else base / relative).resolve()
+            current = _resolved(relative if relative.is_absolute() else base / relative)
             relative_name = None
             if not relative.is_absolute():
                 if relative.drive or sum(part == '..' for part in relative.parts) > 32:
@@ -85,14 +95,14 @@ def inspect(path, *, cwd=None, check=None):
 
 def stage(closure, scratch):
     """Return a private cwd preserving bounded relative rule-file references."""
-    scratch = Path(scratch).resolve()
+    scratch = _resolved(scratch)
     depth = max((sum(part == '..' for part in Path(name).parts)
                  for name, _ in closure.relative_files), default=0) + 1
     directory = scratch.joinpath(*(['work'] * depth))
     directory.mkdir(mode=0o700, parents=True)
     for name, data in closure.relative_files:
         raw_destination = directory / name
-        destination = raw_destination.resolve()
+        destination = _resolved(raw_destination)
         if not destination.is_relative_to(scratch) or destination == directory / '.gitleaksignore':
             raise RuleConfigError()
         raw_destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
