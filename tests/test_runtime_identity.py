@@ -4,9 +4,13 @@ from __future__ import annotations
 import importlib
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import sys
 import tempfile
+import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from leakguard_core import scan_policy
 from leakguard_core.sources import acquire_file
@@ -97,6 +101,129 @@ class RuntimeIdentityTests(unittest.TestCase):
             refreshed = acquire_file(path, max_bytes=1024)
 
         self.assertNotEqual(snapshot.content.digest, refreshed.content.digest)
+
+    def test_expired_deadline_and_cancellation_abort_with_fixed_codes(self):
+        from leakguard_core.scan_policy import RuntimeIdentityError
+
+        started = time.monotonic()
+        with self.assertRaises(RuntimeIdentityError) as expired:
+            scan_policy.runtime_identity(deadline=started - 1)
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertEqual(expired.exception.code, 'budget-exhausted')
+        self.assertEqual(str(expired.exception), 'budget-exhausted')
+
+        started = time.monotonic()
+        with self.assertRaises(RuntimeIdentityError) as cancelled:
+            scan_policy.runtime_identity(deadline=time.monotonic() + 10, cancel=lambda: True)
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertEqual(cancelled.exception.code, 'cancelled')
+        self.assertEqual(str(cancelled.exception), 'cancelled')
+
+    def test_runtime_identity_caps_artifact_reads_and_discovery(self):
+        from leakguard_core.scan_policy import RuntimeIdentityError
+
+        too_large = SimpleNamespace(st_mode=0o100644, st_size=512 * 1024 * 1024 + 1)
+        with patch.object(Path, 'is_file', return_value=True), \
+                patch.object(Path, 'stat', return_value=too_large), \
+                patch.object(Path, 'open') as opened:
+            self.assertEqual(scan_policy._file_identity(Path('synthetic-artifact')), 'unavailable')
+        opened.assert_not_called()
+
+        budget = scan_policy._IdentityBudget(time.monotonic() + 10, None)
+        with self.assertRaises(RuntimeIdentityError):
+            budget.admit(1_073_741_825)
+
+        class Entry:
+            name = 'one.py'
+            path = 'synthetic-root/one.py'
+
+            def is_dir(self, *, follow_symlinks=False):
+                return False
+
+            def is_file(self, *, follow_symlinks=False):
+                return True
+
+        class Entries:
+            def __enter__(self):
+                return iter((Entry(),))
+
+            def __exit__(self, *args):
+                return False
+
+        budget = scan_policy._IdentityBudget(time.monotonic() + 10, None)
+        budget.entries = 100_000
+        token = scan_policy._IDENTITY_BUDGET.set(budget)
+        try:
+            with patch.object(scan_policy.os, 'scandir', return_value=Entries()):
+                with self.assertRaises(RuntimeIdentityError) as error:
+                    scan_policy._python_files(Path('synthetic-root'))
+        finally:
+            scan_policy._IDENTITY_BUDGET.reset(token)
+        self.assertEqual(error.exception.code, 'budget-exhausted')
+
+    def test_distribution_artifact_bytes_change_runtime_identity(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-package-identity-') as temporary:
+            root = Path(temporary)
+            binary = root / 'gitleaks'
+            rules = root / 'rules.toml'
+            artifact = root / 'packaging.py'
+            binary.write_bytes(b'synthetic scanner v1')
+            rules.write_text("title = 'fixture'\n", encoding='utf-8')
+            artifact.write_bytes(b'package runtime bytes 1')
+
+            class Distribution:
+                version = '1.0'
+                files = (PurePosixPath('packaging.py'),)
+                requires = ()
+
+                def locate_file(self, entry):
+                    self.assert_entry(entry)
+                    return artifact
+
+                @staticmethod
+                def assert_entry(entry):
+                    if str(entry) != 'packaging.py':
+                        raise AssertionError('unexpected synthetic distribution entry')
+
+            original = scan_policy.importlib.metadata.distribution
+
+            def distribution(name):
+                if name == 'packaging':
+                    return Distribution()
+                return original(name)
+
+            config = {'gitleaks_config': str(rules)}
+            with patch.object(scan_policy.importlib.metadata, 'distribution', side_effect=distribution):
+                before, eligible_before = scan_policy.runtime_identity(config, binary)
+                self.preserve_mtime_write(artifact, b'package runtime bytes 2')
+                after, eligible_after = scan_policy.runtime_identity(config, binary)
+
+        self.assertNotEqual(before, after)
+        self.assertTrue(eligible_before)
+        self.assertTrue(eligible_after)
+
+    def test_unavailable_core_artifact_disables_persistent_reuse(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-core-identity-') as temporary:
+            root = Path(temporary)
+            binary = root / 'gitleaks'
+            rules = root / 'rules.toml'
+            binary.write_bytes(b'synthetic scanner')
+            rules.write_text("title = 'fixture'\n", encoding='utf-8')
+            original = scan_policy._file_identity
+            core_artifact = Path(scan_policy.__file__).resolve().parent / 'models.py'
+
+            def identity(path):
+                if Path(path) == core_artifact:
+                    return 'unavailable'
+                return original(path)
+
+            with patch.object(scan_policy, '_file_identity', side_effect=identity):
+                digest, eligible = scan_policy.runtime_identity(
+                    {'gitleaks_config': str(rules)}, binary,
+                )
+
+        self.assertRegex(digest, r'^[0-9a-f]{64}$')
+        self.assertFalse(eligible)
 
 
 if __name__ == "__main__":

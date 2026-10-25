@@ -13,6 +13,7 @@ import tempfile
 import unittest
 import zipfile
 import ast
+from xml.sax.saxutils import escape
 
 from leakguard_core import engine, models
 from leakguard_core.extraction import extract
@@ -63,7 +64,15 @@ def _docx_payload(members) -> bytes:
             info.create_system = 3
             info.external_attr = 0o100600 << 16
             info.compress_type = zipfile.ZIP_STORED
-            archive.writestr(info, "<d><p>" + text + "</p></d>")
+            if name == "[Content_Types].xml":
+                xml = "<Types>" + text + "</Types>"
+            else:
+                paragraphs = text.split("</p><p>")
+                xml = "<d>" + "".join(
+                    "<p><r><t>" + escape(paragraph) + "</t></r></p>"
+                    for paragraph in paragraphs
+                ) + "</d>"
+            archive.writestr(info, xml)
     return buffer.getvalue()
 
 
