@@ -12,7 +12,7 @@ The optional `extract(data, path)` method returns `None` when unsupported, or `(
 
 Invalid output, API mismatch or plugin failure produces a sanitized error. Git fails closed. Underlying exception text is discarded because it can contain input data. Plugins do not receive permission to downgrade findings from other detectors; core evidence classifiers control proven metadata exceptions.
 
-Plugins are trusted executable code with the scanner's account permissions, not sandboxed regex definitions. They can read files/network if their author writes such behavior. Only install reviewed extensions. The built-in engine makes no credential-validation or telemetry requests. Dependency/network policy for extensions remains the operator's responsibility.
+Plugins are trusted executable code with the scanner's account permissions, not sandboxed regex definitions. Configured module-backed v1 and v2 detectors and extractors run in supervised workers with bounded input, output and time; the worker does not remove account permissions or provide an OS sandbox. Only deprecated in-memory instances used by internal tests execute in-process and they are not a supported deployment mechanism. Extensions can read files or use the network if their author writes such behavior. Only install reviewed extensions. The built-in engine makes no credential-validation or telemetry requests. Dependency/network policy for extensions remains the operator's responsibility.
 
 Plugin options and known-material references remain in the external local configuration/runtime database. Publishing a plugin SDK does not require publishing those configurations, business rules, actual documents or scan results.
 
@@ -94,6 +94,11 @@ state declaration. The core validates options and resolves installed dependency
 versions and content identity. Unknown or incomplete runtime closure can disable
 cache reuse even when the extension continues to run. Declared versions alone
 do not establish identity.
+
+If the OS cannot apply the configured hard worker memory limit, a required
+operation returns `resource-bound-unavailable`; a wall timeout is not treated as
+a memory cap. Platform-specific memory enforcement must be validated on that
+platform before it is claimed.
 
 Installable examples live in [`examples/v2_detector`](examples/v2_detector) and
 [`examples/v2_extractor`](examples/v2_extractor). The original
