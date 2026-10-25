@@ -128,12 +128,15 @@ def _legacy_service(conn=None):
     service = ScanService(config, store=store)
     # Preserve trusted in-memory detector fixtures in the deprecated internal
     # wrapper. Configured deployment always uses supervised module handles.
-    service._plugins = PLUGINS
-    service._cache_eligible = service._cache_eligible and not PLUGINS
+    if any(not isinstance(instance, plugins.LoadedPlugin) for instance in PLUGINS):
+        # Module handles were freshly loaded by the service; only an explicit
+        # trusted in-memory fixture overrides them. Keep configured scripts.
+        service._plugins = [*PLUGINS, *(instance for instance in service._plugins if not isinstance(instance, plugins.LoadedPlugin))]
+        service._cache_eligible = False
     return service
 
 
-def _legacy_result(result):
+def _legacy_result(result, run_issues=()):
     from . import models as m
     findings = []
     for finding in result.findings:
@@ -144,20 +147,21 @@ def _legacy_result(result):
         if finding.source.commit:
             item['commit'] = finding.source.commit
         findings.append(finding_details.describe(item))
-    required = next((issue for issue in result.issues if issue.required), None)
-    if result.outcome is m.ScanOutcome.REUSED:
-        status = 'unchanged'
-    elif required:
+    all_issues = (*result.issues, *run_issues)
+    required = next((issue for issue in all_issues if issue.required), None)
+    if required:
         status = 'missing' if required.code is m.ErrorCode.INPUT_MISSING else 'error-' + required.code.value
+    elif result.outcome is m.ScanOutcome.REUSED:
+        status = 'unchanged'
     elif result.outcome is m.ScanOutcome.SCANNED:
         status = 'scanned'
     else:
         status = 'skipped-binary-or-no-text'
     return {'path': result.source.path, 'status': status, 'findings': findings,
-            'coverage': result.coverage.value,
+            'coverage': 'incomplete' if required else result.coverage.value,
             'issues': [{'path': issue.source.path if issue.source else result.source.path,
                         'status': issue.code.value, 'required': issue.required,
-                        'part': issue.part_id, 'omission_id': issue.omission_id} for issue in result.issues],
+                        'part': issue.part_id, 'omission_id': issue.omission_id} for issue in all_issues],
             'last_executed_at': result.last_executed_at.isoformat() if result.last_executed_at else None,
             'last_verified_at': result.last_verified_at.isoformat() if result.last_verified_at else None}
 
@@ -170,7 +174,7 @@ def scan_blob(data, path, conn=None):
         report = service.scan((m.BytesInput(data, str(path)),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(120, 1, max_file_bytes=CONFIG['max_file_bytes']), use_cache=False)
         if not report.results:
             return [], 'error-state-failed'
-        result = _legacy_result(report.results[0])
+        result = _legacy_result(report.results[0], report.issues)
         return result['findings'], result['status']
     finally:
         service.close()
@@ -182,7 +186,7 @@ def scan_file(path, conn, use_cache=True):
     service = _legacy_service(conn)
     try:
         report = service.scan((m.FileInput(pathlib.Path(path)),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(120, 1, max_file_bytes=CONFIG['max_file_bytes']), use_cache=use_cache)
-        return _legacy_result(report.results[0]) if report.results else {'path': str(path), 'status': 'error-state-failed', 'findings': []}
+        return _legacy_result(report.results[0], report.issues) if report.results else {'path': str(path), 'status': 'error-state-failed', 'findings': []}
     finally:
         service.close()
 
@@ -345,8 +349,7 @@ def git_hook(kind, args):
         config['gitleaks_config'] = str(RULES)
         service = ScanService(config, state_dir=STATE)
         report = service.scan_git(repo, request=request, limits=m.ScanLimits(120, 1000, max_file_bytes=CONFIG['max_file_bytes']))
-        legacy = _legacy_git_report(report, repo, kind)
-        print(presentation.render(legacy), file=sys.stderr)
+        print(presentation.render(report), file=sys.stderr)
         if report.decision.verdict is m.DecisionVerdict.INCOMPLETE:
             return 2
         if report.decision.verdict is m.DecisionVerdict.BLOCK:
@@ -805,7 +808,7 @@ class ScanService:
             if materials is not None:
                 for observation in catalog.material_observations(materials, part.part_id, part.text):
                     observations.append(observation)
-                    findings.append(self._finding(snapshot, part, 'known-material-' + observation.kind, observation.line, observation.line, 'review' if observation.kind == 'license' else 'block', 'known-material'))
+                    findings.append(self._finding(snapshot, part, 'known-material-' + observation.kind, observation.line, observation.end_line, 'review' if observation.kind == 'license' else 'block', 'known-material'))
             if time.monotonic() >= deadline or (cancel and cancel()):
                 issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
                 break

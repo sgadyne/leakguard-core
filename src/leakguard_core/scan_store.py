@@ -247,6 +247,8 @@ class MemoryScanStore:
 
     @_synchronized
     def invalidate_scope(self, root, *, reason='source-unavailable'):
+        if reason not in {'source-unavailable', 'source-event', 'incomplete-scan'}:
+            raise StateError()
         from pathlib import Path
         root = Path(root).absolute()
         for row in self.states.values():
@@ -277,6 +279,8 @@ class MemoryScanStore:
 
     @_synchronized
     def record_metadata(self, path, size):
+        if type(size) is not int or size < 0:
+            raise StateError()
         self.locations[path] = {'size': size, 'digest': None, 'present': True}
 
     @_synchronized
@@ -665,6 +669,8 @@ class SQLiteScanStore:
             self.conn.execute('UPDATE audit_work SET claimed=NULL WHERE scope=? AND generation=?', (lease.scope, lease.generation))
 
     def invalidate_scope(self, root, *, reason='source-unavailable'):
+        if reason not in {'source-unavailable', 'source-event', 'incomplete-scan'}:
+            raise StateError()
         from pathlib import Path
         root = Path(root).absolute()
         with self.conn:
@@ -711,6 +717,8 @@ class SQLiteScanStore:
             self.conn.execute('INSERT INTO material_locations VALUES(?,?,?,?,?,?,1) ON CONFLICT(host,name,path) DO UPDATE SET fingerprint=excluded.fingerprint,last_seen=excluded.last_seen,present=1', (catalog.HOST, item.name, path, item.fingerprint, when, when))
 
     def record_metadata(self, path, size):
+        if type(size) is not int or size < 0:
+            raise StateError()
         from . import catalog
         catalog.metadata_only(self.conn, path, size, self.config)
 

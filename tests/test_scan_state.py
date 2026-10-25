@@ -427,3 +427,31 @@ class MaterialRegistrationTests(unittest.TestCase):
                     self.assertFalse(registered.valid())
                 finally:
                     store.close()
+
+
+class LegacyAdapterTests(unittest.TestCase):
+    def test_run_state_failure_cannot_be_adapted_to_success(self):
+        from datetime import datetime, timezone
+        from leakguard_core import models as m
+        from leakguard_core.scan_store import MemoryScanStore, StateError
+        class BrokenReportStore(MemoryScanStore):
+            def record_report(self, report):
+                raise StateError()
+        result = StoreLifecycleTests.make_result(self)
+        service = engine.ScanService({'gitleaks_executable': str(engine.EXE)}, store=BrokenReportStore())
+        from leakguard_core import backends
+        try:
+            with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
+            legacy = engine._legacy_result(report.results[0], report.issues)
+            self.assertTrue(legacy['status'].startswith('error-'))
+            self.assertEqual(legacy['coverage'], 'incomplete')
+            self.assertEqual(len(legacy['findings']), 1)
+        finally:
+            service.close()
+
+    def test_multiline_known_material_has_inclusive_part_range(self):
+        from leakguard_core.catalog import MaterialReference, MaterialSnapshot, material_observations
+        snapshot = MaterialSnapshot((MaterialReference('private', 'credential', 'first\nsecond\n', 'opaque'),), 'opaque')
+        observed = material_observations(snapshot, 'text', 'header\nfirst\nsecond\nfooter')
+        self.assertEqual((observed[0].line, observed[0].end_line), (2, 3))

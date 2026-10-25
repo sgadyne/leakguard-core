@@ -6,13 +6,11 @@ import hmac
 import json
 import pathlib
 import socket
-import time
 import uuid
 
 from . import policies
 
 HOST = socket.gethostname()
-_VALUE_CACHE = {}
 
 
 def stamp():
@@ -67,32 +65,22 @@ def metadata_only(conn, path, size, config):
 
 
 def known_values(conn):
-    for name, source, fmt, field, kind in conn.execute('SELECT name,source,format,field,kind FROM material_sources'):
-        try:
-            cached = _VALUE_CACHE.get((name, source, fmt, field))
-            if cached and time.monotonic() - cached[0] < 30:
-                yield name, cached[1], kind
-                continue
-            text = pathlib.Path(source).read_text(encoding='utf-8')
-            if fmt == 'json':
-                value = json.loads(text)
-                for key in field.split('.'):
-                    value = value[key]
-            else:
-                tree = ast.parse(text)
-                value = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == field for t in node.targets))
-            if isinstance(value, str) and len(value) >= 8:
-                _VALUE_CACHE[(name, source, fmt, field)] = (time.monotonic(), value)
-                yield name, value, kind
-        except (OSError, ValueError, KeyError, StopIteration, SyntaxError):
-            continue
+    """Deprecated registration validator with fresh bounded reads and fixed errors."""
+    rows = conn.execute('SELECT name,source,format,field,kind FROM material_sources ORDER BY name LIMIT 101').fetchall()
+    snapshot = snapshot_materials(rows, __import__('secrets').token_bytes(32))
+    if snapshot.issues:
+        raise ValueError('source-unavailable')
+    for reference in snapshot.references:
+        yield reference.name, reference.value, reference.kind
 
 
-def match_materials(conn, path, text, state):
+def match_materials(conn, path, text, state, *, complete=True):
     key_path = state / 'material-key.bin'
     if not key_path.exists():
         try:
-            with key_path.open('xb') as stream:
+            import os
+            descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'wb') as stream:
                 stream.write(__import__('secrets').token_bytes(32))
         except FileExistsError:
             pass
@@ -108,7 +96,7 @@ def match_materials(conn, path, text, state):
     existing = conn.execute('SELECT name FROM material_locations WHERE host=? AND path=? AND present=1', (HOST, path)).fetchall()
     for (name,) in existing:
         if name not in names:
-            conn.execute('UPDATE material_locations SET present=0,last_seen=? WHERE host=? AND path=? AND name=?', (when, HOST, path, name))
+            conn.execute('UPDATE material_locations SET present=?,last_seen=? WHERE host=? AND path=? AND name=?', (0 if complete else None, when, HOST, path, name))
     conn.commit()
     return matches
 
@@ -133,6 +121,7 @@ class MaterialObservation:
     part_id: str
     line: int
     fingerprint: str
+    end_line: int
 
 
 @dataclass(frozen=True)
@@ -222,5 +211,7 @@ def material_observations(snapshot, part_id, text):
     for reference in snapshot.references:
         position = text.find(reference.value)
         if position >= 0:
-            observations.append(MaterialObservation(reference.name, reference.kind, part_id, text[:position].count('\n') + 1, reference.fingerprint))
+            first = text[:position].count('\n') + 1
+            last = first + reference.value.count('\n') - int(reference.value.endswith('\n'))
+            observations.append(MaterialObservation(reference.name, reference.kind, part_id, first, reference.fingerprint, max(first, last)))
     return tuple(observations)
