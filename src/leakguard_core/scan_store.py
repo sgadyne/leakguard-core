@@ -394,9 +394,16 @@ class MemoryScanStore:
     def record_event(self, path, kind, *, old_path=None, when=None):
         if kind not in {'changed', 'created', 'deleted', 'renamed'}:
             raise StateError()
+        paths = {path, old_path}
         for row in self.states.values():
-            if row['state'] in {'active', 'unknown'} and row['source']['path'] in {path, old_path}:
+            if row['state'] in {'active', 'unknown'} and row['source']['path'] in paths:
                 row.update(state='unknown', resolved_at=None, state_reason='source-event')
+        for candidate in paths:
+            if candidate in self.locations:
+                self.locations[candidate]['present'] = None
+        for (_, candidate), row in self.material_locations.items():
+            if candidate in paths:
+                row['present'] = None
 
 def _source_data(source):
     return {'kind': source.kind.value, 'path': source.path, 'repository': source.repository,
@@ -478,7 +485,12 @@ def _report_from(value):
     v = _exact(value, 'schema_version run_id started_at finished_at policy_id results coverage decision counts issues')
     c = _exact(v['coverage'], 'enumeration_complete required_complete omission_count pending_files pending_directories cycle_id')
     d = _exact(v['decision'], 'verdict reason_codes policy_id')
-    return m.ScanReport(v['schema_version'], v['run_id'], _time(v['started_at']), _time(v['finished_at']), v['policy_id'], tuple(_result_from(r) for r in v['results']), m.CoverageSummary(**c), m.PolicyDecision(m.DecisionVerdict(d['verdict']), tuple(m.ErrorCode(x) for x in d['reason_codes']), d['policy_id']), tuple(_issue_from(x) for x in v['issues']))
+    report = m.ScanReport(v['schema_version'], v['run_id'], _time(v['started_at']), _time(v['finished_at']), v['policy_id'], tuple(_result_from(r) for r in v['results']), m.CoverageSummary(**c), m.PolicyDecision(m.DecisionVerdict(d['verdict']), tuple(m.ErrorCode(x) for x in d['reason_codes']), d['policy_id']), tuple(_issue_from(x) for x in v['issues']))
+    expected = report.to_dict()['counts']
+    counts = _exact(v['counts'], ' '.join(expected))
+    if any(type(value) is not int or value < 0 for value in counts.values()) or counts != expected:
+        raise StateError()
+    return report
 
 
 def _result_json(result):
@@ -849,15 +861,11 @@ class SQLiteScanStore:
         if reason not in {'source-unavailable', 'source-event', 'incomplete-scan'}:
             raise StateError()
         from pathlib import Path
-        root = Path(root).absolute()
+        root = str(Path(root).absolute())
+        prefix = root.rstrip('/\\') + __import__('os').sep
         with self.conn:
-            for key, identity, payload in self.conn.execute("SELECT input_key,finding_id,payload FROM finding_state WHERE state IN ('active','unknown')").fetchall():
-                row = json.loads(payload)
-                path = Path(row['source']['path']).absolute()
-                if path == root or root in path.parents:
-                    row.update(state='unknown', resolved_at=None, state_reason=reason)
-                    self.conn.execute('UPDATE finding_state SET state=?,payload=? WHERE input_key=? AND finding_id=?', ('unknown', json.dumps(row, separators=(',', ':')), key, identity))
-                    self.conn.execute('UPDATE finding_current SET payload=? WHERE input_key=? AND finding_id=?', (json.dumps(row, separators=(',', ':')), key, identity))
+            self.conn.execute("UPDATE finding_state SET state='unknown',payload=json_set(payload,'$.state','unknown','$.state_reason',?,'$.resolved_at',NULL) WHERE state IN ('active','unknown') AND (path=? OR substr(path,1,?)=?)", (reason, root, len(prefix), prefix))
+            self.conn.execute("UPDATE finding_current SET payload=(SELECT s.payload FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id) WHERE EXISTS(SELECT 1 FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id AND s.state IN ('active','unknown') AND (s.path=? OR substr(s.path,1,?)=?))", (root, len(prefix), prefix))
 
     @_bounded_sql
     def material_snapshot(self, *, max_bytes=1_000_000, max_sources=100):
@@ -889,9 +897,8 @@ class SQLiteScanStore:
         path = policies.canonical(result.source.path, self.config)
         names = {item.name for item in observations}
         when = result.observed_at.isoformat()
-        for (name,) in self.conn.execute('SELECT name FROM material_locations WHERE host=? AND path=?', (catalog.HOST, path)).fetchall():
-            if name not in names:
-                self.conn.execute('UPDATE material_locations SET present=?,last_seen=? WHERE host=? AND path=? AND name=?', (0 if complete else None, when, catalog.HOST, path, name))
+        placeholders = ','.join('?' for _ in names)
+        self.conn.execute('UPDATE material_locations SET present=?,last_seen=? WHERE host=? AND path=?' + (' AND name NOT IN (' + placeholders + ')' if names else ''), (0 if complete else None, when, catalog.HOST, path, *sorted(names)))
         for item in observations:
             self.conn.execute('INSERT INTO material_locations VALUES(?,?,?,?,?,?,1) ON CONFLICT(host,name,path) DO UPDATE SET fingerprint=excluded.fingerprint,last_seen=excluded.last_seen,present=1', (catalog.HOST, item.name, path, item.fingerprint, when, when))
 
@@ -909,8 +916,5 @@ class SQLiteScanStore:
         from . import catalog
         catalog.event(self.conn, path, kind, self.config, old_path=old_path, when=when)
         with self.conn:
-            for key, identity, payload in self.conn.execute('SELECT input_key,finding_id,payload FROM finding_state WHERE (path=? OR path=?) AND state IN ("active","unknown")', (path, old_path)).fetchall():
-                row = json.loads(payload)
-                row.update(state='unknown', resolved_at=None, state_reason='source-event')
-                self.conn.execute('UPDATE finding_state SET state=?,payload=? WHERE input_key=? AND finding_id=?', ('unknown', json.dumps(row, separators=(',', ':')), key, identity))
-                self.conn.execute('UPDATE finding_current SET payload=? WHERE input_key=? AND finding_id=?', (json.dumps(row, separators=(',', ':')), key, identity))
+            self.conn.execute("UPDATE finding_state SET state='unknown',payload=json_set(payload,'$.state','unknown','$.state_reason','source-event','$.resolved_at',NULL) WHERE (path=? OR path=?) AND state IN ('active','unknown')", (path, old_path))
+            self.conn.execute("UPDATE finding_current SET payload=(SELECT s.payload FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id) WHERE EXISTS(SELECT 1 FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id AND s.state IN ('active','unknown') AND (s.path=? OR s.path=?))", (path, old_path))

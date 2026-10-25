@@ -35,12 +35,12 @@ def event(conn, path, kind, config, old_path=None, digest=None, when=None):
     old_path = policies.canonical(old_path, config) if old_path else None
     when = when or stamp()
     conn.execute('INSERT INTO location_events VALUES(?,?,?,?,?,?,?,?)', (uuid.uuid4().hex, HOST, path, old_path, kind, policies.profile(path, config), digest, when))
-    if kind == 'deleted':
-        conn.execute('UPDATE locations SET present=0,last_seen=? WHERE host=? AND path=?', (when, HOST, path))
-        conn.execute('UPDATE material_locations SET present=0,last_seen=? WHERE host=? AND path=?', (when, HOST, path))
+    # Watcher hints do not establish absence or validate old content.
+    conn.execute('UPDATE locations SET present=NULL,last_seen=? WHERE host=? AND path=?', (when, HOST, path))
+    conn.execute('UPDATE material_locations SET present=NULL,last_seen=? WHERE host=? AND path=?', (when, HOST, path))
     if old_path and kind == 'renamed':
-        conn.execute('UPDATE locations SET present=0,last_seen=? WHERE host=? AND path=?', (when, HOST, old_path))
-        conn.execute('UPDATE material_locations SET present=0,last_seen=? WHERE host=? AND path=?', (when, HOST, old_path))
+        conn.execute('UPDATE locations SET present=NULL,last_seen=? WHERE host=? AND path=?', (when, HOST, old_path))
+        conn.execute('UPDATE material_locations SET present=NULL,last_seen=? WHERE host=? AND path=?', (when, HOST, old_path))
     conn.commit()
 
 

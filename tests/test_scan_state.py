@@ -629,3 +629,46 @@ class IdentityBudgetServiceTests(unittest.TestCase):
             self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)
         finally:
             service.close()
+
+
+class MaterialEventTests(unittest.TestCase):
+    def test_delete_and_rename_hints_keep_material_and_location_presence_unknown(self):
+        from leakguard_core import catalog
+        from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        for store_type in (MemoryScanStore, SQLiteScanStore):
+            for kind in ('deleted', 'renamed'):
+                with self.subTest(store=store_type.__name__, kind=kind), tempfile.TemporaryDirectory(prefix='leakguard-material-event-') as folder:
+                    store = store_type(folder) if store_type is SQLiteScanStore else store_type()
+                    path = '/synthetic/candidate.txt'
+                    try:
+                        if store_type is MemoryScanStore:
+                            store.locations[path] = {'present': True}
+                            store.material_locations[('private-registration', path)] = {'present': True}
+                        else:
+                            store.conn.execute('INSERT INTO locations(host,path,present) VALUES(?,?,1)', (catalog.HOST, path))
+                            store.conn.execute('INSERT INTO material_locations(host,name,path,present) VALUES(?,?,?,1)', (catalog.HOST, 'private-registration', path))
+                            store.conn.commit()
+                        store.record_event(path if kind == 'deleted' else '/synthetic/new.txt', kind, old_path=path if kind == 'renamed' else None)
+                        if store_type is MemoryScanStore:
+                            self.assertIsNone(store.locations[path]['present'])
+                            self.assertIsNone(store.material_locations[('private-registration', path)]['present'])
+                        else:
+                            self.assertIsNone(store.conn.execute('SELECT present FROM locations').fetchone()[0])
+                            self.assertIsNone(store.conn.execute('SELECT present FROM material_locations').fetchone()[0])
+                    finally:
+                        store.close()
+
+
+class PersistedReportCountsTests(unittest.TestCase):
+    def test_decoder_rejects_false_or_noninteger_counts(self):
+        import copy
+        from leakguard_core import models as m
+        from leakguard_core.scan_store import _report_from, StateError
+        result = StoreLifecycleTests.make_result(self)
+        report = m.ScanReport(1, 'synthetic-run', result.observed_at, result.observed_at, 'policy', (result,), m.CoverageSummary(True, True, 0), m.PolicyDecision(m.DecisionVerdict.BLOCK, (), 'policy'))
+        self.assertEqual(_report_from(report.to_dict()), report)
+        for bad in (0, True, '1'):
+            payload = copy.deepcopy(report.to_dict())
+            payload['counts']['findings'] = bad
+            with self.subTest(value=bad), self.assertRaises(StateError):
+                _report_from(payload)
