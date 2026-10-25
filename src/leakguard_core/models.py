@@ -523,6 +523,17 @@ class ScanReport:
             raise ValueError("incomplete coverage requires an incomplete decision")
         if type(self.issues) is not tuple or any(type(item) is not CoverageIssue for item in self.issues):
             raise TypeError("issues must be a tuple of CoverageIssue values")
+        expected_omissions = sum(
+            not issue.required and issue.omission_id is not None for issue in self.issues
+        )
+        for result in self.results:
+            expected_omissions += sum(
+                not issue.required and issue.omission_id is not None for issue in result.issues
+            )
+            if result.coverage is CoverageState.OMITTED and not result.issues:
+                expected_omissions += 1
+        if self.coverage.omission_count != expected_omissions:
+            raise ValueError("omission_count must match the report's typed omissions")
         if self.coverage.required_complete:
             if any(issue.required for issue in self.issues):
                 raise ValueError("required-complete reports cannot contain required issues")

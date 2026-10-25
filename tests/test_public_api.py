@@ -252,6 +252,41 @@ class PublicApiTests(unittest.TestCase):
         })
         self.assertEqual(json.loads(report.to_json()), payload)
 
+    def test_report_omission_count_matches_typed_omissions_and_decoder(self):
+        from leakguard_core import scan_store
+
+        report = _report()
+        base_result = report.results[0]
+        omission = CoverageIssue(
+            ErrorCode.POLICY_OMISSION, source=base_result.source, part_id="text",
+            required=False, omission_id="operator-exclusion-1",
+        )
+        omitted_result = replace(
+            base_result, coverage=CoverageState.OMITTED, findings=(), issues=(omission,),
+        )
+        valid = replace(
+            report,
+            results=(omitted_result,),
+            coverage=CoverageSummary(True, True, 1),
+            decision=PolicyDecision(DecisionVerdict.ALLOW_WITH_OMISSIONS, (), report.policy_id),
+        )
+        self.assertEqual(valid.coverage.omission_count, 1)
+        self.assertEqual(scan_store._report_from(valid.to_dict()), valid)
+
+        for bad_count in (0, 2):
+            with self.subTest(bad_count=bad_count):
+                with self.assertRaises(ValueError):
+                    replace(valid, coverage=CoverageSummary(True, True, bad_count))
+                payload = valid.to_dict()
+                payload["coverage"]["omission_count"] = bad_count
+                with self.assertRaises(ValueError):
+                    scan_store._report_from(payload)
+
+        overcount = report.to_dict()
+        overcount["coverage"]["omission_count"] = 1
+        with self.assertRaises(ValueError):
+            scan_store._report_from(overcount)
+
     def test_typed_scan_summary_does_not_claim_a_git_operation_was_blocked(self):
         text = presentation.render(_report(
             verdict=DecisionVerdict.BLOCK, severity=FindingSeverity.BLOCK,
