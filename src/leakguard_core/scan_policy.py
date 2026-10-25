@@ -12,6 +12,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import sys
 import time
 
@@ -80,7 +81,10 @@ def _python_files(root):
                 if entry.is_dir(follow_symlinks=False):
                     if entry.name != '__pycache__':
                         pending.append(Path(entry.path))
-                elif entry.name.endswith(('.py', '.toml')) and entry.is_file():
+                elif entry.is_dir() or entry.name.endswith(('.py', '.toml')):
+                    # A linked package directory is an unknown closure. Include
+                    # its unavailable file identity rather than silently omit
+                    # behavior-bearing code or follow an unbounded directory.
                     paths.append(Path(entry.path))
                     if len(paths) > 10_000:
                         raise RuntimeIdentityError()
@@ -115,20 +119,38 @@ def policy_identity(*, config=None, policy=None, limits=None):
 def _file_identity(path):
     try:
         _check_budget()
-        source = Path(path)
-        if not source.is_file() or source.stat().st_size > 512 * 1024 * 1024:
+        original = Path(path)
+        # Distribution artifacts and the interpreter may be legitimate links.
+        # Resolve them once, then admit an actual regular, nonblocking fd.
+        try:
+            source = original.resolve(strict=True)
+        except (OSError, ValueError, RuntimeError):
             return 'unavailable'
-        before = source.stat()
-        budget = _IDENTITY_BUDGET.get()
-        if budget is not None:
-            budget.admit(before.st_size)
-        digest = hashlib.sha256()
-        with source.open('rb') as stream:
+        expected = source.stat(follow_symlinks=False)
+        maximum = 512 * 1024 * 1024
+        if not stat.S_ISREG(expected.st_mode) or expected.st_size > maximum:
+            return 'unavailable'
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        with os.fdopen(os.open(source, flags), 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+                return 'unavailable'
+            budget = _IDENTITY_BUDGET.get()
+            if budget is not None:
+                budget.admit(before.st_size)
+            digest = hashlib.sha256()
+            consumed = 0
             while chunk := stream.read(1_048_576):
                 _check_budget()
+                consumed += len(chunk)
+                if consumed > maximum:
+                    return 'unavailable'
                 digest.update(chunk)
-        after = source.stat()
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            after = os.fstat(stream.fileno())
+        def signature(value):
+            return value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+        if any(signature(value) != signature(before)
+               for value in (expected, after, source.stat(follow_symlinks=False), original.stat())):
             return 'unavailable'
         return digest.hexdigest()
     except (OSError, ValueError, TypeError):
