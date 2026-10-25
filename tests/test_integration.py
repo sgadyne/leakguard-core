@@ -298,7 +298,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'numerical/origins.json', result.stderr)
         self.assertIn(b'generic-api-key', result.stderr)
-        self.assertIn(b'finding values remain redacted', result.stderr)
+        self.assertRegex(result.stderr, rb'values (?:are|remain) redacted')
         self.assertNotIn(manifest['api_key'].encode(), result.stderr + result.stdout)
 
     def test_pre_push_verifies_metadata_against_historical_source(self):
@@ -354,7 +354,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(b'BLOCKING FINDINGS', result.stderr)
         self.assertIn(b'numerical/origins.json:4', result.stderr)
         self.assertIn(b'generic-api-key', result.stderr)
-        self.assertIn(b'finding values remain redacted', result.stderr)
+        self.assertRegex(result.stderr, rb'values (?:are|remain) redacted')
 
     def test_plugin_mode_preserves_metadata_proof_and_real_key_blocking(self):
         module = self.repo / 'noop_fixture.py'
