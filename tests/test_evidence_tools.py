@@ -88,7 +88,10 @@ class IndependentLabelTests(unittest.TestCase):
             backend = Path(folder) / "gitleaks"
             backend.write_bytes(b"synthetic backend placeholder")
             backend.chmod(0o700)
+            rules = Path(folder) / "rules.toml"
+            rules.write_text("synthetic test rules\n", encoding="utf-8")
             with patch.object(backends, "detect", side_effect=detect) as detector, \
+                    patch.object(run_independent_labels, "RULES", rules), \
                     patch.object(run_independent_labels, "source_identity",
                                  return_value=("a" * 40, "b" * 64)):
                 receipt = run_independent_labels.run(backend, timeout=2)
@@ -96,7 +99,7 @@ class IndependentLabelTests(unittest.TestCase):
         self.assertEqual(detector.call_count, 12)
         self.assertEqual([call.args[0] for call in detector.call_args_list],
                          [item["text"] for item in cases])
-        self.assertTrue(all(call.kwargs["rules"] == run_independent_labels.RULES
+        self.assertTrue(all(call.kwargs["rules"] == rules
                             for call in detector.call_args_list))
         self.assertEqual(receipt["evaluation_boundary"], "isolated-input")
         self.assertTrue(all(row["boundary"] == "isolated-input" for row in receipt["cases"]))
