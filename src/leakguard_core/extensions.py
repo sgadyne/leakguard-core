@@ -426,6 +426,7 @@ for row, target, path_key in target_rows:
     if first:
         requested_roots.add(first.casefold())
 physical_roots = set()
+walk_count = 0
 for base in search_roots:
     try:
         names = os.listdir(base)
@@ -476,6 +477,9 @@ for base in search_roots:
         package = os.path.join(base, package_name) if package_name is not None else ''
         if os.path.isdir(package) and not os.path.islink(package):
             for current, dirs, files_in_dir in os.walk(package, followlinks=False):
+                walk_count += 1
+                if walk_count > 20000:
+                    raise ValueError('module inventory limit')
                 for name in list(dirs):
                     path = os.path.join(current, name)
                     if os.path.islink(path):
@@ -483,6 +487,8 @@ for base in search_roots:
                         dirs.remove(name)
                 for name in files_in_dir:
                     add_root_file(os.path.join(current, name), root)
+                    if len(root_file_map) > 20000:
+                        raise ValueError('module inventory limit')
         for name in names:
             lowered = name.casefold()
             if lowered == root + '.py' or (
