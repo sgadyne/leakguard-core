@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 import tempfile
+import threading
 
 from leakguard_buddy.backend import BuddyBackend, BuddyOperationError, _safe_wheel_filename
 
@@ -43,6 +44,7 @@ class ObservationStatusTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="buddy-status-test-") as name:
             backend = object.__new__(BuddyBackend)
+            backend._lock = threading.RLock()
             backend.observation_path = Path(name) / "absent-observations.lgo"
             backend._observation_store = Store()
             backend._startup_observation_error = None
@@ -70,6 +72,7 @@ class CredentialUpdateTests(unittest.TestCase):
 
         session = Session()
         backend = object.__new__(BuddyBackend)
+        backend._lock = threading.RLock()
         backend._credential_session = session
         result = backend.credential_update("entry_1", {"title": "Updated", "secret": "new-secret", "finding_id": None})
         self.assertEqual(result, {"id": "entry_1", "title": "Updated"})
@@ -146,6 +149,72 @@ class ScanConfigRefreshTests(unittest.TestCase):
         self.assertIs(backend._observation_store, store)
         self.assertIsNone(backend._startup_observation_error)
         self.assertEqual(writes, [{"detection_profile": "firm"}, {"detection_profile": "credentials"}])
+
+
+class ObservationLockConcurrencyTests(unittest.TestCase):
+    def test_lock_waits_for_in_flight_store_backed_api_call(self):
+        entered = threading.Event()
+        release = threading.Event()
+        stopped = threading.Event()
+
+        class Host:
+            def sources(self):
+                entered.set()
+                if not release.wait(2):
+                    raise TimeoutError("test release not signaled")
+                return []
+
+        backend = object.__new__(BuddyBackend)
+        backend._lock = threading.RLock()
+        backend._host = Host()
+        backend._observation_store = object()
+        backend._stop_host = lambda: stopped.set()
+        read_thread = threading.Thread(target=backend.sources)
+        lock_thread = threading.Thread(target=backend.observation_lock)
+        read_thread.start()
+        self.assertTrue(entered.wait(1))
+        lock_thread.start()
+        self.assertFalse(stopped.wait(0.05))
+        release.set()
+        read_thread.join(2)
+        lock_thread.join(2)
+        self.assertFalse(read_thread.is_alive())
+        self.assertFalse(lock_thread.is_alive())
+        self.assertTrue(stopped.is_set())
+
+    def test_credential_lock_waits_for_in_flight_reveal(self):
+        entered = threading.Event()
+        release = threading.Event()
+        revoked = threading.Event()
+
+        class Session:
+            def reveal_entry(self, _entry_id):
+                entered.set()
+                if not release.wait(2):
+                    raise TimeoutError("test release not signaled")
+                return {"secret": "visible only while the reveal completes"}
+
+        class Vault:
+            def lock(self):
+                revoked.set()
+
+        backend = object.__new__(BuddyBackend)
+        backend._lock = threading.RLock()
+        backend._credential_session = Session()
+        backend._vault = Vault()
+        reveal_thread = threading.Thread(target=backend.credential_reveal, args=("entry_1",))
+        lock_thread = threading.Thread(target=backend.credential_lock)
+        reveal_thread.start()
+        self.assertTrue(entered.wait(1))
+        lock_thread.start()
+        self.assertFalse(revoked.wait(0.05))
+        release.set()
+        reveal_thread.join(2)
+        lock_thread.join(2)
+        self.assertFalse(reveal_thread.is_alive())
+        self.assertFalse(lock_thread.is_alive())
+        self.assertTrue(revoked.is_set())
+        self.assertIsNone(backend._credential_session)
 
 
 if __name__ == "__main__":

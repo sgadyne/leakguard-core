@@ -12,6 +12,7 @@
   let findingCursor = null;
   const findingCache = new Map();
   let revealed = null;
+  let vaultRevealGeneration = 0;
   let clearClipboardTimer = 0;
   let toastTimer = 0;
   const byId = (id) => document.getElementById(id);
@@ -579,6 +580,13 @@
     revealed = null;
   }
 
+  function scrubCredentialData(value) {
+    if (!value || typeof value !== "object") return;
+    for (const field of ["secret", "username", "notes"]) {
+      if (Object.prototype.hasOwnProperty.call(value, field)) value[field] = "";
+    }
+  }
+
   function scrubDialog(dialog) {
     if (dialog.id === "reveal-dialog") scrubRevealed();
     if (dialog.id === "vault-dialog") byId("credential-form").reset();
@@ -592,7 +600,12 @@
   }
 
   async function revealEntry(id, copy = false) {
+    const generation = vaultRevealGeneration;
     const secret = await request(`/api/vault/entries/${encodeURIComponent(id)}/${copy ? "copy" : "reveal"}`, "POST", {});
+    if (generation !== vaultRevealGeneration) {
+      scrubCredentialData(secret);
+      return;
+    }
     if (copy) {
       await copyText(secret.secret || "");
       notify("Secret copied to the clipboard. Buddy will try to clear it in one minute.");
@@ -672,10 +685,15 @@
         const status = await request("/api/vault/status"); openUnlock(status.created ? "vault" : "vault-create");
       }
       else if (action === "credential-lock") {
+        vaultRevealGeneration++;
         scrubRevealed();
         const revealDialog = byId("reveal-dialog");
         if (revealDialog.open) revealDialog.close();
-        await request("/api/vault/lock", "POST", {}); await loadVault(); notify("Credential vault locked.");
+        await request("/api/vault/lock", "POST", {});
+        vaultRevealGeneration++;
+        scrubRevealed();
+        if (revealDialog.open) revealDialog.close();
+        await loadVault(); notify("Credential vault locked.");
       }
       else if (action === "vault-add") { const status = await request("/api/vault/status"); if (!status.unlocked) { openUnlock(status.created ? "vault" : "vault-create"); return; } openCredential(); }
       else if (action === "vault-backup") {

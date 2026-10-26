@@ -9,6 +9,7 @@ import re
 import tempfile
 import threading
 import hashlib
+from functools import wraps
 from typing import Any
 
 
@@ -24,6 +25,14 @@ class BuddyOperationError(RuntimeError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+def _backend_locked(method):
+    @wraps(method)
+    def invoke(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return invoke
 
 
 class BuddyBackend:
@@ -151,6 +160,7 @@ class BuddyBackend:
         self._host = None
         self._observation_store = None
 
+    @_backend_locked
     def status(self) -> dict[str, Any]:
         with self._lock:
             observations = self.observation_status()
@@ -169,6 +179,7 @@ class BuddyBackend:
                 "detection_profile": self._config_values.get("detection_profile", "credentials"),
             }
 
+    @_backend_locked
     def observation_status(self) -> dict[str, Any]:
         created = self.observation_path.is_file()
         store_status = self._observation_store.status() if self._observation_store is not None else {}
@@ -224,6 +235,7 @@ class BuddyBackend:
                 "native_backend": None, "error_code": "observation-keyring-unavailable",
             }
 
+    @_backend_locked
     def observation_keyring(self, enabled: bool) -> dict[str, Any]:
         store = self._observation_store
         if store is None:
@@ -236,6 +248,7 @@ class BuddyBackend:
         self._keyring_probe = self._EncryptedScanStore.keyring_status(self.observation_path)
         return self.observation_status()
 
+    @_backend_locked
     def observation_create(self, passphrase: str) -> dict[str, Any]:
         with self._lock:
             if self.observation_path.exists():
@@ -254,6 +267,7 @@ class BuddyBackend:
             }
             return self.observation_status()
 
+    @_backend_locked
     def observation_unlock(self, passphrase: str) -> dict[str, Any]:
         with self._lock:
             if self._observation_store is not None:
@@ -274,23 +288,29 @@ class BuddyBackend:
                 }
             return self.observation_status()
 
+    @_backend_locked
     def observation_lock(self) -> None:
         with self._lock:
             self._stop_host()
 
+    @_backend_locked
     def roots(self):
         return self._require_host().roots()
 
+    @_backend_locked
     def browse(self, query: dict[str, str]):
         limit = _int(query.get("limit", "100"), 100, 1, 500)
         return self._require_host().browse(query.get("path", ""), root=query.get("root"), cursor=query.get("cursor"), limit=limit)
 
+    @_backend_locked
     def sources(self):
         return self._require_host().sources()
 
+    @_backend_locked
     def jobs(self):
         return self._require_host().jobs()
 
+    @_backend_locked
     def add_source(self, payload: dict[str, Any]):
         host = self._require_host()
         result = host.add_source(root=payload["root"], label=payload.get("label"), kind=payload.get("kind", "local"), exclusions=tuple(payload.get("exclusions", ())))
@@ -302,19 +322,26 @@ class BuddyBackend:
                 return next((item for item in _as_list(host.sources()) if item.get("id") == source_id), result)
         return result
 
+    @_backend_locked
     def update_source(self, source_id: str, payload: dict[str, Any]):
         return self._require_host().update_source(source_id, **payload)
 
+    @_backend_locked
     def remove_source(self, source_id: str):
         return self._require_host().remove_source(source_id)
 
+    @_backend_locked
     def submit(self, source_id: str):
         return self._require_host().submit(source_id)
 
+    @_backend_locked
     def pause(self, job_id: str): return self._require_host().pause(job_id)
+    @_backend_locked
     def resume(self, job_id: str): return self._require_host().resume(job_id)
+    @_backend_locked
     def cancel(self, job_id: str): return self._require_host().cancel(job_id)
 
+    @_backend_locked
     def findings(self, query: dict[str, str]) -> dict[str, Any]:
         host = self._require_host()
         store = self._observation_store
@@ -379,6 +406,7 @@ class BuddyBackend:
             "coverage": host_status.get("coverage") if type(host_status) is dict else None,
         }
 
+    @_backend_locked
     def finding(self, finding_id: str) -> dict[str, Any]:
         store = self._observation_store
         if store is None:
@@ -392,12 +420,14 @@ class BuddyBackend:
                     return row
         raise KeyError("finding-not-found")
 
+    @_backend_locked
     def annotate_finding(self, finding_id: str, state: str):
         if state not in {"unreviewed", "reviewed", "dismissed"}:
             raise ValueError("annotation-invalid")
         self._require_host()
         return self._observation_store.set_annotation(finding_id, state)
 
+    @_backend_locked
     def reveal_path(self, source_id: str, path: str):
         return self._require_host().reveal(path, source_id=source_id)
 
@@ -473,43 +503,53 @@ class BuddyBackend:
                 code = str(error) if str(error) in _HOOK_ERRORS else "hook-operation-failed"
             raise BuddyOperationError(code) from None
 
+    @_backend_locked
     def credential_status(self):
         status = self._vault.status()
         return {"created": bool(status.get("created")), "unlocked": self._credential_session is not None}
 
+    @_backend_locked
     def credential_create(self, passphrase: str):
         with self._lock:
             self._credential_session = self._vault.create(passphrase)
             return self.credential_status()
 
+    @_backend_locked
     def credential_unlock(self, passphrase: str):
         with self._lock:
             self._credential_session = self._vault.unlock(passphrase)
             return self.credential_status()
 
+    @_backend_locked
     def credential_lock(self):
         with self._lock:
             self._credential_session = None
             self._vault.lock()
 
+    @_backend_locked
     def credential_entries(self):
         return list(self._require_credential_session().list_entries())
 
+    @_backend_locked
     def credential_save(self, payload: dict[str, Any]):
         session = self._require_credential_session()
         return session.save_entry(title=payload["title"], secret=payload["secret"], username=payload.get("username", ""), location=payload.get("location", ""), notes=payload.get("notes", ""), finding_id=payload.get("finding_id"))
 
+    @_backend_locked
     def credential_update(self, entry_id: str, payload: dict[str, Any]):
         session = self._require_credential_session()
         fields = {key: payload[key] for key in ("title", "secret", "username", "location", "notes", "finding_id") if key in payload}
         return session.update_entry(entry_id, **fields)
 
+    @_backend_locked
     def credential_reveal(self, entry_id: str):
         return self._require_credential_session().reveal_entry(entry_id)
 
+    @_backend_locked
     def credential_delete(self, entry_id: str):
         return self._require_credential_session().delete_entry(entry_id)
 
+    @_backend_locked
     def credential_backup(self, passphrase: str):
         session = self._require_credential_session()
         with tempfile.TemporaryDirectory(prefix="leakguard-buddy-") as temporary:
@@ -520,6 +560,7 @@ class BuddyBackend:
             raise ValueError("vault-backup-too-large")
         return {"filename": "leakguard-vault.lgbak", "backup_base64": base64.b64encode(data).decode("ascii")}
 
+    @_backend_locked
     def credential_restore(self, payload: dict[str, Any]):
         raw = base64.b64decode(payload["backup"], validate=True)
         if len(raw) > 16 * 1024 * 1024:
@@ -571,6 +612,7 @@ class BuddyBackend:
         from leakguard_core.extensions import ExtensionRegistry
         return ExtensionRegistry(self.extension_registry_path)
 
+    @_backend_locked
     def settings(self):
         return {
             "active_profile": self._config_values.get("detection_profile", "credentials"),
@@ -582,6 +624,7 @@ class BuddyBackend:
             "scan_timeout_seconds": self._config_values.get("scan_timeout_seconds", 45),
         }
 
+    @_backend_locked
     def save_settings(self, payload: dict[str, Any]):
         profile = payload.get("active_profile", self._config_values.get("detection_profile", "credentials"))
         if profile not in {"credentials", "sensitive", "firm"}:

@@ -1,4 +1,5 @@
 import base64
+import threading
 import unittest
 from types import SimpleNamespace
 
@@ -40,6 +41,7 @@ class FindingCategoryTests(unittest.TestCase):
             jobs=lambda: [],
         )
         backend = object.__new__(BuddyBackend)
+        backend._lock = threading.RLock()
         backend._host = host
         backend._observation_store = store
 
@@ -60,6 +62,7 @@ class FindingCategoryTests(unittest.TestCase):
 
         session = Session()
         backend = object.__new__(BuddyBackend)
+        backend._lock = threading.RLock()
         backend._credential_session = session
         result = backend.credential_backup("backup phrase")
         self.assertEqual(session.passphrase, "backup phrase")
