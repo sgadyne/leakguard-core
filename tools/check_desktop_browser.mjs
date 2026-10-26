@@ -13,6 +13,7 @@ const require = createRequire(path.join(environment.prior_playwright_modules, 'p
 const { chromium } = require('playwright');
 let browser;
 const receipt = { passed: false, scope: 'Chromium production UI with test-only bridge; not Electron native acceptance' };
+let stage = 'launch';
 try {
   browser = await chromium.launch({ headless: true, executablePath: environment.headless_executable,
     env: { ...process.env, LD_LIBRARY_PATH: environment.libraries } });
@@ -36,8 +37,10 @@ try {
       onEvent: () => () => {},
     });
   }, { token: configuration.token });
+  stage = 'load-and-authenticate';
   await page.goto(configuration.origin, { waitUntil: 'domcontentloaded' });
   await page.getByText('Connected', { exact: true }).waitFor();
+  stage = 'unlock-scan-storage';
   await page.getByRole('button', { name: 'Unlock scan storage', exact: true }).first().click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Passphrase', { exact: true }).fill(configuration.observationPhrase);
@@ -45,10 +48,12 @@ try {
   await dialog.waitFor({ state: 'hidden' });
   const navigation = page.getByRole('navigation', { name: 'Main navigation' });
   for (const label of ['Overview', 'Sources', 'Findings', 'Credential vault', 'Plugins', 'Settings']) {
+    stage = 'route-' + label.toLowerCase().replaceAll(' ', '-');
     await navigation.getByRole('button', { name: label, exact: true }).click();
     await page.getByRole('heading', { level: 1, name: label, exact: true }).waitFor();
   }
   await navigation.getByRole('button', { name: 'Findings', exact: true }).click();
+  stage = 'real-findings-grid';
   await page.getByRole('grid').waitFor();
   const styleBoundary = await page.evaluate(() => {
     const nonce = document.querySelector('meta[name="buddy-style-nonce"]')?.content;
@@ -64,6 +69,7 @@ try {
   if (configuration.screenshot) await page.screenshot({ path: configuration.screenshot, fullPage: true });
 } catch (error) {
   receipt.failure = 'browser-' + error.name;
+  receipt.stage = stage;
 } finally {
   if (browser) await browser.close();
 }

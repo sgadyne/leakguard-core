@@ -278,8 +278,8 @@ def main():
                                                        "observationPhrase": observation_phrase,
                                                        "screenshot": str(work / "findings.png")}).encode(),
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+            details["browser"] = json.loads(browser.stdout) if browser.stdout else {"failure": "browser-driver-no-receipt"}
             require(browser.returncode == 0, "production-browser-check-failed")
-            details["browser"] = json.loads(browser.stdout)
             checks["production_browser_nonce_navigation_real_findings"] = details["browser"].get("passed") is True
         require(restarted.stop(), "restarted-backend-stop-failed")
         checks["encrypted_stores_and_plugins_retained_after_restart"] = True
