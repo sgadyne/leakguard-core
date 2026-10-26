@@ -956,14 +956,15 @@ class FindingAdmissionTests(unittest.TestCase):
         service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
         original = service._finding
         calls = []
+        clock = [time.monotonic()]
         def classify(*args, **kwargs):
             calls.append(1)
             finding = original(*args, **kwargs)
-            time.sleep(0.03)
+            clock[0] += 31
             return finding
         try:
-            with patch.object(backends, 'detect', return_value=tuple(backends.BackendFinding('literal-password', 1, 1) for _ in range(10000))), patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(service, '_finding', side_effect=classify):
-                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(0.02, 1))
+            with patch.object(backends, 'detect', return_value=tuple(backends.BackendFinding('literal-password', 1, 1) for _ in range(10000))), patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(service, '_finding', side_effect=classify), patch.object(engine.time, 'monotonic', side_effect=lambda: clock[0]):
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
             self.assertEqual(len(calls), 1)
             self.assertEqual(report.counts.findings, 1)
             self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)

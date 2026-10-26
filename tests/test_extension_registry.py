@@ -392,7 +392,7 @@ class RegistryTests(unittest.TestCase):
     def test_script_activation_is_explicit_checked_profile_scoped_and_private(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
             registry = ExtensionRegistry(Path(folder))
-            spec = {'id': 'firm-check', 'argv': ['/private/runtime/python', '/private/firm/check.py'],
+            spec = {'id': 'firm-check', 'argv': [str(Path(sys.executable).absolute()), str(Path(folder) / 'check.py')],
                     'rules': [{'id': 'firm-code', 'minimum_severity': 'review'}]}
             with patch('leakguard_core.plugins.load_scripts', side_effect=AssertionError('registration executed code')):
                 registered = registry.register_script(spec)

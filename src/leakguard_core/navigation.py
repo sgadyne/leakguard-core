@@ -464,7 +464,10 @@ class Navigation:
                         if len(values) >= maximum:
                             raise NavigationError("entry-limit")
                         try:
-                            info = entry.stat(follow_symlinks=False)
+                            # Windows DirEntry.stat() has zero device/inode
+                            # fields; no-follow os.stat retains boundary identity.
+                            info = (os.stat(target / entry.name, follow_symlinks=False)
+                                    if os.name == "nt" else entry.stat(follow_symlinks=False))
                             if same_file_system and info.st_dev != anchor_device:
                                 raise NavigationError("filesystem-boundary")
                             kind = ("symlink" if entry.is_symlink() else

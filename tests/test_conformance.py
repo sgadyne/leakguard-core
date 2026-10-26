@@ -155,7 +155,7 @@ class PublicModelConformanceTests(unittest.TestCase):
 
         self.assertEqual([item.name for item in fields(finding)], [
             'id', 'source', 'part_id', 'start_line', 'end_line', 'rule',
-            'detector_id', 'detector_severity', 'severity', 'classification', 'proof_id',
+            'detector_id', 'detector_severity', 'severity', 'classification', 'proof_id', 'analysis',
         ])
         self.assertNotIn('value', finding.__slots__)
 
@@ -682,7 +682,7 @@ except MemoryError:
                 memory_bytes=512 * 1024 * 1024, worker_policy=_darwin_test_worker_policy(),
             )
             self.assertEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, b'done\n')
+            self.assertEqual(result.stdout, ('done' + os.linesep).encode())
             time.sleep(0.8)
             self.assertFalse(marker.exists(), 'worker descendant outlived the completed worker')
 
@@ -707,7 +707,7 @@ except MemoryError:
                 max_output_bytes=1024, memory_bytes=256 * 1024 * 1024,
             )
             self.assertEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, b'done\n')
+            self.assertEqual(result.stdout, ('done' + os.linesep).encode())
             time.sleep(1.5)
             self.assertFalse(marker.exists(), 'worker descendant outlived the completed worker')
 

@@ -113,5 +113,19 @@ python -m leakguard_core.conformance \
   --cases src/presidio_detector/cases.json
 ```
 
-The core's session worker should also be checked with two sequential requests:
-one adapter construction, two detections, and one cleanup.
+The installed-package CI smoke uses Python 3.11 on Linux, macOS and Windows:
+
+```sh
+# From the repository root, after installing core, adapter, locked dependencies
+# and the synthetic firm example into the selected Python 3.11 environment:
+python tools/check_presidio_smoke.py
+```
+
+It checks built-in email and firm pattern positives, a negative control,
+value-free results, two requests in one owned worker session, and cleanup.
+The direct analyzer probe denies socket connections. No NER model is installed
+or downloaded. The worker smoke explicitly uses a 2 GiB memory budget; macOS
+selects `supervised-alpha` (RSS supervision), while Linux and Windows retain
+`strict` allocation/Job Object limits. This lane does not establish NER, Tika,
+or production corporate-recognizer acceptance. The adapter and example remain
+pinned to Python 3.11 until their dependency stack is separately qualified.

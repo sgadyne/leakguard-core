@@ -439,7 +439,7 @@ class SafeInputTests(unittest.TestCase):
             with patch.object(safe_inputs.os, "open", side_effect=AssertionError("must not follow symlink")):
                 safe_inputs._update_file_digest(digest, link, root.resolve())
             expected = hashlib.sha256(
-                b"symlink\0" + os.fsencode(str(outside)) + b"\0"
+                b"symlink\0" + os.fsencode(os.readlink(link)) + b"\0"
             ).digest()
             self.assertEqual(digest.digest(), expected)
 
@@ -502,7 +502,7 @@ class BenchmarkAggregationTests(unittest.TestCase):
         with patch.object(benchmark_scan.importlib.metadata, "version", side_effect=package_version):
             self.assertEqual(benchmark_scan._installed_dependencies(), {
                 "packaging": "unavailable", "pypdf": "unavailable",
-                "olefile": "unavailable", "psutil": "7.2.2",
+                "olefile": "unavailable", "psutil": "7.2.2", "cachetools": "unavailable",
             })
 
     def test_benchmark_module_uses_its_copied_tool_root(self):

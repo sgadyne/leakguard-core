@@ -10,6 +10,25 @@ from leakguard_core.scan_store import MemoryScanStore
 from leakguard_core.sources import AcquisitionError, FilesystemBoundary, acquire_file, capture_anchor, confirm_absence, scoped_scandir, _bounded_file
 
 
+class RegularAcquisitionTests(unittest.TestCase):
+    def test_regular_file_acquisition_preserves_native_metadata_checks(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-regular-acquisition-') as temporary:
+            path = Path(temporary) / 'synthetic.txt'
+            path.write_bytes(b'synthetic content')
+            try:
+                acquired = _bounded_file(path, 1024)
+            except AcquisitionError as error:
+                # Synthetic metadata makes native stat/fstat differences
+                # diagnosable without exposing file contents or source paths.
+                named = path.stat()
+                with path.open('rb') as stream:
+                    opened = os.fstat(stream.fileno())
+                fields = ('st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+                self.fail(f'{error.code}: path={tuple(getattr(named, key) for key in fields)}, '
+                          f'fd={tuple(getattr(opened, key) for key in fields)}')
+            self.assertEqual(acquired, b'synthetic content')
+
+
 @unittest.skipIf(os.name == 'nt', 'native Windows reparse validation requires its runner')
 class SourceBoundaryTests(unittest.TestCase):
     def test_same_inode_link_cannot_authorize_out_of_scope_absence(self):

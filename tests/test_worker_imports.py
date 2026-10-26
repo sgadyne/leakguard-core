@@ -167,6 +167,13 @@ class WorkerImportIsolationTests(unittest.TestCase):
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         self.assertFalse((site / "pypdf").exists())
         self.assertTrue((site / "psutil").exists())
+        cachetools = importlib.util.find_spec("cachetools")
+        self.assertIsNotNone(cachetools)
+        shutil.copytree(Path(cachetools.origin).parent, site / "cachetools",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        distribution = importlib.metadata.distribution("cachetools")
+        shutil.copytree(distribution._path, site / distribution._path.name,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
         # The PDF header is enough to select the PDF parser. If it imports the
         # local shadow, that fake parser reports complete benign text instead.

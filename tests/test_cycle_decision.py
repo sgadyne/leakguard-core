@@ -109,9 +109,9 @@ class CycleDecisionTests(unittest.TestCase):
                 store = MemoryScanStore() if kind == 'memory' else SQLiteScanStore(base / 'state')
                 service = engine.ScanService(config, store=store)
                 from leakguard_core.sources import scoped_scandir
-                def guarded(path, boundary=None):
+                def guarded(path, boundary=None, **kwargs):
                     self.assertNotEqual(Path(path), excluded_dir)
-                    return scoped_scandir(path, boundary)
+                    return scoped_scandir(path, boundary, **kwargs)
                 with patch.object(backends, 'detect', return_value=()) as detect, patch('leakguard_core.sources.scoped_scandir', side_effect=guarded):
                     report = service.audit('synthetic', limits=m.ScanLimits(5, 10))
                 self.assertTrue(report.coverage.required_complete)
@@ -126,7 +126,7 @@ class CycleDecisionTests(unittest.TestCase):
         for kind in ('memory', 'sqlite'):
             with self.subTest(store=kind), tempfile.TemporaryDirectory(prefix='leakguard-cycle-') as folder:
                 base = Path(folder); root = base / 'source'; root.mkdir()
-                excluded = root / 'excluded.txt'; excluded.write_text('SyntheticNeverReadExcluded42')
+                excluded = root / '0-excluded.txt'; excluded.write_text('SyntheticNeverReadExcluded42')
                 for name in ('a.txt', 'b.txt'):
                     (root / name).write_text('clean fixture')
                 config = {'audit_scopes': {'synthetic': str(root)}, 'exclude_roots': [str(excluded)]}
