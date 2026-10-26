@@ -18,12 +18,12 @@ closure declared by those local wheel metadata files:
 
 ```sh
 mkdir -p artifacts/wheelhouse
-python -m build --wheel --no-deps --outdir artifacts/wheelhouse .
-python -m build --wheel --no-deps --outdir artifacts/wheelhouse packages/leakguard_host
-python -m build --wheel --no-deps --outdir artifacts/wheelhouse packages/leakguard_vault
-python -m build --wheel --no-deps --outdir artifacts/wheelhouse apps/buddy
-python -m build --wheel --no-deps --outdir artifacts/wheelhouse plugins/sensitive_basics
-python -m build --wheel --no-deps --outdir artifacts/wheelhouse templates/firm_plugin
+python -m build --wheel --outdir artifacts/wheelhouse .
+python -m build --wheel --outdir artifacts/wheelhouse packages/leakguard_host
+python -m build --wheel --outdir artifacts/wheelhouse packages/leakguard_vault
+python -m build --wheel --outdir artifacts/wheelhouse apps/buddy
+python -m build --wheel --outdir artifacts/wheelhouse plugins/sensitive_basics
+python -m build --wheel --outdir artifacts/wheelhouse templates/firm_plugin
 python -m pip download --only-binary=:all: --dest artifacts/wheelhouse \
   pip==26.2.2 cryptography==50.0.2 keyring==25.7.0 psutil==7.2.2 \
   'packaging>=24,<27'
@@ -66,7 +66,11 @@ The command prints the bundle SHA-256. Keep that digest with the archive when
 transferring it through an offline corporate channel. The builder refuses a
 missing or mismatched pinned distribution. Its manifest contains every wheel
 and backend hash and verifies package name and version from wheel metadata
-before install. A complete install creates its private venv at the final
+before install. It also includes a hash-indexed `support/` tree with the install
+guide, alpha limits, worker policy, firm setup instructions, script example,
+and reviewed firm-plugin starter/promotion fixtures. The installer copies that
+tree to the immutable release beside `wheelhouse/`; it is not installed as
+executable code. A complete install creates its private venv at the final
 immutable release path, verifies pip for reviewed local extension installs,
 and runs installed console-script help plus a short loopback Buddy startup
 check before activating the release.

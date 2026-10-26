@@ -29,6 +29,8 @@ MANAGED_FILES = ("installer.py", "install.sh", "install.ps1", "default-config.js
 MAX_BUNDLE_MEMBERS = 1000
 MAX_BUNDLE_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 MAX_BUNDLE_MEMBER_BYTES = 256 * 1024 * 1024
+MAX_SUPPORT_FILES = 128
+MAX_SUPPORT_FILE_BYTES = 8 * 1024 * 1024
 
 
 class DeployError(RuntimeError):
@@ -178,6 +180,29 @@ def read_manifest(path: Path) -> dict[str, Any]:
         raise DeployError("invalid source commit in release manifest")
     if not isinstance(data.get("buddy_command", "leakguard-buddy"), str):
         raise DeployError("invalid Buddy command in manifest")
+    support_files = data.get("support_files", [])
+    if not isinstance(support_files, list) or len(support_files) > MAX_SUPPORT_FILES:
+        raise DeployError("release manifest has an invalid support file list")
+    support_paths: set[str] = set()
+    for item in support_files:
+        if not isinstance(item, dict):
+            raise DeployError("release manifest has an invalid support file record")
+        relative, digest = item.get("path"), item.get("sha256")
+        if not isinstance(relative, str):
+            raise DeployError("release manifest has an invalid support path")
+        posix = PurePosixPath(relative)
+        windows = PureWindowsPath(relative)
+        if (posix.is_absolute() or windows.is_absolute() or windows.drive or "\\" in relative
+                or "\x00" in relative or not posix.parts or posix.parts[0] != "support"
+                or any(part in {"", ".", ".."} for part in posix.parts)
+                or posix.as_posix() != relative):
+            raise DeployError("release manifest has an unsafe support file path")
+        key = relative.casefold()
+        if key in support_paths:
+            raise DeployError("release manifest has duplicate support file paths")
+        support_paths.add(key)
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise DeployError("release manifest has an invalid support file hash")
     service_command = data.get("service_command", [])
     if not isinstance(service_command, list) or not all(isinstance(item, str) and item and "\x00" not in item for item in service_command):
         raise DeployError("invalid service command in manifest")
@@ -320,6 +345,7 @@ def validate_wheelhouse(bundle: Path, manifest: dict[str, Any]) -> list[Path]:
         if normalized_name(fields.get("Name", "")) != normalized_name(item["name"]) or fields.get("Version") != item["version"]:
             raise DeployError(f"wheel identity does not match the release manifest: {item['filename']}")
         verified.append(path)
+    validate_support_files(bundle, manifest)
     pins = manifest.get("pinned_distributions", {})
     if not isinstance(pins, dict):
         raise DeployError("release manifest has invalid exact pins")
@@ -365,6 +391,27 @@ def validate_wheelhouse(bundle: Path, manifest: dict[str, Any]) -> list[Path]:
         raise DeployError("release bundle contains a backend for a different target platform")
     if target_backend_count > 1 or (manifest["release_quality"] == "complete") != (target_backend_count == 1):
         raise DeployError("release quality does not match its target Gitleaks backend artifacts")
+    return verified
+
+
+def validate_support_files(bundle: Path, manifest: dict[str, Any]) -> list[tuple[Path, Path]]:
+    verified: list[tuple[Path, Path]] = []
+    records = manifest.get("support_files", [])
+    total_size = 0
+    for item in records:
+        relative = Path(*PurePosixPath(item["path"]).parts)
+        source = _bundle_child(bundle, relative)
+        if source.is_symlink() or not source.is_file():
+            raise DeployError("release support file is missing or is a symbolic link")
+        size = source.stat().st_size
+        if size > MAX_SUPPORT_FILE_BYTES:
+            raise DeployError("release support file exceeds the 8 MiB limit")
+        total_size += size
+        if total_size > MAX_SUPPORT_FILE_BYTES * MAX_SUPPORT_FILES:
+            raise DeployError("release support files exceed the aggregate size limit")
+        if sha256_file(source) != item["sha256"]:
+            raise DeployError("release support file hash mismatch")
+        verified.append((source, relative))
     return verified
 
 
@@ -633,6 +680,10 @@ def _build_release(bundle: Path, release: Path, manifest: dict[str, Any], wheels
             shutil.copy2(_bundle_child(bundle, Path("deploy") / filename), release / "deploy" / filename)
         source_manifest = _bundle_child(bundle, Path("deploy/release-manifest.json"))
         shutil.copy2(source_manifest, release / "deploy" / source_manifest.name)
+        for source, relative in validate_support_files(bundle, manifest):
+            destination = release / relative
+            _private_mkdir(destination.parent)
+            shutil.copyfile(source, destination)
         wheel_dir = release / "wheelhouse"
         _private_mkdir(wheel_dir)
         for source in wheels:
@@ -776,7 +827,8 @@ def _ensure_default_config(state: Path, template: Path, release: Path, manifest:
     config = state / "config.json"
     if config.is_symlink():
         raise DeployError("runtime config may not be a symbolic link; preserved it without modification")
-    if config.exists():
+    is_new_config = not config.exists()
+    if not is_new_config:
         try:
             value = json.loads(config.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -797,7 +849,11 @@ def _ensure_default_config(state: Path, template: Path, release: Path, manifest:
     value["observation_path"] = str(state / "observations.lgo")
     backend_name = "gitleaks.exe" if manifest["target_platform"].startswith("windows-") else "gitleaks"
     value["gitleaks_executable"] = str((release / "backends" / manifest["target_platform"] / backend_name).resolve())
-    if sys.platform == "darwin":
+    if "worker_policy" in value:
+        worker_policy = value["worker_policy"]
+        if not isinstance(worker_policy, str) or worker_policy not in {"strict", "supervised-alpha"}:
+            raise DeployError("runtime config has an invalid worker_policy; preserved it without modification")
+    if sys.platform == "darwin" and (is_new_config or "worker_policy" not in value):
         value["worker_policy"] = "supervised-alpha"
     _atomic_json(config, value)
 

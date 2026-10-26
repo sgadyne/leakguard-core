@@ -22,6 +22,28 @@ ROOT = Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,79}$")
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SUPPORT_FILES = (
+    "docs/INSTALL.md",
+    "docs/ALPHA.md",
+    "docs/alpha-worker-policy.md",
+    "docs/firm-plugin-setup.md",
+    "examples/script_checks/README.md",
+    "examples/script_checks/check.py",
+    "templates/firm_plugin/README.md",
+    "templates/firm_plugin/pyproject.toml",
+    "templates/firm_plugin/script-cases.json",
+    "templates/firm_plugin/script-check.json",
+    "templates/firm_plugin/scripts/README.md",
+    "templates/firm_plugin/scripts/firm_check.py",
+    "templates/firm_plugin/fixtures/cases-promoted.json",
+    "templates/firm_plugin/fixtures/script-negative.txt",
+    "templates/firm_plugin/fixtures/script-positive.txt",
+    "templates/firm_plugin/src/firm_plugin/__init__.py",
+    "templates/firm_plugin/src/firm_plugin/cases.json",
+    "templates/firm_plugin/src/firm_plugin/leakguard-plugin.json",
+    "templates/firm_plugin/src/firm_plugin/plugin.py",
+)
+MAX_SUPPORT_FILE_BYTES = 8 * 1024 * 1024
 
 
 def sha256_file(path: Path) -> str:
@@ -62,6 +84,21 @@ def normalized_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
 
+def support_records() -> tuple[list[dict[str, str]], list[Path]]:
+    records: list[dict[str, str]] = []
+    sources: list[Path] = []
+    for relative in SUPPORT_FILES:
+        path = ROOT / relative
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"required release support file is missing or unsafe: {relative}")
+        if path.stat().st_size > MAX_SUPPORT_FILE_BYTES:
+            raise ValueError(f"release support file exceeds the 8 MiB limit: {relative}")
+        bundle_path = (Path("support") / Path(relative)).as_posix()
+        records.append({"path": bundle_path, "sha256": sha256_file(path)})
+        sources.append(path)
+    return records, sources
+
+
 def validate_commit(value: str) -> None:
     if value != "unknown" and not re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
         raise ValueError("source commit must be a hexadecimal Git commit ID or 'unknown'")
@@ -100,6 +137,7 @@ def make_bundle(args: argparse.Namespace) -> Path:
     wheel_paths = sorted(wheelhouse.glob("*.whl"), key=lambda path: path.name.lower())
     if not wheel_paths:
         raise ValueError("wheelhouse contains no wheel artifacts")
+    support_files, support_sources = support_records()
 
     wheels: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -171,9 +209,10 @@ def make_bundle(args: argparse.Namespace) -> Path:
     elif not args.partial:
         raise ValueError("a complete release requires the target platform's pinned Gitleaks executable; use --partial only for an explicitly incomplete target")
 
-    if len(wheels) + len(backend_artifacts) + 6 > 1000:
+    if len(wheels) + len(backend_artifacts) + len(support_files) + 6 > 1000:
         raise ValueError("bundle would exceed the installer 1,000-member limit")
     uncompressed_bytes = sum(path.stat().st_size for path in wheel_paths)
+    uncompressed_bytes += sum(path.stat().st_size for path in support_sources)
     uncompressed_bytes += sum(Path(item["source_path"]).stat().st_size for item in backend_artifacts)
     uncompressed_bytes += sum((ROOT / "deploy" / filename).stat().st_size
                               for filename in ("installer.py", "install.sh", "install.ps1", "default-config.json"))
@@ -199,6 +238,10 @@ def make_bundle(args: argparse.Namespace) -> Path:
         for filename in ("installer.py", "install.sh", "install.ps1", "default-config.json"):
             shutil.copyfile(ROOT / "deploy" / filename, stage / "deploy" / filename)
         shutil.copyfile(release_spec_path, stage / "deploy" / "release-manifest.json")
+        for record, source in zip(support_files, support_sources):
+            destination = stage / Path(record["path"])
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copyfile(source, destination)
         for artifact in backend_artifacts:
             destination = stage / artifact["bundle_path"]
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -218,6 +261,7 @@ def make_bundle(args: argparse.Namespace) -> Path:
             "default_config_sha256": sha256_file(ROOT / "deploy" / "default-config.json"),
             "pinned_distributions": pins,
             "packages": wheels,
+            "support_files": support_files,
             "backend_artifacts": [{key: value for key, value in artifact.items() if key != "source_path"}
                                   for artifact in backend_artifacts],
             "buddy_command": args.buddy_command or release_spec.get("buddy_command", "leakguard-buddy"),
