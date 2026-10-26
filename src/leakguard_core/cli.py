@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -14,7 +15,7 @@ from . import presentation
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if not arguments or arguments[0] not in {"scan", "audit", "drain"}:
+    if not arguments or arguments[0] not in {"scan", "audit", "drain", "doctor"}:
         return _run_legacy(arguments, argv is None)
 
     parser = _parser()
@@ -22,6 +23,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = _load_config(args.config)
         config_values = config.to_mapping()
+        if args.command == 'doctor':
+            return _doctor(config_values, args.format)
         from . import settings
 
         state_dir = Path(args.state_dir).expanduser() if args.state_dir else settings.state_directory()
@@ -73,6 +76,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="leakguard")
     commands = parser.add_subparsers(dest="command", required=True)
+    doctor = commands.add_parser("doctor", help="Check worker policy and SQLite checkpoint support")
+    doctor.add_argument("--config", help="External JSON configuration (also accepts LEAKGUARD_CONFIG)")
+    doctor.add_argument("--format", choices=("text", "json"), default="text")
     scan = commands.add_parser("scan", help="Scan files or directories through the shared service")
     scan.add_argument("paths", nargs="+", help="Files and directories explicitly selected for scanning")
     audit = commands.add_parser("audit", help="Advance a resumable configured scope audit")
@@ -90,6 +96,32 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--budget-seconds", type=_positive_int, default=deadline)
         command.add_argument("--max-files", type=_positive_int, default=files)
     return parser
+
+
+def _doctor(config: dict[str, object], output_format: str) -> int:
+    import shutil
+    import sqlite3
+    from ._supervision import worker_capabilities
+    execution = worker_capabilities(config['worker_policy'])
+    with sqlite3.connect(':memory:') as connection:
+        checkpoint = all(hasattr(connection, name) for name in ('serialize', 'deserialize'))
+    selected = config.get('gitleaks_executable') or os.environ.get('LEAKGUARD_GITLEAKS') or 'gitleaks'
+    backend_available = bool(shutil.which(selected))
+    healthy = execution['available'] and checkpoint and backend_available
+    result = {'schema_version': 1, 'healthy': healthy, 'execution': execution,
+              'sqlite_serialization': checkpoint, 'backend_available': backend_available,
+              'detection_profile': config['detection_profile'],
+              'scan_workers': config['scan_workers']}
+    if output_format == 'json':
+        print(json.dumps(result, sort_keys=True, separators=(',', ':')))
+    else:
+        print('LeakGuard doctor: ' + ('ready' if healthy else 'unavailable requirements'))
+        print(f"Worker policy: {execution['policy']}; memory: {execution['memory_enforcement']}")
+        if execution['memory_enforcement'] == 'rss-watchdog':
+            print('RSS is sampled; this is not a hard allocation limit.')
+        print(f"SQLite encrypted checkpoint support: {'available' if checkpoint else 'unavailable'}")
+        print(f"Gitleaks executable: {'available' if backend_available else 'unavailable'}")
+    return 0 if healthy else 2
 
 
 def _load_config(explicit_path: str | None) -> ScanConfig:

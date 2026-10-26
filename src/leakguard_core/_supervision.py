@@ -37,7 +37,7 @@ def worker_capabilities(policy: str = 'strict') -> dict[str, object]:
     This is an explicit doctor/API action, not an import-time platform probe.
     Actual worker startup still verifies that the required primitive works.
     """
-    if policy not in WORKER_POLICIES:
+    if type(policy) is not str or policy not in WORKER_POLICIES:
         raise WorkerError('worker-input-invalid')
     supported = os.name in {'posix', 'nt'}
     hard = supported and sys.platform != 'darwin'
@@ -49,6 +49,15 @@ def worker_capabilities(policy: str = 'strict') -> dict[str, object]:
             watchdog = True
         except Exception:
             pass
+    available = False
+    if supported and (hard or watchdog):
+        try:
+            result = run_worker([sys.executable, '-I', '-c', 'pass'], b'',
+                                timeout=3, worker_policy=policy)
+            available = result.returncode == 0
+        except WorkerError:
+            pass
+    hard = hard and available
     return {
         'policy': policy,
         'platform': sys.platform,
@@ -56,7 +65,7 @@ def worker_capabilities(policy: str = 'strict') -> dict[str, object]:
         'memory_enforcement': ('rss-watchdog' if not hard and watchdog else
                                'platform-hard-limit' if hard else 'unavailable'),
         'rss_watchdog_available': watchdog,
-        'available': supported and (hard or watchdog),
+        'available': available,
         'bounded_input_output': supported,
         'wall_timeout': supported,
         'descendant_cleanup': ('windows-job' if os.name == 'nt' else

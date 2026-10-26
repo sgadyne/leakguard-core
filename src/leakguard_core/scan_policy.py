@@ -283,7 +283,7 @@ def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manif
         executable = shutil.which(str(executable))
     binary_id = _file_identity(executable) if executable else 'unavailable'
     specs = list(plugin_specs or config.get('plugins', ()))
-    dependencies = ['pypdf', 'olefile', 'packaging']
+    dependencies = ['pypdf', 'olefile', 'packaging', 'psutil']
     module_artifacts = []
     try:
         distributions = importlib.metadata.packages_distributions() if specs else {}
@@ -313,7 +313,9 @@ def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manif
     except RuleConfigError:
         rule_artifacts = [('unavailable', 'unavailable')]
         complete = False
-    value = {'abi': 'leakguard-runtime-2', 'core': core,
+    value = {'abi': 'leakguard-runtime-3', 'core': core,
+             'worker_policy': config.get('worker_policy', 'strict'),
+             'detection_profile': config.get('detection_profile', 'credentials'),
              'python': [sys.implementation.name, platform.python_version(), _file_identity(sys.executable)],
              'platform': [platform.system(), platform.machine()], 'gitleaks': binary_id,
              'rules': _file_identity(rules_path), 'rule_closure': rule_artifacts,
