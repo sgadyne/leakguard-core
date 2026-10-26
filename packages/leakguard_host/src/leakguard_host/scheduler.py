@@ -80,6 +80,7 @@ class HostService:
         self._thread: threading.Thread | None = None
         self._current: str | None = None
         self._storage_error: str | None = None
+        self._worker_error: str | None = None
         try:
             value = self._state_store.load_host_state()
             self._state = self._validate_state(value)
@@ -287,6 +288,7 @@ class HostService:
         now = _timestamp(self._clock())
         job = {"id": uuid.uuid4().hex, "source_id": source_id, "state": "queued", "created_at": now,
                "updated_at": now, "next_retry_at": None, "attempts": 0, "slices": 0, "files_scanned": 0,
+               "stalled_slices": 0,
                "pending_files": None, "pending_directories": None, "coverage": "incomplete", "last_error": None, "report_id": None}
         self._state["jobs"][job["id"]] = job
         return job
@@ -306,6 +308,8 @@ class HostService:
             if state == "queued" and not self._source(job["source_id"])["enabled"]:
                 raise HostError("source-disabled")
             job.update(state=state, updated_at=_timestamp(self._clock()), next_retry_at=None)
+            if state == "queued":
+                job["stalled_slices"] = 0
             return job
         result = self._mutate(action)
         self._wake.set()
@@ -405,6 +409,7 @@ class HostService:
                     source_now = self._source(job["source_id"])
                     job["updated_at"] = _timestamp(self._clock())
                     job["slices"] += 1
+                    previous_pending = (job["pending_files"], job["pending_directories"])
                     if report is not None:
                         job.update(report_id=report.run_id, files_scanned=job["files_scanned"] + report.counts.scanned + report.counts.reused,
                                    pending_files=report.coverage.pending_files, pending_directories=report.coverage.pending_directories)
@@ -427,7 +432,11 @@ class HostService:
                         elif codes - {"budget-exhausted", "cancelled"}:
                             job.update(state="failed", last_error=sorted(codes - {"budget-exhausted", "cancelled"})[0], coverage="incomplete")
                         else:
-                            job.update(state="queued", last_error=None)
+                            pending = (report.coverage.pending_files, report.coverage.pending_directories)
+                            stalled = report.counts.results == 0 and pending == previous_pending
+                            job["stalled_slices"] = job.get("stalled_slices", 0) + 1 if stalled else 0
+                            job.update(state="paused" if job["stalled_slices"] >= 3 else "queued",
+                                       last_error="scan-progress-stalled" if job["stalled_slices"] >= 3 else None)
                     return job
                 result = self._mutate(finish)
             return {"worked": True, "status": result["state"], "job": result}
@@ -447,10 +456,11 @@ class HostService:
                 store_status = self._state_store.status() if callable(getattr(self._state_store, "status", None)) else {}
             except Exception:
                 store_status = {}
+            available = self._storage_error is None and store_status.get("unlocked") is not False and store_status.get("healthy") is not False
             return {"scheduler": "running" if self._thread and self._thread.is_alive() else "stopped",
-                    "active_job": self._current, "observation_available": self._storage_error is None,
-                    "unattended_available": store_status.get("unattended_available") is True,
-                    "storage_error": self._storage_error, "sources": len(self._state["sources"]),
+                    "active_job": self._current, "observation_available": available,
+                    "unattended_available": available and store_status.get("unattended_available") is True,
+                    "storage_error": self._storage_error, "worker_error": self._worker_error, "sources": len(self._state["sources"]),
                     "pending_jobs": sum(job["state"] in _ACTIVE for job in self._state["jobs"].values()),
                     "slice_seconds": self._limits.deadline_seconds, "slice_max_files": self._limits.max_files}
 
@@ -461,6 +471,7 @@ class HostService:
             if self._thread and self._thread.is_alive():
                 return self.status()
             self._stop.clear()
+            self._worker_error = None
             self._thread = threading.Thread(target=self._run, name="leakguard-host-scheduler", daemon=True)
             self._thread.start()
             return self.status()
@@ -470,6 +481,17 @@ class HostService:
             try:
                 result = self.tick()
             except Exception:
+                with self._lock:
+                    self._worker_error = "scheduler-failed"
+                    if self._storage_error is None:
+                        def pause_failed_worker():
+                            for job in self._state["jobs"].values():
+                                if job["state"] == "running":
+                                    job.update(state="paused", coverage="incomplete", last_error="scheduler-failed", updated_at=_timestamp(self._clock()))
+                        try:
+                            self._mutate(pause_failed_worker)
+                        except HostError:
+                            pass
                 self._stop.set()
                 return
             self._wake.wait(0.05 if result["worked"] else 1)

@@ -37,12 +37,11 @@ def _target(value: str) -> str:
 
 
 def _terminate(process):
-    if process.poll() is not None:
-        return
     try:
         if os.name == "posix":
+            # Descendants can outlive the process leader and retain pipe FDs.
             os.killpg(process.pid, signal.SIGKILL)
-        else:
+        elif process.poll() is None:
             process.kill()
     except (ProcessLookupError, OSError):
         pass
@@ -78,9 +77,13 @@ def _exchange(argv: list[str], payload: bytes, *, timeout: float, maximum: int, 
     def write():
         try:
             process.stdin.write(payload)
-            process.stdin.close()
         except (OSError, BrokenPipeError):
             pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
     readers = [threading.Thread(target=read, args=(process.stdout, True), daemon=True),
                threading.Thread(target=read, args=(process.stderr, False), daemon=True)]
     writer = threading.Thread(target=write, daemon=True)

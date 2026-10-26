@@ -3,10 +3,12 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import hashlib
+import os
 from pathlib import Path
 import plistlib
 import subprocess
 import sys
+import time
 from tempfile import TemporaryDirectory
 import threading
 import unittest
@@ -115,6 +117,18 @@ class HostTests(unittest.TestCase):
         self.assertEqual(state["pending_files"], 3)
         self.assertIsNone(host.sources()[0]["last_success_at"])
 
+    def test_repeated_budget_without_progress_pauses_incomplete(self):
+        host = self.host(lambda scope, kw: report(False))
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        for _ in range(4):
+            host.tick()
+        state = host.job(job["id"])
+        self.assertEqual(state["state"], "paused")
+        self.assertEqual(state["last_error"], "scan-progress-stalled")
+        self.assertEqual(state["coverage"], "incomplete")
+        self.assertIsNone(host.sources()[0]["last_success_at"])
+
     def test_offline_backoff_then_reconnect(self):
         remote = self.root / "share"
         remote.mkdir()
@@ -140,6 +154,17 @@ class HostTests(unittest.TestCase):
             host.tick()
         self.assertNotEqual(self.store.host_state["jobs"][job["id"]]["state"], "completed")
         self.assertFalse(host.status()["observation_available"])
+        self.assertNotIn("SYNTHETIC_PRIVATE_ERROR", str(host.status()))
+
+    def test_unexpected_worker_failure_is_visible_and_durably_paused(self):
+        host = self.host()
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        with patch.object(host, "_available", side_effect=RuntimeError("SYNTHETIC_PRIVATE_ERROR")):
+            host.start()
+            host._thread.join(1)
+        self.assertEqual(host.status()["worker_error"], "scheduler-failed")
+        self.assertEqual(self.store.host_state["jobs"][job["id"]]["state"], "paused")
         self.assertNotIn("SYNTHETIC_PRIVATE_ERROR", str(host.status()))
 
     def test_schedule_is_opt_in_and_disabled_source_does_not_start(self):
@@ -238,6 +263,23 @@ class HostTests(unittest.TestCase):
         with self.assertRaisesRegex(HostError, "ssh-execution-failed") as raised:
             _exchange([sys.executable, "-c", "import sys;sys.stderr.write('SYNTHETIC_VALUE');sys.exit(1)"], b"", timeout=2, maximum=100)
         self.assertNotIn("SYNTHETIC_VALUE", str(raised.exception))
+
+    @unittest.skipUnless(os.name == "posix" and Path("/proc").is_dir(), "Linux process receipt")
+    def test_subprocess_descendant_is_reaped_after_leader_exits(self):
+        started = time.monotonic()
+        script = "import subprocess,sys;p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);print(p.pid,flush=True)"
+        output = _exchange([sys.executable, "-c", script], b"", timeout=2, maximum=100)
+        child = int(output)
+        try:
+            self.assertLess(time.monotonic() - started, 2)
+            status = Path(f"/proc/{child}/stat")
+            if status.exists():
+                self.assertIn(status.read_text().split()[2], {"Z", "X"})
+        finally:
+            try:
+                os.kill(child, 9)
+            except ProcessLookupError:
+                pass
 
     def test_remote_bundle_rejects_traversal_before_writing(self):
         self.root.chmod(0o700)
