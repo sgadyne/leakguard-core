@@ -169,16 +169,16 @@ class Scanner:
     def work_identity(self, *, policy: ScanPolicy, limits: ScanLimits) -> dict[str, str]:
         """Identify this prepared service's effective policy and runtime bytes.
 
-        A host can compare this value before resuming persisted jobs. The scan
-        itself still validates runtime artifacts before admission/publication.
+        A host compares this value before resuming persisted jobs. Its policy
+        digest excludes slice-only budgets and worker count; a report's policy_id
+        still identifies its full limits. Scans revalidate artifacts themselves.
         """
         self._ensure_open()
         if type(policy) is not ScanPolicy or type(limits) is not ScanLimits:
             raise TypeError('policy and limits must be ScanPolicy and ScanLimits')
-        from . import scan_policy
-        effective = scan_policy.effective_policy(policy, self._service.config)
-        return {'policy_id': scan_policy.policy_identity(config=self._service.config, policy=effective, limits=limits),
-                'runtime_id': self._service._runtime}
+        from .execution import work_identity
+        return work_identity(config=self._service.config, runtime=self._service._runtime,
+                             policy=policy, limits=limits)
 
     def scan(
         self,

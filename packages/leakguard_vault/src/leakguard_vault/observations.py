@@ -14,7 +14,7 @@ from . import _envelope as envelope
 from ._files import FileLock, atomic_write, read_bounded
 from .errors import VaultError
 
-_METHODS = frozenset("reserve get_cached record_result record_report latest_report query_findings_page query_findings source_anchor confirm_absent material_snapshot acquire_cycle reset_cycle lease_valid enqueue_work claim_work finish_directory get_directory_progress set_directory_progress directory_page record_directory_checks cycle_status release_cycle reconcile_cycle invalidate_scope record_event record_metadata".split())
+_METHODS = frozenset("reserve get_cached record_result record_report latest_report query_findings_page query_findings source_anchor confirm_absent material_snapshot acquire_cycle bind_cycle_identity reset_cycle lease_valid enqueue_work claim_work finish_directory get_directory_progress set_directory_progress directory_page record_directory_checks cycle_status release_cycle reconcile_cycle invalidate_scope record_event record_metadata".split())
 _MUTATIONS = _METHODS - frozenset("get_cached latest_report query_findings_page query_findings source_anchor material_snapshot lease_valid get_directory_progress directory_page cycle_status".split())
 
 
