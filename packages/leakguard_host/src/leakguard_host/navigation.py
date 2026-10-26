@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import errno
 import hashlib
 import json
@@ -18,6 +19,36 @@ from .errors import HostError
 
 MAX_PAGE = 500
 MAX_ENUMERATION = 20_000
+
+
+def _directory_identity(info):
+    return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+
+@contextmanager
+def _scoped_scandir(target: Path, root: Path | None, expected):
+    """Open descendants relative to the selected directory without links."""
+    if os.name != "posix" or os.open not in os.supports_dir_fd or os.scandir not in os.supports_fd:
+        with os.scandir(target) as entries:
+            yield entries
+        return
+    selected = root if root is not None else target
+    selected_info = selected.stat()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(selected, flags)
+    try:
+        if _directory_identity(os.fstat(descriptor)) != _directory_identity(selected_info):
+            raise HostError("directory-changed")
+        for component in target.relative_to(selected).parts:
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        if _directory_identity(os.fstat(descriptor)) != _directory_identity(expected):
+            raise HostError("directory-changed")
+        with os.scandir(descriptor) as entries:
+            yield entries
+    finally:
+        os.close(descriptor)
 
 
 def _path(value: str | Path) -> Path:
@@ -169,7 +200,7 @@ def browse(path: str | Path, *, root: str | Path | None = None, cursor: str | No
             except (ValueError, TypeError, UnicodeError):
                 raise HostError("cursor-invalid") from None
         deadline = time.monotonic() + 2
-        with os.scandir(target) as entries:
+        with _scoped_scandir(target, Path(base) if base is not None else None, info) as entries:
             for index, entry in enumerate(entries):
                 if index >= MAX_ENUMERATION or time.monotonic() > deadline:
                     response.update(truncated=True, status="listing-limit")
@@ -186,12 +217,14 @@ def browse(path: str | Path, *, root: str | Path | None = None, cursor: str | No
                     kind, status = "unknown", "permission-denied"
                 except OSError:
                     kind, status = "unknown", "unreadable"
-                response["entries"].append({"name": entry.name, "path": entry.path, "kind": kind, "status": status, "selectable": kind == "directory" and status == "available"})
+                response["entries"].append({"name": entry.name, "path": str(target / entry.name), "kind": kind, "status": status, "selectable": kind == "directory" and status == "available"})
         after = target.stat()
         if signature != [after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns]:
-            response.update(status="directory-changed", next_cursor=None, truncated=True)
-    except HostError:
-        raise
+            response.update(status="directory-changed", entries=[], next_cursor=None, truncated=True)
+    except HostError as error:
+        if error.code != "directory-changed":
+            raise
+        response.update(status="directory-changed", entries=[], next_cursor=None, truncated=True)
     except PermissionError:
         response["status"] = "permission-denied"
     except FileNotFoundError:

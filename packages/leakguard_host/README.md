@@ -43,7 +43,10 @@ source returns `source-busy` until that slice has released store ownership.
 root=selected_root, cursor=..., limit=100)` pages at most 500 rows and inspects
 at most 20,000 entries per request. A changed directory invalidates its cursor.
 Symlinks are shown without being followed; resolved navigation cannot leave a
-selected root. The engine handles no-follow scan acquisition. OS filesystem
+selected root. POSIX directory enumeration holds directory handles and opens
+descendants without following links, so an ancestor substituted during browsing
+cannot redirect enumeration outside that root. Changed listings discard their
+rows and require a refresh. The engine handles no-follow scan acquisition. OS filesystem
 calls can still wait for a stalled network filesystem; `stop()` reports
 `worker-still-running` when it cannot safely release store ownership. Do not
 close the store after that result. Mounted-share credentials and mount actions

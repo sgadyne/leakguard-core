@@ -111,6 +111,45 @@ class HostTests(unittest.TestCase):
         source = self.host().add_source(locations[1]["path"], kind=locations[1]["kind"])
         self.assertEqual(source["kind"], "local")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX directory handles")
+    def test_navigation_rejects_ancestor_link_substitution_before_enumeration(self):
+        from leakguard_host import navigation
+        selected = self.root / "selected"
+        selected.mkdir()
+        child = selected / "child"
+        child.mkdir()
+        target = child / "nested"
+        target.mkdir()
+        (target / "inside.txt").write_text("owned synthetic inside")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "nested").mkdir()
+        (outside / "nested/outside.txt").write_text("owned synthetic outside")
+        original = navigation._scoped_scandir
+        def substitute(target, root, expected):
+            child.rename(selected / "previous-child")
+            child.symlink_to(outside, target_is_directory=True)
+            return original(target, root, expected)
+        with patch.object(navigation, "_scoped_scandir", side_effect=substitute):
+            result = browse(target, root=selected)
+        self.assertNotEqual(result["status"], "available")
+        self.assertEqual(result["entries"], [])
+
+    def test_navigation_discards_rows_when_directory_changes_during_listing(self):
+        from leakguard_host import navigation
+        (self.root / "before").mkdir()
+        original = navigation._scoped_scandir
+        from contextlib import contextmanager
+        @contextmanager
+        def change_after_listing(target, root, expected):
+            with original(target, root, expected) as entries:
+                yield entries
+            (self.root / "after").mkdir()
+        with patch.object(navigation, "_scoped_scandir", side_effect=change_after_listing):
+            result = browse(self.root, root=self.root)
+        self.assertEqual(result["status"], "directory-changed")
+        self.assertEqual(result["entries"], [])
+
     def test_one_active_job_pause_restart_resume_and_durable_success(self):
         host = self.host()
         source = host.add_source(self.root)
