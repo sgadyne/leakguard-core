@@ -155,6 +155,76 @@ class LocalServerTests(unittest.TestCase):
                 self.assertIn(f'"{code}": "', client)
                 self.assertIn(message, client)
 
+    def test_host_source_and_navigation_errors_map_to_safe_client_responses(self):
+        navigation_codes = (
+            "permission-denied", "offline", "unreadable", "path-invalid",
+            "outside-root", "directory-changed", "cursor-invalid", "page-invalid",
+            "platform-unavailable",
+        )
+
+        class CodedError(Exception):
+            def __init__(self, code):
+                self.code = code
+                super().__init__("/private/path and host details must not reach response")
+
+        class FailingBackend(StubBackend):
+            error_code = ""
+
+            def remove_source(self, _source_id):
+                raise CodedError(self.error_code)
+
+            def browse(self, _query):
+                raise CodedError(self.error_code)
+
+        app = LocalBuddy(FailingBackend())
+        app.start()
+        try:
+            exchange = self._exchange(app, app.bootstrap)
+            cookie = exchange.getheader("Set-Cookie").split(";", 1)[0]
+            csrf = json.loads(exchange._buddy_body)["csrf"]
+            app.backend.error_code = "source-busy"
+            status, response = self._request(
+                app, "DELETE", "/api/sources/source_1", cookie=cookie,
+                payload={}, origin=app.server.origin, csrf=csrf,
+            )
+            self.assertEqual(status, 409)
+            self.assertEqual(json.loads(response._buddy_body), {"error": "source-busy"})
+            for code in navigation_codes:
+                with self.subTest(code=code):
+                    app.backend.error_code = code
+                    status, response = self._request(
+                        app, "GET", "/api/browse?path=%2Fsynthetic", cookie=cookie,
+                    )
+                    self.assertEqual(status, 409 if code == "directory-changed" else 400)
+                    self.assertEqual(json.loads(response._buddy_body), {"error": code})
+                    self.assertNotIn(b"/private/path", response._buddy_body)
+        finally:
+            app.close()
+
+    def test_navigation_statuses_use_plain_language_labels(self):
+        source = Path(__file__).parents[1] / "src" / "leakguard_buddy" / "static" / "app.js"
+        client = source.read_text(encoding="utf-8")
+        for code, label in {
+            "permission-denied": "Permission denied",
+            "offline": "Offline",
+            "unreadable": "Cannot read this location",
+            "not-directory": "This location is not a folder",
+            "directory-changed": "Folder changed; browse again",
+            "platform-unavailable": "Unavailable on this platform",
+        }.items():
+            with self.subTest(code=code):
+                key = f'"{code}"' if "-" in code else code
+                self.assertIn(f'{key}: "{label}"', client)
+        for message in (
+            "Wait for the current scan slice to stop before removing this source.",
+            "Enter a valid folder path.",
+            "Choose a folder inside the selected source.",
+            "This folder listing expired. Browse it again.",
+            "Choose a valid number of locations to display.",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, client)
+
     @staticmethod
     def _request(app, method, path, *, token=None, cookie=None, payload=None, origin=None, csrf=None):
         connection = http.client.HTTPConnection("127.0.0.1", app.server.server_address[1], timeout=5)

@@ -50,6 +50,16 @@
     "source-unavailable": "This source is unavailable or offline.",
     "source-not-found": "That source was removed.",
     "source-disabled": "Enable this source before resuming its scan.",
+    "source-busy": "Wait for the current scan slice to stop before removing this source.",
+    "permission-denied": "You do not have permission to browse this location.",
+    "offline": "This location is offline. Reconnect it and try again.",
+    "unreadable": "Buddy could not read this location.",
+    "path-invalid": "Enter a valid folder path.",
+    "outside-root": "Choose a folder inside the selected source.",
+    "directory-changed": "The folder changed while loading. Browse it again.",
+    "cursor-invalid": "This folder listing expired. Browse it again.",
+    "page-invalid": "Choose a valid number of locations to display.",
+    "platform-unavailable": "This location is unavailable on this platform.",
     "scan-progress-stalled": "The scan made no progress within its limits. Select a smaller folder or adjust scan limits before resuming.",
     "scheduler-failed": "The background scheduler stopped unexpectedly. Refresh Buddy or restart the service.",
     "job-not-found": "That scan job is no longer available.",
@@ -65,6 +75,21 @@
     "hook-operation-failed": "Git hook operation failed. Check that Git is available and the repository is accessible.",
     "request-failed": "The local request failed. No secret or exception details were saved.",
   };
+  const navigationStatuses = {
+    available: "Available",
+    unverified: "Not checked until selected",
+    "permission-denied": "Permission denied",
+    offline: "Offline",
+    unreadable: "Cannot read this location",
+    "not-directory": "This location is not a folder",
+    "directory-changed": "Folder changed; browse again",
+    "platform-unavailable": "Unavailable on this platform",
+    "listing-limit": "Listing limited; choose a smaller folder",
+    "symlink-not-followed": "Symbolic link not followed",
+  };
+  function navigationStatus(value) {
+    return navigationStatuses[value] || "Location status unavailable";
+  }
 
   async function request(path, method = "GET", body = undefined) {
     const headers = {};
@@ -499,7 +524,7 @@
     const choices = byId("root-choices");
     for (const root of roots) {
       const item = node("button", "root-choice"); item.type = "button"; item.dataset.action = "browse-root"; item.dataset.path = root.path || root.root || ""; item.dataset.kind = root.kind || "local";
-      item.append(node("strong", "", root.name || root.label || root.path || "Location"), node("small", "", `${root.status || "available"}${root.path ? ` · ${root.path}` : ""}`));
+      item.append(node("strong", "", root.name || root.label || root.path || "Location"), node("small", "", `${navigationStatus(root.status || "available")}${root.path ? ` · ${root.path}` : ""}`));
       item.disabled = root.selectable === false || root.status === "offline" || root.status === "permission-denied";
       choices.append(item);
     }
@@ -515,7 +540,7 @@
     const pane = byId("directory-browser");
     if (!append) {
       clear(pane);
-      byId("browser-status").textContent = `${data.status || "available"} · ${data.path || path}`;
+      byId("browser-status").textContent = `${navigationStatus(data.status || "available")} · ${data.path || path}`;
       const heading = node("div", "section-heading");
       heading.append(node("div", "row-title", data.path || path));
       if (data.path && data.path !== root) heading.append(button("Up one level", "browse-parent", "small-button", data.path));
@@ -528,7 +553,7 @@
     for (const entry of entries) {
       const row = node("button", "directory-row"); row.type = "button"; row.dataset.action = "browse-entry"; row.dataset.path = entry.path; row.dataset.root = root || path; row.dataset.kind = kind;
       row.disabled = entry.selectable === false || entry.kind !== "directory";
-      row.append(node("span", "", `${entry.kind === "directory" ? "▰" : "▤"}  ${entry.name}`), badge(entry.status || entry.kind || "available", entry.status && entry.status !== "available" ? "warn" : ""));
+      row.append(node("span", "", `${entry.kind === "directory" ? "▰" : "▤"}  ${entry.name}`), badge(navigationStatus(entry.status || entry.kind || "available"), entry.status && entry.status !== "available" ? "warn" : ""));
       pane.append(row);
     }
     if (data.next_cursor) {
