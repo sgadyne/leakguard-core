@@ -315,6 +315,11 @@ def _locked_request_rejected(status: int, value: object, *expected_errors: str) 
     return type(error) is str and error in {*expected_errors, "request-failed"}
 
 
+def _check_backup_ciphertext(data: bytes, sensitive_values: tuple[bytes, ...]) -> None:
+    if not data or any(value and value in data for value in sensitive_values):
+        raise JourneyFailure("credential-backup-not-encrypted")
+
+
 def _jobs(value) -> list[dict]:
     if type(value) is not list or any(type(item) is not dict for item in value):
         raise JourneyFailure("jobs-response-invalid")
@@ -468,6 +473,7 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
         fixture.encode("utf-8"), credentials, observation_phrase.encode("utf-8"),
         backup_phrase.encode("utf-8"), restored_phrase.encode("utf-8"),
         b"Synthetic initial vault passphrase 2026!",
+        b"synthetic-user", b"synthetic-only", b"manual save",
     ]
     checks: dict[str, bool] = {}
     details: dict = {"synthetic_case_id": fixture_id, "expected_rule": expected_rule,
@@ -590,7 +596,10 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
             raise JourneyFailure("credential-backup-invalid") from None
         if not backup_bytes or len(backup_bytes) > 16_000_000:
             raise JourneyFailure("credential-backup-size-invalid")
+        _check_backup_ciphertext(backup_bytes, tuple(sensitive_values))
+        checks["credential_backup_contains_no_synthetic_plaintext"] = True
         details["credential_backup_bytes"] = len(backup_bytes)
+        details["credential_backup_sha256"] = hashlib.sha256(backup_bytes).hexdigest()
         status, _, _ = client.request("POST", "/api/vault/lock", {})
         _expect_status(status, 200, "credential-lock-failed")
         status, locked_rows, _ = client.request("GET", "/api/vault/entries")

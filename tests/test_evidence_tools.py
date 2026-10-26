@@ -144,6 +144,18 @@ class ProductJourneyArtifactTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.code, "synthetic-value-in-http-response")
 
+    def test_credential_backup_must_not_contain_synthetic_plaintext(self):
+        check_product_journey._check_backup_ciphertext(
+            b"opaque encrypted backup bytes", (b"synthetic credential", b"synthetic-user"),
+        )
+        for payload in (b"", b"plaintext synthetic credential backup"):
+            with self.subTest(payload=bool(payload)):
+                with self.assertRaises(check_product_journey.JourneyFailure) as caught:
+                    check_product_journey._check_backup_ciphertext(
+                        payload, (b"synthetic credential", b"synthetic-user"),
+                    )
+                self.assertEqual(caught.exception.code, "credential-backup-not-encrypted")
+
     def test_runtime_probe_requires_installed_packages_in_the_private_venv(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
