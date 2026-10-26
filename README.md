@@ -1,5 +1,7 @@
 # LeakGuard Core
 
+The integrated Password Buddy alpha adds a private local UI, encrypted vault and observations, host jobs, and offline deployment. Start with [the alpha guide](docs/ALPHA.md) and [installation instructions](docs/INSTALL.md). Exact native platform claims live in each release’s receipts.
+
 Offline secret scanning, Git guards and local file inventory. The engine uses Gitleaks as a subprocess and supports explicitly configured detector/extractor plugins. Configured module-backed plugins run in supervised workers. Source files are never moved or changed by a scan. Reports contain locations, rules and evidence classifications, never matched values or source snippets.
 
 This is an initial public core, not a claim that every file type or credential can be detected. Every encountered regular file receives a scan/skip/error result; an unfinished crawl is explicitly reported as unfinished. No folders or shares are scanned until configured or passed on the command line.
