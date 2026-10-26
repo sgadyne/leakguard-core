@@ -68,19 +68,23 @@ def _read(path, maximum=_MAX_STATE):
 def _atomic(path, raw):
     if len(raw) > _MAX_STATE:
         raise ExtensionError('extension-capacity-limit')
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix='.extension-', dir=path.parent)
+    temporary = None
     try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(prefix='.extension-', dir=path.parent)
         with os.fdopen(descriptor, 'wb') as stream:
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+    except OSError:
+        raise ExtensionError('extension-state-failed') from None
     finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def _metadata(value):
@@ -216,7 +220,10 @@ class ExtensionRegistry:
 
     @contextmanager
     def _mutation(self):
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError:
+            raise ExtensionError('extension-state-failed') from None
         lock = self.directory / '.registry-lock'
         descriptor = None
         try:
@@ -259,7 +266,7 @@ class ExtensionRegistry:
     def install_wheel(self, wheel, *, python_executable=None, options=None):
         metadata, cases, digest = inspect_wheel(wheel)
         selected = _private_python(python_executable or sys.executable)
-        spec = {'module': metadata['module'], 'options': options or {}}
+        spec = {'module': metadata['module'], 'options': {} if options is None else options}
         if 'component' in metadata:
             spec['component'] = metadata['component']
         entry = {'id': metadata['id'], 'kind': 'wheel', 'metadata': metadata, 'spec': spec,

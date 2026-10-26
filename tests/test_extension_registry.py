@@ -65,6 +65,34 @@ class RegistryTests(unittest.TestCase):
                 _private_python(sys.executable)
             self.assertEqual(failed.exception.code, 'extension-private-runtime-required')
 
+    def test_failed_upgrade_state_write_keeps_prior_version_disabled(self):
+        from leakguard_core import extensions
+        from subprocess import CompletedProcess
+        with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
+            root = Path(folder)
+            registry = ExtensionRegistry(root / 'registry')
+            wheel = root / 'example-1-py3-none-any.whl'
+            metadata = {'schema_version': 1, 'id': 'example', 'api_version': 2, 'module': 'example', 'version': '1'}
+            with zipfile.ZipFile(wheel, 'w') as archive:
+                archive.writestr('example/leakguard-plugin.json', json.dumps(metadata))
+            entry = {'id': 'example', 'kind': 'wheel', 'metadata': metadata, 'spec': {'module': 'example', 'options': {}},
+                     'profiles': ['firm'], 'sha256': '0' * 64, 'cases': None}
+            with registry._mutation() as value:
+                value['extensions']['example'] = entry
+            calls = []
+            atomic = extensions._atomic
+            def failed_publication(path, raw):
+                calls.append(1)
+                if len(calls) == 2:
+                    raise ExtensionError('extension-state-failed')
+                return atomic(path, raw)
+            with patch.object(extensions, '_private_python', return_value='/private/python'), patch.object(extensions.subprocess, 'run', return_value=CompletedProcess([], 0)), patch.object(extensions, '_atomic', side_effect=failed_publication):
+                with self.assertRaises(ExtensionError) as failure:
+                    registry.install_wheel(wheel)
+            self.assertEqual(failure.exception.code, 'extension-state-failed')
+            self.assertEqual(registry.list()[0]['profiles'], [])
+            self.assertEqual(list(registry.directory.glob('.install-*')), [])
+
     def test_kernel_lock_reports_busy_without_leaking_or_breaking_registry(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
             registry = ExtensionRegistry(Path(folder))
