@@ -125,6 +125,10 @@ class CycleDecisionTests(unittest.TestCase):
                     else:
                         with store.conn:
                             store.conn.execute("UPDATE audit_work SET result_scan_id=NULL WHERE path=?", (str(root / 'a.txt'),))
+                        service.close(); store.close()
+                        store = SQLiteScanStore(Path(folder) / 'state')
+                        self.assertIsNotNone(store.conn.execute('SELECT work_identity FROM audit_cycles').fetchone()[0])
+                        service = engine.ScanService(config, store=store)
                     final = service.audit('synthetic', limits=m.ScanLimits(5, 1))
                 self.assertFalse(final.coverage.required_complete)
                 self.assertEqual(final.decision.verdict, m.DecisionVerdict.INCOMPLETE)

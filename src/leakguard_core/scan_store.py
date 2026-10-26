@@ -796,6 +796,7 @@ def open_database(state_dir):
         for statement in _SCHEMA.split(';'):
             if statement.strip():
                 conn.execute(statement)
+        added_result_link = False
         for table, additions in {
             'cache': [('policy', 'TEXT'), ('digest', 'TEXT'), ('payload', 'TEXT'), ('executed_at', 'TEXT')],
             'directories': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
@@ -808,9 +809,12 @@ def open_database(state_dir):
             for column, declaration in additions:
                 if column not in present:
                     conn.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + declaration)
+                    if table == 'audit_work' and column == 'result_scan_id':
+                        added_result_link = True
         # A pre-link checkpoint cannot prove which results completed its files.
         # Preserve evidence, but force the next semantic bind to replay that root.
-        conn.execute("UPDATE audit_cycles SET work_identity=NULL WHERE completed IS NULL AND EXISTS(SELECT 1 FROM audit_work w WHERE w.scope=audit_cycles.scope AND w.generation=audit_cycles.generation AND w.kind='file' AND w.done=1 AND w.result_scan_id IS NULL)")
+        if added_result_link:
+            conn.execute("UPDATE audit_cycles SET work_identity=NULL WHERE completed IS NULL AND EXISTS(SELECT 1 FROM audit_work w WHERE w.scope=audit_cycles.scope AND w.generation=audit_cycles.generation AND w.kind='file' AND w.done=1 AND w.result_scan_id IS NULL)")
         conn.execute('CREATE INDEX IF NOT EXISTS audit_directory_checks ON audit_work(scope,generation,kind,directory_checked,done,path)')
         if version < 2:
             _import_legacy_findings(conn)
