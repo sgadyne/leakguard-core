@@ -100,43 +100,49 @@
     },
     {
       "case_id": "weak-client-secret-01",
-      "category": "weak-literal",
-      "expected": "none",
+      "category": "literal-short-positive",
+      "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "detector",
       "state": "covered"
     },
     {
       "case_id": "weak-client-secret-02",
-      "category": "weak-literal",
-      "expected": "none",
+      "category": "literal-short-positive",
+      "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "detector",
       "state": "covered"
     },
     {
       "case_id": "weak-client-secret-03",
-      "category": "weak-literal",
-      "expected": "none",
+      "category": "literal-short-positive",
+      "expected": "finding",
+      "expected_rule": "literal-client-secret",
       "kind": "detector",
       "state": "covered"
     },
     {
       "case_id": "weak-password-01",
-      "category": "weak-literal",
-      "expected": "none",
+      "category": "literal-short-positive",
+      "expected": "finding",
+      "expected_rule": "literal-password",
       "kind": "detector",
       "state": "covered"
     },
     {
       "case_id": "weak-password-02",
-      "category": "weak-literal",
-      "expected": "none",
+      "category": "literal-short-positive",
+      "expected": "finding",
+      "expected_rule": "literal-password",
       "kind": "detector",
       "state": "covered"
     },
     {
       "case_id": "weak-password-03",
-      "category": "weak-literal",
-      "expected": "none",
+      "category": "literal-short-positive",
+      "expected": "finding",
+      "expected_rule": "literal-password",
       "kind": "detector",
       "state": "covered"
     },

@@ -41,7 +41,9 @@ if __package__:
     from ._safe_inputs import read_empty_json_object, source_identity
 else:
     from _safe_inputs import read_empty_json_object, source_identity
-BENCHMARK_DEADLINE_SECONDS = 180
+BENCHMARK_DEADLINE_SECONDS = 420
+DEFAULT_FILE_COUNTS = (1, 10, 50, 200)
+WORKER_COUNTS = (1, 2)
 
 
 class BenchmarkFailure(RuntimeError):
@@ -399,32 +401,55 @@ def _aggregate_checks(benchmarks: list[dict], part_curve: list[dict],
     identity_cases = []
     for item in benchmarks:
         measurements = item["measurements"]
-        policy_ids = {mode: measurements[mode]["policy_id"]
-                      for mode in ("cold", "warm", "uncached")}
-        runtime_ids = {mode: measurements[mode]["runtime_id"]
-                       for mode in ("cold", "warm", "uncached")}
+        worker_measurements = {"2": measurements}
+        if item.get("reference_measurements") is not None:
+            worker_measurements["1"] = item["reference_measurements"]
+        worker_identities = {}
+        for workers, rows in worker_measurements.items():
+            policy_ids = {mode: rows[mode]["policy_id"]
+                          for mode in ("cold", "warm", "uncached")}
+            runtime_ids = {mode: rows[mode]["runtime_id"]
+                           for mode in ("cold", "warm", "uncached")}
+            worker_identities[workers] = {
+                "policy_ids": policy_ids, "runtime_ids": runtime_ids,
+                "consistent_within_worker_mode": (len(set(policy_ids.values())) == 1
+                                                    and len(set(runtime_ids.values())) == 1),
+            }
+        primary = worker_identities["2"]
         identity_cases.append({
             "files": item["files"], "content": item["content"],
             "repetition": item["repetition"],
-            "policy_ids": policy_ids, "runtime_ids": runtime_ids,
-            "consistent_within_case": (len(set(policy_ids.values())) == 1
-                                        and len(set(runtime_ids.values())) == 1),
+            "policy_ids": primary["policy_ids"], "runtime_ids": primary["runtime_ids"],
+            "worker_identities": worker_identities,
+            "consistent_within_case": all(
+                row["consistent_within_worker_mode"] for row in worker_identities.values()
+            ),
         })
+
+    cache_reuse_failures = 0
+    coverage_failures = 0
+    for item in benchmarks:
+        modes = [("2", item["measurements"], item["warm_reused_results"])]
+        if item.get("reference_measurements") is not None:
+            modes.append(("1", item["reference_measurements"],
+                          item["reference_warm_reused_results"]))
+        for _workers, measurements, reused in modes:
+            cache_reuse_failures += (
+                measurements["warm"]["backend_worker_launches"] != 0
+                or reused != item["files"]
+            )
+            coverage_failures += not all(
+                measurements[mode]["coverage_complete"]
+                for mode in ("cold", "warm", "uncached")
+            )
 
     return ({
         "equivalence_failures": sum(
             not all(item["equivalence"].values()) for item in benchmarks
         ),
-        "cache_reuse_failures": sum(
-            item["measurements"]["warm"]["backend_worker_launches"] != 0
-            or item["warm_reused_results"] != item["files"]
-            for item in benchmarks
-        ),
-        "coverage_failures": sum(
-            not all(item["measurements"][mode]["coverage_complete"]
-                    for mode in ("cold", "warm", "uncached"))
-            for item in benchmarks
-        ) + sum(not item["covered_text_surfaces_complete"] for item in part_curve),
+        "cache_reuse_failures": cache_reuse_failures,
+        "coverage_failures": coverage_failures
+        + sum(not item["covered_text_surfaces_complete"] for item in part_curve),
         "installed_hook_failures": sum(
             item["clean_exit_code"] != 0 or not item["positive_blocked"]
             or not item["positive_output_redacted"] for item in hook_rows
@@ -435,17 +460,26 @@ def _aggregate_checks(benchmarks: list[dict], part_curve: list[dict],
     }, identity_cases)
 
 
-def _file_curve_cases(repetitions: int):
+def _file_curve_cases(repetitions: int, counts=DEFAULT_FILE_COUNTS):
     """Yield every requested clean/positive file-count repetition."""
-    for count in (1, 10, 50, 200):
+    for count in counts:
         for content_kind in ("clean", "positive"):
             for repetition in range(repetitions):
                 yield count, content_kind, repetition
 
 
 def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
-                  repetitions: int, seed: int, input_root: Path) -> dict:
+                  repetitions: int, seed: int, input_root: Path,
+                  file_counts=DEFAULT_FILE_COUNTS, hook_repetitions=None) -> dict:
     from leakguard_core import engine, models
+
+    if hook_repetitions is None:
+        hook_repetitions = repetitions
+    if (not file_counts or any(type(count) is not int or not 1 <= count <= 500
+                               for count in file_counts)
+            or tuple(sorted(set(file_counts))) != tuple(file_counts)
+            or type(hook_repetitions) is not int or not 1 <= hook_repetitions <= 5):
+        raise BenchmarkFailure("benchmark-shape-invalid")
 
     if state.is_symlink() or state.exists() and (not state.is_dir() or any(state.iterdir())):
         raise BenchmarkFailure("state-not-empty")
@@ -453,12 +487,20 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
     if gitleaks.is_symlink() or not gitleaks.is_file() or not os.access(gitleaks, os.X_OK):
         raise BenchmarkFailure("backend-invalid")
     rules = Path(engine.RULES).resolve(strict=True)
-    service_open_started = time.perf_counter()
-    service = engine.ScanService({
-        "gitleaks_executable": str(gitleaks.resolve(strict=True)),
-        "gitleaks_config": str(rules),
-    }, state_dir=state)
-    service_open_seconds = time.perf_counter() - service_open_started
+    services = {}
+    service_open_seconds_by_workers = {}
+    for workers in WORKER_COUNTS:
+        worker_state = state / f"scan-workers-{workers}"
+        worker_state.mkdir(mode=0o700)
+        service_open_started = time.perf_counter()
+        services[workers] = engine.ScanService({
+            "gitleaks_executable": str(gitleaks.resolve(strict=True)),
+            "gitleaks_config": str(rules),
+            "scan_workers": workers,
+        }, state_dir=worker_state)
+        service_open_seconds_by_workers[str(workers)] = round(
+            time.perf_counter() - service_open_started, 6
+        )
     rules_digest = _sha(rules.read_bytes())
     backend_digest = _sha(gitleaks.read_bytes())
     rng = random.Random(seed)
@@ -466,7 +508,7 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
         str(rng.getrandbits(256)).encode("ascii")).hexdigest()[:8]
     benchmarks = []
     try:
-        for count, content_kind, repetition in _file_curve_cases(repetitions):
+        for count, content_kind, repetition in _file_curve_cases(repetitions, file_counts):
             case_root = input_root / f"files-{count}-{content_kind}-{repetition}"
             case_root.mkdir(mode=0o700)
             paths = []
@@ -478,24 +520,43 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                     text = f"ordinary synthetic content for fixture {index}.\n"
                 path.write_text(text, encoding="utf-8")
                 paths.append(models.FileInput(path))
-            measurements = {}
-            normalized = {}
-            warm_reused = 0
-            for mode, use_cache in (("cold", True), ("warm", True), ("uncached", False)):
-                row, findings, report = _measure(service, paths, use_cache=use_cache)
-                measurements[mode] = row
-                normalized[mode] = findings
-                if mode == "warm":
-                    warm_reused = sum(result.outcome is models.ScanOutcome.REUSED
-                                      for result in report.results)
+            measurements_by_workers = {}
+            normalized_by_workers = {}
+            warm_reused_by_workers = {}
+            for workers in WORKER_COUNTS:
+                measurements = {}
+                normalized = {}
+                warm_reused = 0
+                service = services[workers]
+                for mode, use_cache in (("cold", True), ("warm", True), ("uncached", False)):
+                    row, findings, report = _measure(service, paths, use_cache=use_cache)
+                    measurements[mode] = row
+                    normalized[mode] = findings
+                    if mode == "warm":
+                        warm_reused = sum(result.outcome is models.ScanOutcome.REUSED
+                                          for result in report.results)
+                measurements_by_workers[workers] = measurements
+                normalized_by_workers[workers] = normalized
+                warm_reused_by_workers[workers] = warm_reused
+            parallel = normalized_by_workers[2]
+            reference = normalized_by_workers[1]
             equivalence = {
-                "warm_matches_cold": normalized["warm"] == normalized["cold"],
-                "uncached_matches_cold": normalized["uncached"] == normalized["cold"],
+                "warm_matches_cold": parallel["warm"] == parallel["cold"],
+                "uncached_matches_cold": parallel["uncached"] == parallel["cold"],
+                "reference_warm_matches_cold": reference["warm"] == reference["cold"],
+                "reference_uncached_matches_cold": reference["uncached"] == reference["cold"],
+                "serial_matches_parallel": reference["cold"] == parallel["cold"],
+                "serial_warm_matches_parallel_warm": reference["warm"] == parallel["warm"],
+                "serial_uncached_matches_parallel_uncached": reference["uncached"] == parallel["uncached"],
             }
             benchmarks.append({
                 "files": count, "content": content_kind, "repetition": repetition,
                 "repetitions_for_file_count": repetitions,
-                "measurements": measurements, "warm_reused_results": warm_reused,
+                "configured_scan_workers": list(WORKER_COUNTS),
+                "measurements": measurements_by_workers[2],
+                "reference_measurements": measurements_by_workers[1],
+                "warm_reused_results": warm_reused_by_workers[2],
+                "reference_warm_reused_results": warm_reused_by_workers[1],
                 "equivalence": equivalence,
             })
 
@@ -504,7 +565,7 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
             for repetition in range(repetitions):
                 data = _docx(count, seed)
                 source = models.BytesInput(data, f"part-curve-{count}-{repetition}.docx")
-                row, _normalized_findings, report = _measure(service, [source], use_cache=False)
+                row, _normalized_findings, report = _measure(services[2], [source], use_cache=False)
                 row["parts_requested"] = count
                 coverage = _part_curve_coverage(report)
                 row.update(coverage)
@@ -517,10 +578,11 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                 part_curve.append({"parts": count, "repetition": repetition, **row})
         hook_rows = _hook_latency_benchmark(
             root=input_root, config=config, backend=gitleaks,
-            repetitions=repetitions, marker=marker,
+            repetitions=hook_repetitions, marker=marker,
         )
     finally:
-        service.close()
+        for service in services.values():
+            service.close()
 
     checks, identity_cases = _aggregate_checks(benchmarks, part_curve, hook_rows)
     version_result = subprocess.run([str(gitleaks), "version"], capture_output=True,
@@ -535,10 +597,14 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
         except importlib.metadata.PackageNotFoundError:
             dependencies[package] = "unavailable"
     return {
-        "seed": seed, "repetitions": repetitions, "file_curve": benchmarks,
+        "seed": seed, "repetitions": repetitions,
+        "file_counts": list(file_counts), "hook_repetitions": hook_repetitions,
+        "file_curve": benchmarks,
         "part_curve": part_curve, "hook_latency": hook_rows,
         "hook_latency_summary": _hook_latency_summary(hook_rows),
-        "service_open_seconds": round(service_open_seconds, 6),
+        "scan_workers_tested": list(WORKER_COUNTS),
+        "service_open_seconds": round(sum(service_open_seconds_by_workers.values()), 6),
+        "service_open_seconds_by_workers": service_open_seconds_by_workers,
         "backend_sha256": backend_digest, "backend_version": backend_version,
         "rules_sha256": rules_digest, "installed_dependencies": dependencies,
         "scan_identity_cases": identity_cases,
@@ -570,6 +636,8 @@ def main(argv=None) -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--gitleaks", required=True)
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--file-counts", type=int, nargs="+", default=list(DEFAULT_FILE_COUNTS))
+    parser.add_argument("--hook-repetitions", type=int)
     parser.add_argument("--seed", type=int, default=20261025)
     args = parser.parse_args(argv)
     started = dt.datetime.now(dt.timezone.utc)
@@ -578,8 +646,16 @@ def main(argv=None) -> int:
     result = {"outcome": "setup-failed", "failed_stage": "preflight"}
     backend_digest = None
     try:
-        if type(args.repetitions) is not int or not 3 <= args.repetitions <= 5:
+        if type(args.repetitions) is not int or not 1 <= args.repetitions <= 5:
             raise BenchmarkFailure("repetitions-invalid")
+        if (not args.file_counts
+                or any(type(count) is not int or not 1 <= count <= 500 for count in args.file_counts)
+                or tuple(sorted(set(args.file_counts))) != tuple(args.file_counts)):
+            raise BenchmarkFailure("file-counts-invalid")
+        hook_repetitions = (args.repetitions if args.hook_repetitions is None
+                            else args.hook_repetitions)
+        if type(hook_repetitions) is not int or not 1 <= hook_repetitions <= 5:
+            raise BenchmarkFailure("hook-repetitions-invalid")
         config = _validate_config(Path(args.config))
         backend = Path(args.gitleaks)
         if backend.is_symlink():
@@ -595,7 +671,8 @@ def main(argv=None) -> int:
         try:
             details = run_benchmark(config=config, state=state, gitleaks=backend,
                                     repetitions=args.repetitions, seed=args.seed,
-                                    input_root=input_root)
+                                    input_root=input_root, file_counts=tuple(args.file_counts),
+                                    hook_repetitions=hook_repetitions)
         finally:
             shutil.rmtree(input_root)
         failures = sum(details["checks"].values())

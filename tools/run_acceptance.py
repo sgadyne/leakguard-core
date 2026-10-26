@@ -37,8 +37,9 @@ MAX_STAGE_SECONDS = 900
 
 
 class AcceptanceFailure(RuntimeError):
-    def __init__(self, stage: str):
+    def __init__(self, stage: str, details: dict | None = None):
         self.stage = stage
+        self.details = details or {}
         super().__init__(stage)
 
 
@@ -66,13 +67,14 @@ def _source_identity() -> tuple[str, str]:
 
 
 def _command(argv, *, cwd: Path, env: dict[str, str], stage: str,
-             timeout: int = MAX_STAGE_SECONDS) -> subprocess.CompletedProcess:
+             timeout: int = MAX_STAGE_SECONDS,
+             allow_failure: bool = False) -> subprocess.CompletedProcess:
     try:
         process = subprocess.run(argv, cwd=cwd, env=env, capture_output=True,
                                  timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired):
         raise AcceptanceFailure(stage) from None
-    if process.returncode:
+    if process.returncode and not allow_failure:
         raise AcceptanceFailure(stage)
     return process
 
@@ -104,19 +106,48 @@ def _parse_unittest_summary(stderr: str, stdout: str = "") -> dict | None:
         return None
 
     skip_ids = []
+    result_rows = []
     skip_line = re.compile(
         r"^(test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\) \.\.\. skipped(?:\s|$)"
+    )
+    result_line = re.compile(
+        r"^(test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\) \.\.\. (FAIL|ERROR)$"
     )
     for line in lines:
         match = skip_line.match(line)
         if match:
             skip_ids.append(f"{match.group(2)}.{match.group(1)}")
+        match = result_line.match(line)
+        if match:
+            result_rows.append({"test_id": f"{match.group(2)}.{match.group(1)}",
+                                "result": match.group(3).lower()})
+    exception_rows = []
+    failure_header = re.compile(r"^(FAIL|ERROR): (test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\)$")
+    exception_line = re.compile(r"^([A-Z][A-Za-z0-9_]*(?:Error|Exception))(?::|$)")
+    active_failure = None
+    for line in lines:
+        header = failure_header.match(line)
+        if header:
+            active_failure = {"test_id": f"{header.group(3)}.{header.group(2)}",
+                              "result": header.group(1).lower(),
+                              "exception_type": None}
+            exception_rows.append(active_failure)
+            continue
+        if active_failure is not None and active_failure["exception_type"] is None:
+            exception = exception_line.match(line.strip())
+            if exception:
+                active_failure["exception_type"] = exception.group(1)
     passed = total - skipped - failures - errors
     if min(total, skipped, failures, errors, passed) < 0:
         return None
     return {"total": total, "passed": passed, "skipped": skipped,
             "failures": failures, "errors": errors,
-            "skip_test_ids": sorted(set(skip_ids))}
+            "skip_test_ids": sorted(set(skip_ids)),
+            "failed_test_ids": sorted(row["test_id"] for row in result_rows
+                                       if row["result"] == "fail"),
+            "error_test_ids": sorted(row["test_id"] for row in result_rows
+                                      if row["result"] == "error"),
+            "failure_types": sorted(exception_rows, key=lambda row: row["test_id"])}
 
 
 def _python(venv_root: Path) -> Path:
@@ -382,12 +413,14 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     ]
     # The script adapter fixture is exercised by the full installed test suite.
     suite = _command([str(target), "-m", "unittest", "discover", "-s", "tests", "-v"],
-                     cwd=installed_tests, env=test_env, stage="installed-full-suite", timeout=MAX_STAGE_SECONDS)
+                     cwd=installed_tests, env=test_env, stage="installed-full-suite",
+                     timeout=MAX_STAGE_SECONDS, allow_failure=True)
     test_summary = _parse_unittest_summary(
         suite.stderr.decode("utf-8", errors="replace"),
         suite.stdout.decode("utf-8", errors="replace"))
-    if test_summary is None or test_summary["failures"] or test_summary["errors"]:
-        raise AcceptanceFailure("installed-full-suite")
+    if (test_summary is None or test_summary["failures"] or test_summary["errors"]
+            or suite.returncode):
+        raise AcceptanceFailure("installed-full-suite", {"test_summary": test_summary})
     test_count = test_summary["total"]
     if test_count < 100:
         raise AcceptanceFailure("installed-suite-count")
@@ -451,13 +484,14 @@ def main(argv=None) -> int:
             (work / "state").mkdir(mode=0o700)
             completed = _command([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
                                  cwd=ROOT, env={**env, "PYTHONPATH": str(ROOT / "src")},
-                                 stage="source-full-suite")
+                                 stage="source-full-suite", allow_failure=True)
             test_summary = _parse_unittest_summary(
                 completed.stderr.decode("utf-8", errors="replace"),
                 completed.stdout.decode("utf-8", errors="replace"))
             if (test_summary is None or test_summary["total"] < 100
-                    or test_summary["failures"] or test_summary["errors"]):
-                raise AcceptanceFailure("source-full-suite")
+                    or test_summary["failures"] or test_summary["errors"]
+                    or completed.returncode):
+                raise AcceptanceFailure("source-full-suite", {"test_summary": test_summary})
             details = {"test_count": test_summary["total"], "test_summary": test_summary,
                        "documents_extra": bool(args.documents_extra),
                        "installed_origin": str((ROOT / "src" / "leakguard_core" / "__init__.py").resolve())}
@@ -465,7 +499,8 @@ def main(argv=None) -> int:
                   "source_commit": revision, "patch_digest": patch_digest, **details}
     except AcceptanceFailure as error:
         result = {"outcome": "failed", "failed_stage": error.stage, "mode": args.mode,
-                  "source_commit": revision, "patch_digest": patch_digest}
+                  "source_commit": revision, "patch_digest": patch_digest,
+                  **error.details}
     except Exception:
         result = {"outcome": "setup-failed", "failed_stage": "preflight", "mode": args.mode,
                   "source_commit": revision, "patch_digest": patch_digest}

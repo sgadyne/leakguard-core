@@ -40,6 +40,25 @@ acceptance_spec = importlib.util.spec_from_file_location("evidence_run_acceptanc
 run_acceptance = importlib.util.module_from_spec(acceptance_spec)
 assert acceptance_spec and acceptance_spec.loader
 acceptance_spec.loader.exec_module(run_acceptance)
+INDEPENDENT_LABELS = ROOT / "tools" / "run_independent_labels.py"
+independent_spec = importlib.util.spec_from_file_location("evidence_independent_labels", INDEPENDENT_LABELS)
+run_independent_labels = importlib.util.module_from_spec(independent_spec)
+assert independent_spec and independent_spec.loader
+independent_spec.loader.exec_module(run_independent_labels)
+
+
+class IndependentLabelTests(unittest.TestCase):
+    def test_independent_set_keeps_six_short_literal_positives(self):
+        catalog, _raw = run_independent_labels._catalog()
+        positive = [item for item in catalog["cases"] if item["expected"] == "finding"]
+        negative = [item for item in catalog["cases"] if item["expected"] == "none"]
+        self.assertEqual(len(catalog["cases"]), 12)
+        self.assertEqual(len(positive), 6)
+        self.assertEqual(len(negative), 6)
+        self.assertEqual(
+            {item["expected_rule"] for item in positive},
+            {"literal-client-secret", "literal-password"},
+        )
 
 
 class SafeInputTests(unittest.TestCase):
@@ -107,6 +126,13 @@ class BenchmarkAggregationTests(unittest.TestCase):
                     (count, content_kind, repetition) for repetition in range(3)
                 ])
 
+    def test_file_curve_supports_bounded_50_and_500_file_cases(self):
+        cases = list(benchmark_scan._file_curve_cases(1, counts=(50, 500)))
+        self.assertEqual(cases, [
+            (count, content_kind, 0)
+            for count in (50, 500) for content_kind in ("clean", "positive")
+        ])
+
     def test_benchmark_module_uses_its_copied_tool_root(self):
         self.assertEqual(Path(benchmark_scan.__file__).resolve(), BENCHMARK.resolve())
         self.assertEqual(benchmark_scan.ROOT.resolve(), ROOT.resolve())
@@ -164,6 +190,41 @@ class BenchmarkAggregationTests(unittest.TestCase):
         self.assertTrue(all(row["consistent_within_case"] for row in identities))
         self.assertEqual(identities[0]["policy_ids"]["cold"], "policy-small-limit")
         self.assertEqual(identities[1]["policy_ids"]["cold"], "policy-large-limit")
+
+    def test_report_aggregation_keeps_serial_and_parallel_identities_separate(self):
+        def measurements(policy_id, runtime_id):
+            return {
+                mode: {"backend_worker_launches": 0 if mode == "warm" else 50,
+                       "coverage_complete": True, "policy_id": policy_id,
+                       "runtime_id": runtime_id}
+                for mode in ("cold", "warm", "uncached")
+            }
+
+        benchmark = {
+            "files": 50, "content": "positive", "repetition": 0,
+            "measurements": measurements("policy-workers-2", "runtime-workers-2"),
+            "reference_measurements": measurements("policy-workers-1", "runtime-workers-1"),
+            "warm_reused_results": 50, "reference_warm_reused_results": 50,
+            "equivalence": {
+                "warm_matches_cold": True, "uncached_matches_cold": True,
+                "reference_warm_matches_cold": True,
+                "reference_uncached_matches_cold": True,
+                "serial_matches_parallel": True,
+                "serial_warm_matches_parallel_warm": True,
+                "serial_uncached_matches_parallel_uncached": True,
+            },
+        }
+        checks, identities = benchmark_scan._aggregate_checks(
+            [benchmark], [{"covered_text_surfaces_complete": True}],
+            [{"clean_exit_code": 0, "positive_blocked": True,
+              "positive_output_redacted": True}],
+        )
+        self.assertEqual(sum(checks.values()), 0)
+        self.assertTrue(identities[0]["consistent_within_case"])
+        self.assertEqual(identities[0]["worker_identities"]["1"]["policy_ids"]["cold"],
+                         "policy-workers-1")
+        self.assertEqual(identities[0]["worker_identities"]["2"]["policy_ids"]["cold"],
+                         "policy-workers-2")
 
     def test_hook_latency_summary_uses_median_and_nearest_rank_p95(self):
         summary = benchmark_scan._hook_latency_summary([
@@ -249,8 +310,32 @@ class AcceptanceSummaryTests(unittest.TestCase):
                 "test_corpus.CorpusTests.test_pdf_optional",
                 "test_runtime_identity.RuntimeIdentityTests.test_native_only",
             ],
+            "failed_test_ids": [], "error_test_ids": [], "failure_types": [],
         })
         self.assertNotIn("parser extra unavailable", json.dumps(summary))
+
+    def test_unittest_failure_summary_keeps_test_ids_and_exception_types_only(self):
+        output = (
+            "test_path_case (test_paths.PathTests) ... FAIL\n"
+            "test_policy_case (test_policy.PolicyTests) ... ERROR\n\n"
+            "FAIL: test_path_case (test_paths.PathTests)\n"
+            "Traceback (most recent call last):\n"
+            "AssertionError: synthetic fixture path detail\n\n"
+            "ERROR: test_policy_case (test_policy.PolicyTests)\n"
+            "Traceback (most recent call last):\n"
+            "ValueError: synthetic policy detail\n\n"
+            "Ran 2 tests in 0.012s\n\nFAILED (failures=1, errors=1)\n"
+        )
+        summary = run_acceptance._parse_unittest_summary(output)
+        self.assertEqual(summary["failed_test_ids"], ["test_paths.PathTests.test_path_case"])
+        self.assertEqual(summary["error_test_ids"], ["test_policy.PolicyTests.test_policy_case"])
+        self.assertEqual(summary["failure_types"], [
+            {"test_id": "test_paths.PathTests.test_path_case", "result": "fail",
+             "exception_type": "AssertionError"},
+            {"test_id": "test_policy.PolicyTests.test_policy_case", "result": "error",
+             "exception_type": "ValueError"},
+        ])
+        self.assertNotIn("synthetic fixture path detail", json.dumps(summary))
 
 
 if __name__ == "__main__":

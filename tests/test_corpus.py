@@ -518,10 +518,10 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
         detector_cases.append((case_id, f'password = "{value}"', "none"))
     for index, value in enumerate(weak_client, 1):
         case_id = f"weak-client-secret-{index:02d}"
-        detector_cases.append((case_id, f'client_secret = "{value}"', "none"))
+        detector_cases.append((case_id, f'client_secret = "{value}"', "finding"))
     for index, value in enumerate(weak_password, 1):
         case_id = f"weak-password-{index:02d}"
-        detector_cases.append((case_id, f'password = "{value}"', "none"))
+        detector_cases.append((case_id, f'password = "{value}"', "finding"))
     detector_cases.extend((
         ("literal-client-secret-positive-01", f'client_secret = "{secret}"', "finding"),
         ("literal-password-positive-01", f'password = "{secret}"', "finding"),
