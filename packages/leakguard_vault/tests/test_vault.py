@@ -202,3 +202,54 @@ def test_read_only_keyring_probe_and_unchanged_close(tmp_path):
     reopened = EncryptedScanStore.open(path, PASS)
     reopened.close()
     assert path.read_bytes() == original
+
+
+def test_capacity_failure_retains_last_durable_job_state(tmp_path):
+    path = tmp_path / 'observations.lgo'
+    store = EncryptedScanStore.create(path, PASS, max_bytes=1024 * 1024)
+    store.save_host_state({'progress': 1})
+    with pytest.raises(StateError, match='state-capacity-limit'):
+        store.save_host_state({'progress': 2, 'synthetic-padding': 'x' * 940000})
+    store.close()
+    reopened = EncryptedScanStore.open(path, PASS, max_bytes=1024 * 1024)
+    assert reopened.load_host_state() == {'progress': 1}
+    reopened.close()
+
+
+def test_keyring_session_verifies_key_and_has_no_credential_capability(tmp_path):
+    class MemoryBackend:
+        def __init__(self):
+            self.values = {}
+        def set_password(self, service, account, value):
+            self.values[(service, account)] = value
+        def get_password(self, service, account):
+            return self.values.get((service, account))
+        def delete_password(self, service, account):
+            self.values.pop((service, account), None)
+    # Test adapter verification without claiming a native OS execution receipt.
+    native = object.__new__(NativeKeyring)
+    native._backend = MemoryBackend()
+    path = tmp_path / 'observations.lgo'
+    store = EncryptedScanStore.create(path, PASS)
+    with pytest.raises(VaultError, match='observation-keyring-invalid'):
+        store.enable_keyring(keyring=native._backend)
+    store.enable_keyring(keyring=native)
+    assert store.status()['unattended_available'] is True
+    store.close()
+    unlocked = EncryptedScanStore.open_keyring(path, keyring=native)
+    assert unlocked.status()['unattended_available'] is True
+    assert not hasattr(unlocked, 'reveal_entry')
+    unlocked.disable_keyring(keyring=native)
+    unlocked.close()
+    with pytest.raises(VaultError, match='observation-keyring-not-enabled'):
+        EncryptedScanStore.open_keyring(path, keyring=native)
+    reopened = EncryptedScanStore.open(path, PASS)
+    reopened.close()
+
+
+def test_material_capability_invalid_after_store_lock(tmp_path):
+    store = EncryptedScanStore.create(tmp_path / 'observations.lgo', PASS)
+    snapshot = store.material_snapshot()
+    assert snapshot.valid()
+    store.close()
+    assert snapshot.valid() is False

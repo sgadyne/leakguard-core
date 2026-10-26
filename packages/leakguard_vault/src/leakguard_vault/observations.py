@@ -1,9 +1,11 @@
 """Single-writer encrypted checkpoints around core's in-memory SQLite semantics."""
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import hmac
 from pathlib import Path
+import sqlite3
 import threading
 
 from leakguard_core.scan_store import SQLiteScanStore, StateError
@@ -143,7 +145,17 @@ class EncryptedScanStore:
                 if name in _MUTATIONS:
                     self._dirty = True
                 try:
-                    return getattr(self._store, name)(*args, **kwargs)
+                    result = getattr(self._store, name)(*args, **kwargs)
+                    if name == 'material_snapshot':
+                        original = result
+                        def valid():
+                            with self._mutex:
+                                if self._closed or self._poisoned:
+                                    return False
+                                self._store.set_deadline(self._deadlines.get(threading.get_ident()))
+                                return original.valid()
+                        result = replace(result, validate=valid)
+                    return result
                 except StateError:
                     # SQLite FULL is intentionally redacted by core; preserve a
                     # useful capacity reason when the profile reached its bound.
@@ -204,8 +216,10 @@ class EncryptedScanStore:
                 self._checkpoint()
             except StateError:
                 raise
-            except Exception:
+            except Exception as error:
                 self._poisoned = True
+                if isinstance(error, sqlite3.Error) and getattr(error, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL:
+                    raise StateError("state-capacity-limit") from None
                 raise StateError("state-checkpoint-failed") from None
 
     def get_annotation(self, finding_id):
@@ -229,8 +243,10 @@ class EncryptedScanStore:
                 self._checkpoint()
             except StateError:
                 raise
-            except Exception:
+            except Exception as error:
                 self._poisoned = True
+                if isinstance(error, sqlite3.Error) and getattr(error, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL:
+                    raise StateError("state-capacity-limit") from None
                 raise StateError("state-checkpoint-failed") from None
             return {"finding_id": finding_id, "state": state}
 
@@ -252,7 +268,14 @@ class EncryptedScanStore:
             self._ensure_open()
             provider.store(self._header["id"], bytes(self._key))
             self._header["keyring"] = {"service": "leakguard-observations-v1", "account": self._header["id"]}
-            self._checkpoint()
+            try:
+                self._checkpoint()
+            except Exception:
+                try:
+                    provider.delete(self._header["id"])
+                except VaultError:
+                    pass
+                raise
             self._unattended_verified = True
 
     def disable_keyring(self, *, keyring=None):
