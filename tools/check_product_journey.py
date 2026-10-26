@@ -634,7 +634,13 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
         http_bodies.extend(client.bodies)
 
         active, client, token2 = start_and_authenticate()
+        sensitive_values.append(token2.encode("ascii"))
         client.exchange(token2)
+        rotated2 = _token_from_launch(state / "buddy-launch.url", client.origin)
+        sensitive_values.append(rotated2.encode("ascii"))
+        checks["bootstrap_rotated_after_restart"] = rotated2 != token2
+        if rotated2 == token2:
+            raise JourneyFailure("bootstrap-not-rotated-after-restart")
         status, observation_status, _ = client.request("GET", "/api/observations/status")
         _expect_status(status, 200, "observation-status-after-restart-failed")
         observation_status = _dict(observation_status, "observation-status-invalid")
