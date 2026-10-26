@@ -2,10 +2,12 @@
 """Exercise an installed Buddy runtime through its real loopback HTTP API.
 
 The scenario creates one synthetic source and credential under a new owned
-work directory. The emitted receipt contains only status codes, counts, IDs,
-hashes, artifact sizes, and boolean checks. Runtime files are inspected and
-removed before the receipt is written. This script uses only the standard
-library and can run on the Linux or macOS native bridge.
+work directory. With a hash-identified release ZIP, it also times one clean and
+one blocked synthetic commit through hooks installed by that release runtime.
+The emitted receipt contains only status codes, counts, IDs, hashes, timings,
+artifact sizes, and boolean checks. Runtime files are inspected and removed
+before the receipt is written. This script uses only the standard library and
+can run on the Linux or macOS native bridge.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
@@ -255,6 +258,8 @@ print(json.dumps({'prefix': sys.prefix, 'executable': sys.executable,
     if type(data.get("python_version")) is not str:
         raise JourneyFailure("installed-runtime-probe-failed")
     return {"python": Path(data["executable"]).name,
+            "python_executable": str(python.absolute()),
+            "runtime_prefix": str(prefix),
             "python_version": data["python_version"],
             "versions": {name: versions[name] for name in _PACKAGES}}
 
@@ -536,6 +541,144 @@ def _artifact_review(product: Path, logs: bytes, bodies: list[tuple[str, bytes, 
     if not {"observations.lgo", "credentials.lgv"} <= names:
         raise JourneyFailure("encrypted-store-missing")
     return {"files": rows, "total_bytes": total}
+
+
+def _installed_hook_pair(*, python: Path, backend: Path, work: Path,
+                         worker_policy: str, timeout: float,
+                         runtime: dict, release_provenance: dict) -> dict:
+    """Time one clean and one blocked commit through hooks installed by the release runtime."""
+    if not release_provenance.get("available"):
+        raise JourneyFailure("installed-hook-release-provenance-required")
+    try:
+        with tempfile.TemporaryDirectory(prefix="installed-hook-", dir=work) as folder:
+            root = Path(folder)
+            try:
+                os.chmod(root, 0o700)
+            except OSError:
+                pass
+            repository = root / "repository"
+            repository.mkdir(mode=0o700)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            config = root / "config.json"
+            config.write_text(json.dumps({
+                "worker_policy": worker_policy,
+                "scan_workers": 2,
+                "gitleaks_executable": str(backend),
+                "observation_backend": "encrypted",
+                "observation_path": str((state / "observations.lgo").absolute()),
+            }, sort_keys=True) + "\n", encoding="utf-8")
+            try:
+                os.chmod(config, 0o600)
+            except OSError:
+                pass
+            env = _child_env()
+            env.update({
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
+                "GIT_TERMINAL_PROMPT": "0",
+                "LEAKGUARD_CONFIG": str(config),
+                "LEAKGUARD_STATE_DIR": str(state),
+                "LEAKGUARD_GITLEAKS": str(backend),
+            })
+
+            def command(argv: list[str], *, code: str, check: bool = True,
+                         cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
+                try:
+                    result = subprocess.run(argv, cwd=cwd or repository, env=env,
+                                            stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            timeout=timeout, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    raise JourneyFailure(code) from None
+                if check and result.returncode != 0:
+                    raise JourneyFailure(code)
+                return result
+
+            command(["git", "-c", "init.templateDir=", "init", "-q"], code="installed-hook-git-init-failed")
+            command(["git", "config", "user.name", "Synthetic Acceptance"], code="installed-hook-git-config-failed")
+            command(["git", "config", "user.email", "acceptance@example.invalid"], code="installed-hook-git-config-failed")
+            command(["git", "config", "commit.gpgsign", "false"], code="installed-hook-git-config-failed")
+            seed = repository / "seed.txt"
+            seed.write_text("synthetic seed\n", encoding="utf-8")
+            command(["git", "add", "seed.txt"], code="installed-hook-git-add-failed")
+            command(["git", "commit", "--no-verify", "-qm", "synthetic seed"],
+                    code="installed-hook-git-seed-failed")
+
+            hooks = repository / ".git" / "hooks"
+            hooks.mkdir(parents=True, exist_ok=True, mode=0o700)
+            installer = (
+                "import sys; from leakguard_core.hooks import install_at; "
+                "install_at(sys.argv[1])"
+            )
+            command([str(python), "-I", "-X", "utf8", "-c", installer, str(hooks)],
+                    code="installed-hook-install-failed", cwd=root)
+            hook_script = hooks / "pre-commit"
+            try:
+                hook_bytes = hook_script.read_bytes()
+            except OSError:
+                raise JourneyFailure("installed-hook-missing") from None
+            if (str(python.absolute()).encode("utf-8") not in hook_bytes
+                    or b"leakguard_core" not in hook_bytes):
+                raise JourneyFailure("installed-hook-runtime-identity-invalid")
+
+            clean = repository / "clean.txt"
+            clean.write_text("ordinary synthetic acceptance text\n", encoding="utf-8")
+            command(["git", "add", "clean.txt"], code="installed-hook-git-add-failed")
+            start = time.perf_counter()
+            clean_result = command(["git", "commit", "-qm", "synthetic clean"],
+                                   code="installed-hook-clean-commit-failed", check=False)
+            clean_seconds = time.perf_counter() - start
+            if clean_result.returncode != 0:
+                raise JourneyFailure("installed-hook-clean-commit-failed")
+
+            marker = "SyntheticHook" + uuid.uuid4().hex
+            blocked = repository / "blocked.txt"
+            blocked.write_text(f'client_secret = "{marker}"\n', encoding="utf-8")
+            command(["git", "add", "blocked.txt"], code="installed-hook-git-add-failed")
+            start = time.perf_counter()
+            blocked_result = command(["git", "commit", "-qm", "synthetic blocked"],
+                                     code="installed-hook-blocked-commit-failed", check=False)
+            blocked_seconds = time.perf_counter() - start
+            combined = blocked_result.stdout + blocked_result.stderr
+            blocked_ok = blocked_result.returncode != 0 and b"LeakGuard blocked" in combined
+            redacted = marker.encode("ascii") not in combined
+            if not blocked_ok:
+                raise JourneyFailure("installed-hook-did-not-block")
+            if not redacted:
+                raise JourneyFailure("installed-hook-output-not-redacted")
+            for path in state.rglob("*"):
+                if path.is_symlink():
+                    raise JourneyFailure("installed-hook-state-symlink")
+                if path.is_file():
+                    if path.name.endswith((".sqlite", ".sqlite3", ".db", ".db-wal", ".db-shm")):
+                        raise JourneyFailure("installed-hook-plaintext-database")
+                    try:
+                        if path.stat().st_size > 32_000_000 or marker.encode("ascii") in path.read_bytes():
+                            raise JourneyFailure("installed-hook-state-value-leak")
+                    except OSError:
+                        raise JourneyFailure("installed-hook-state-unreadable") from None
+            return {
+                "sample_count": 1,
+                "clean_commit_seconds": round(clean_seconds, 6),
+                "clean_exit_code": clean_result.returncode,
+                "blocked_commit_seconds": round(blocked_seconds, 6),
+                "blocked_exit_code": blocked_result.returncode,
+                "blocked": blocked_ok,
+                "blocked_output_redacted": redacted,
+                "worker_policy": worker_policy,
+                "runtime_python_executable": runtime["python_executable"],
+                "runtime_prefix": runtime["runtime_prefix"],
+                "runtime_python_version": runtime["python_version"],
+                "runtime_packages": runtime["versions"],
+                "release_source_commit": release_provenance["source_commit"],
+                "release_artifact_sha256": release_provenance["artifact_sha256"],
+                "release_version": release_provenance["release_version"],
+            }
+    except JourneyFailure:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        raise JourneyFailure("installed-hook-acceptance-failed") from None
 
 
 def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
@@ -836,6 +979,22 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
             raise JourneyFailure("bootstrap-file-not-removed-on-final-stop")
         http_bodies.extend(client.bodies)
         all_logs = b"\n".join(log_buffers)
+        if release_provenance.get("available"):
+            hook_timing = _installed_hook_pair(
+                python=python, backend=backend, work=work,
+                worker_policy=worker_policy, timeout=timeout,
+                runtime=runtime, release_provenance=release_provenance,
+            )
+            checks["installed_hook_clean_commit_passed"] = hook_timing["clean_exit_code"] == 0
+            checks["installed_hook_blocks_synthetic_commit"] = hook_timing["blocked"]
+            checks["installed_hook_output_redacted"] = hook_timing["blocked_output_redacted"]
+            details["installed_hook_latency"] = hook_timing
+        else:
+            details["installed_hook_latency"] = {
+                "available": False,
+                "reason": "immutable-release-manifest-required",
+                "sample_count": 0,
+            }
         artifact_rows = _artifact_review(product, all_logs, http_bodies,
                                          fixture_path, tuple(sensitive_values))
         checks["no_synthetic_values_in_plaintext_state_or_logs"] = True

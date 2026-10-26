@@ -257,6 +257,18 @@ class ProductJourneyArtifactTests(unittest.TestCase):
                     )
                 self.assertEqual(caught.exception.code, "credential-backup-not-encrypted")
 
+    def test_installed_hook_timing_requires_immutable_release_provenance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with self.assertRaises(check_product_journey.JourneyFailure) as caught:
+                check_product_journey._installed_hook_pair(
+                    python=root / "python", backend=root / "gitleaks", work=root,
+                    worker_policy="strict", timeout=10, runtime={},
+                    release_provenance={"available": False},
+                )
+            self.assertEqual(caught.exception.code,
+                             "installed-hook-release-provenance-required")
+
     def test_runtime_probe_requires_installed_packages_in_the_private_venv(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -287,6 +299,8 @@ class ProductJourneyArtifactTests(unittest.TestCase):
             runtime_info = check_product_journey._runtime_probe(python, buddy, timeout=10)
             self.assertEqual(set(runtime_info["versions"]), set(check_product_journey._PACKAGES))
             self.assertEqual(set(runtime_info["versions"].values()), {"0.2.0"})
+            self.assertEqual(runtime_info["python_executable"], str(python.absolute()))
+            self.assertEqual(runtime_info["runtime_prefix"], str(runtime.absolute()))
 
 
 class SafeInputTests(unittest.TestCase):
