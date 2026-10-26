@@ -55,7 +55,7 @@ documented in [compatibility notes](COMPATIBILITY.md).
 
 ## Git guards and inventory
 
-`leakguard-install-hooks /path/to/checkouts` installs pre-commit and pre-push hooks and preserves/chains existing hooks. It also sets up the Git template for future repositories. Installation is explicit and opt-in. Git guards scan staged content and outgoing history, including bounded document blobs. They block on credentials and incomplete required scans. They never push or authenticate discovered credentials.
+`leakguard-install-hooks install /path/to/repository --config /private/profile.json --state-dir /private/state` installs pre-commit and pre-push hooks for that selected repository and preserves/chains existing hooks. Use `status` or `uninstall` with the same repository path to inspect or restore them. It leaves global Git templates unchanged. Installation is explicit and opt-in. Git guards scan staged content and outgoing history, including bounded document blobs. They block on credentials and incomplete required scans. They never push or authenticate discovered credentials.
 
 
 Managed hook launchers pin the installed core and use isolated Python startup so
