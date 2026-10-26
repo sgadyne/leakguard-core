@@ -1085,10 +1085,15 @@ def doctor(root: Path | None = None) -> tuple[dict[str, Any], int]:
     try:
         version, release, manifest = _current_release(root)
         add("active_release", "pass", version)
-        actual_python = f"{sys.version_info.major}.{sys.version_info.minor}"
-        python_ok = actual_python == manifest["target_python"]
+        runtime_python = python_for_release(release)
+        runtime_minor = _runtime_json(
+            runtime_python,
+            "import json, sys; print(json.dumps(f'{sys.version_info.major}.{sys.version_info.minor}'))",
+        ) if runtime_python else None
+        python_ok = runtime_minor == manifest["target_python"]
         add("target_python", "pass" if python_ok else "fail",
-            f"bundle targets Python {manifest['target_python']}; current installer Python is {actual_python}")
+            f"bundle targets Python {manifest['target_python']}; installed runtime is "
+            f"{runtime_minor if isinstance(runtime_minor, str) else 'unavailable'}")
         _ = validate_wheelhouse(release, manifest)
         add("release_hashes", "pass", "all installed wheel artifacts match the release manifest")
     except (DeployError, OSError) as exc:
