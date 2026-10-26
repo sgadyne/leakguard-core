@@ -96,6 +96,65 @@ class IndependentLabelTests(unittest.TestCase):
         self.assertEqual(receipt["outcome"], "passed")
 
 
+class AcceptanceStagingTests(unittest.TestCase):
+    def test_unrelated_test_root_receives_required_harness_and_deploy_files(self):
+        expected_tools = {
+            "_safe_inputs.py", "benchmark_scan.py", "run_corpus.py",
+            "run_acceptance.py", "run_independent_labels.py", "check_product_journey.py",
+        }
+        self.assertEqual(set(run_acceptance.INSTALLED_TEST_TOOL_FILES), expected_tools)
+        self.assertEqual(set(run_acceptance.INSTALLED_TEST_DEPLOY_FILES),
+                         {"installer.py", "default-config.json"})
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "source"
+            target = root / "unrelated-test-root"
+            (source / "tools").mkdir(parents=True)
+            (source / "deploy").mkdir()
+            for name in expected_tools:
+                (source / "tools" / name).write_text(name, encoding="utf-8")
+            for name in run_acceptance.INSTALLED_TEST_DEPLOY_FILES:
+                (source / "deploy" / name).write_text(name, encoding="utf-8")
+
+            tools_dir = run_acceptance._stage_test_tools(source, target)
+            deploy_dir = run_acceptance._stage_test_deploy_files(source, target)
+            self.assertEqual({path.name for path in tools_dir.iterdir()}, expected_tools)
+            self.assertEqual({path.name for path in deploy_dir.iterdir()},
+                             set(run_acceptance.INSTALLED_TEST_DEPLOY_FILES))
+            self.assertEqual((tools_dir / "check_product_journey.py").read_text(),
+                             "check_product_journey.py")
+            self.assertEqual((deploy_dir / "default-config.json").read_text(),
+                             "default-config.json")
+
+    def test_local_extension_wheel_inventory_includes_both_optional_packs(self):
+        self.assertEqual(dict(run_acceptance.LOCAL_EXTENSION_PROJECTS), {
+            "examples/v2_detector": "leakguard-example-detector",
+            "examples/v2_extractor": "leakguard-example-extractor",
+            "plugins/sensitive_basics": "leakguard-sensitive-basics",
+            "templates/firm_plugin": "leakguard-firm-example",
+        })
+
+    def test_wheel_provenance_records_metadata_hash_and_local_origin(self):
+        with tempfile.TemporaryDirectory() as folder:
+            wheel = Path(folder) / "leakguard_sensitive_basics-0.1.0-py3-none-any.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr(
+                    "leakguard_sensitive_basics-0.1.0.dist-info/METADATA",
+                    "Metadata-Version: 2.1\nName: leakguard-sensitive-basics\nVersion: 0.1.0\n\n",
+                )
+            row = run_acceptance._wheel_provenance(
+                wheel, {"leakguard-sensitive-basics": "plugins/sensitive_basics"},
+            )
+            self.assertEqual(row, {
+                "filename": wheel.name,
+                "distribution": "leakguard-sensitive-basics",
+                "version": "0.1.0",
+                "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                "source_project": "plugins/sensitive_basics",
+            })
+
+
 class ProductJourneyArtifactTests(unittest.TestCase):
     def test_release_provenance_binds_source_commit_and_artifact_hash(self):
         with tempfile.TemporaryDirectory() as folder:

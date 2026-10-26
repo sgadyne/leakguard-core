@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+from email.parser import Parser
 import hashlib
 import json
 import os
@@ -35,6 +36,21 @@ ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_INDEX = "https://pypi.org/simple"
 MAX_STAGE_SECONDS = 900
 WORKER_POLICIES = {"strict", "supervised-alpha"}
+INSTALLED_TEST_TOOL_FILES = (
+    "_safe_inputs.py",
+    "benchmark_scan.py",
+    "run_corpus.py",
+    "run_acceptance.py",
+    "run_independent_labels.py",
+    "check_product_journey.py",
+)
+LOCAL_EXTENSION_PROJECTS = (
+    ("examples/v2_detector", "leakguard-example-detector"),
+    ("examples/v2_extractor", "leakguard-example-extractor"),
+    ("plugins/sensitive_basics", "leakguard-sensitive-basics"),
+    ("templates/firm_plugin", "leakguard-firm-example"),
+)
+INSTALLED_TEST_DEPLOY_FILES = ("installer.py", "default-config.json")
 
 
 class AcceptanceFailure(RuntimeError):
@@ -255,6 +271,64 @@ def _artifact_member_problem(name: str, payload: bytes, forbidden_paths: tuple[P
     return False
 
 
+def _wheel_distribution(artifact: Path) -> tuple[str, str]:
+    """Read the single bounded METADATA identity from a built wheel."""
+    try:
+        with zipfile.ZipFile(artifact) as archive:
+            metadata_names = [name for name in archive.namelist()
+                              if name.endswith(".dist-info/METADATA")]
+            if len(metadata_names) != 1:
+                raise ValueError
+            info = archive.getinfo(metadata_names[0])
+            if info.file_size > 1_000_000:
+                raise ValueError
+            message = Parser().parsestr(archive.read(info).decode("utf-8"))
+            names, versions = message.get_all("Name", []), message.get_all("Version", [])
+            if (len(names) != 1 or len(versions) != 1
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", names[0])
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+!-]{0,199}", versions[0])):
+                raise ValueError
+            return names[0], versions[0]
+    except (OSError, UnicodeError, ValueError, zipfile.BadZipFile):
+        raise AcceptanceFailure("wheel-metadata-invalid") from None
+
+
+def _wheel_provenance(artifact: Path, origins: dict[str, str]) -> dict:
+    distribution, version = _wheel_distribution(artifact)
+    canonical = re.sub(r"[-_.]+", "-", distribution).lower()
+    if canonical not in origins:
+        raise AcceptanceFailure("artifact-set-invalid")
+    return {
+        "filename": artifact.name,
+        "distribution": canonical,
+        "version": version,
+        "sha256": _hash(artifact.read_bytes()),
+        "source_project": origins[canonical],
+    }
+
+
+def _stage_test_tools(source_root: Path, installed_tests: Path) -> Path:
+    installed_tools = installed_tests / "tools"
+    installed_tools.mkdir(mode=0o700, parents=True)
+    for name in INSTALLED_TEST_TOOL_FILES:
+        source = source_root / "tools" / name
+        if source.is_symlink() or not source.is_file():
+            raise AcceptanceFailure("test-tool-missing")
+        shutil.copy2(source, installed_tools / name)
+    return installed_tools
+
+
+def _stage_test_deploy_files(source_root: Path, installed_tests: Path) -> Path:
+    installed_deploy = installed_tests / "deploy"
+    installed_deploy.mkdir(mode=0o700, parents=True)
+    for name in INSTALLED_TEST_DEPLOY_FILES:
+        source = source_root / "deploy" / name
+        if source.is_symlink() or not source.is_file():
+            raise AcceptanceFailure("test-deploy-file-missing")
+        shutil.copy2(source, installed_deploy / name)
+    return installed_deploy
+
+
 def _fixture_case_files(work: Path) -> tuple[Path, Path, Path]:
     detector_v1 = work / "detector-v1-cases.json"
     detector_v2 = work / "detector-v2-cases.json"
@@ -316,7 +390,7 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
                 "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_CACHE_DIR": str(work / "pip-cache"),
                 "PYTHONDONTWRITEBYTECODE": "1"})
     _command([sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
-              "--target", str(builder_site), "build", "setuptools>=77"],
+              "--target", str(builder_site), "build", "setuptools>=77", "wheel>=0.45,<1"],
              cwd=work, env=env, stage="build-tool-install")
     build_env = dict(env, PYTHONPATH=str(builder_site))
     dist = work / "dist"
@@ -326,21 +400,30 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
         ".git", "__pycache__", "*.pyc", ".venv", "tmp", "dist", "build", "*.egg-info"))
     _command([sys.executable, "-m", "build", "--no-isolation", "--sdist", "--wheel", "--outdir", str(dist)],
              cwd=source, env=build_env, stage="core-build")
-    examples = work / "example-wheels"
-    examples.mkdir(mode=0o700)
-    for name in ("v2_detector", "v2_extractor"):
-        _command([sys.executable, "-m", "build", "--no-isolation", "--wheel", "--outdir", str(examples)],
-                 cwd=source / "examples" / name, env=build_env, stage="example-build")
+    extensions = work / "extension-wheels"
+    extensions.mkdir(mode=0o700)
+    for project, _distribution in LOCAL_EXTENSION_PROJECTS:
+        _command([sys.executable, "-m", "build", "--no-isolation", "--wheel", "--outdir", str(extensions)],
+                 cwd=source / project, env=build_env, stage="extension-build")
     wheels = sorted(dist.glob("leakguard_core-*.whl"))
     sdists = sorted(dist.glob("leakguard_core-*.tar.gz"))
-    example_wheels = sorted(examples.glob("*.whl"))
-    if len(wheels) != 1 or len(sdists) != 1 or len(example_wheels) != 2:
+    extension_wheels = sorted(extensions.glob("*.whl"))
+    if len(wheels) != 1 or len(sdists) != 1 or len(extension_wheels) != len(LOCAL_EXTENSION_PROJECTS):
+        raise AcceptanceFailure("artifact-set-invalid")
+    expected_origins = {distribution: project for project, distribution in LOCAL_EXTENSION_PROJECTS}
+    wheel_provenance = []
+    for artifact in extension_wheels:
+        row = _wheel_provenance(artifact, expected_origins)
+        if any(prior["distribution"] == row["distribution"] for prior in wheel_provenance):
+            raise AcceptanceFailure("artifact-set-invalid")
+        wheel_provenance.append(row)
+    if {row["distribution"] for row in wheel_provenance} != set(expected_origins):
         raise AcceptanceFailure("artifact-set-invalid")
     members = {}
     forbidden_paths = tuple(path for path in (ROOT, Path(args.config).resolve(),
                                                 Path(args.gitleaks).resolve(), work.resolve())
                             if path.is_absolute())
-    for artifact in [*wheels, *sdists, *example_wheels]:
+    for artifact in [*wheels, *sdists, *extension_wheels]:
         rows, problems = _artifact_members(artifact, forbidden_paths)
         if problems:
             raise AcceptanceFailure(problems[0])
@@ -398,8 +481,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
                   "pypdf>=6,<7", "olefile>=0.47,<1"], cwd=work, env=install_env,
                  stage="documents-extra-install")
     _command([*pip_install[:-2], "--target", str(target_site), "--no-deps",
-              *map(str, example_wheels)], cwd=work, env=install_env,
-             stage="example-wheel-install")
+              *map(str, extension_wheels)], cwd=work, env=install_env,
+             stage="extension-wheel-install")
     # pip --python re-executes pip under target_python, so dependency markers
     # use the requested target runtime rather than the builder interpreter.
     check_env = dict(install_env, PYTHONPATH=str(target_site))
@@ -412,16 +495,8 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copy2(ROOT / "tools" / "_safe_inputs.py",
                  installed_tests / "tests" / "_safe_inputs.py")
-    installed_tools = installed_tests / "tools"
-    installed_tools.mkdir(mode=0o700)
-    shutil.copy2(ROOT / "tools" / "_safe_inputs.py",
-                 installed_tools / "_safe_inputs.py")
-    shutil.copy2(ROOT / "tools" / "benchmark_scan.py",
-                 installed_tools / "benchmark_scan.py")
-    shutil.copy2(ROOT / "tools" / "run_corpus.py",
-                 installed_tools / "run_corpus.py")
-    shutil.copy2(ROOT / "tools" / "run_acceptance.py",
-                 installed_tools / "run_acceptance.py")
+    _stage_test_tools(ROOT, installed_tests)
+    _stage_test_deploy_files(ROOT, installed_tests)
     (installed_tests / "state").mkdir(mode=0o700)
     test_env = _environment(config=config, state=installed_tests / "state", gitleaks=gitleaks,
                              global_gitconfig=installed_tests / "gitconfig", base=target_environment)
@@ -462,13 +537,14 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
             "target_python_version": target_python_version,
             "installation_mode": installation_mode,
             "conformance": conformance,
+            "extension_wheels": sorted(wheel_provenance, key=lambda row: row["distribution"]),
             "documents_extra": bool(args.documents_extra), "artifacts": members,
             "installed_dependencies": _installed_dependencies(target, installed_tests, test_env)}
 
 
 def _installed_dependencies(python: Path, cwd: Path, env: dict[str, str]) -> dict[str, str]:
     result = _command([str(python), "-c",
-                       "import importlib.metadata as m,json;print(json.dumps({n:(m.version(n) if any(d.metadata['Name'].lower()==n.lower() for d in m.distributions()) else 'unavailable') for n in ('leakguard-core','packaging','pypdf','olefile','leakguard-example-detector','leakguard-example-extractor')}))"],
+                             "import importlib.metadata as m,json;print(json.dumps({n:(m.version(n) if any(d.metadata['Name'].lower()==n.lower() for d in m.distributions()) else 'unavailable') for n in ('leakguard-core','packaging','pypdf','olefile','leakguard-example-detector','leakguard-example-extractor','leakguard-sensitive-basics','leakguard-firm-example')}))"],
                       cwd=cwd, env=env, stage="installed-metadata-check", timeout=30)
     try:
         value = json.loads(result.stdout)
