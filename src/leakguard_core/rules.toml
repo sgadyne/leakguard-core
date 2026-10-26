@@ -20,10 +20,13 @@ description = "Literal value assigned to a password, passphrase or common passwo
 regex = '''(?i)(?:^|[\s{,.])((?:["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*[:=]\s*["']?[^"'\s,;}\]]{1,160}["']?))'''
 secretGroup = 1
 entropy = 0
-keywords = ["password", "passwd"]
+keywords = ["password", "passwd", "passphrase", "pwd"]
   [[rules.allowlists]]
   regexTarget = "secret"
   regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*[:=]\s*["']?(?:\$\{[a-z_][a-z0-9_]*\}?|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password|change[-_ ]?me|replace[-_ ]?me|not[-_ ]?a[-_ ]?secret|test|none|null|undefined)["']?$''']
+  [[rules.allowlists]]
+  regexTarget = "secret"
+  regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*[:=]\s*(?:os\.environ\s*\[\s*["']|process\.env\.[a-z_][a-z0-9_]*|get_password\s*\(\))["']?$''']
 
 [[rules]]
 id = "xml-password"
