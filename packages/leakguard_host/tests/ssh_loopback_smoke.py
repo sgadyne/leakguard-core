@@ -63,6 +63,7 @@ LogLevel ERROR
     digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
     target = getpass.getuser() + "@127.0.0.1"
     runner = SSHRunner(port=port, identity_file=root / "client", known_hosts_file=known)
+    deployed = False
     with (root / "sshd.log").open("wb") as log:
         process = subprocess.Popen([sshd, "-D", "-e", "-f", str(config)], stdout=subprocess.DEVNULL,
                                    stderr=log, start_new_session=True)
@@ -86,6 +87,17 @@ LogLevel ERROR
             upload = runner.upload(target, bundle, str(root / "uploaded"), sha256=digest)
             assert upload["uploaded"] and not upload["installed"]
             assert hashlib.sha256((root / "uploaded/release.zip").read_bytes()).hexdigest() == digest
+            if len(sys.argv) > 3:
+                release = Path(sys.argv[3]).resolve()
+                release_digest = hashlib.sha256(release.read_bytes()).hexdigest()
+                deployment = runner.deploy(target, release, str(root / "deployed"), sha256=release_digest,
+                    python=str(Path(sys.executable).absolute()), scan_root=str(source), max_seconds=10, max_files=10)
+                assert deployment["installed"] is True
+                assert deployment["scan"]["coverage"] == "complete", deployment["scan"]
+                assert deployment["scan"]["report"]["counts"]["findings"] >= 1
+                assert value not in json.dumps(deployment)
+                assert not any(item.name.endswith((".lgo", ".lgv", ".sqlite3")) for item in (root / "deployed/state").rglob("*"))
+                deployed = True
         finally:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -102,6 +114,7 @@ LogLevel ERROR
     (root / "host").unlink()
     print(json.dumps({"ssh_loopback": "passed", "external_ssh": "unverified", "redacted_findings": 1,
                       "upload_hash": "verified", "source_unchanged": True, "daemon_stopped": process.poll() is not None,
+                      "offline_bundle_deploy": "passed" if deployed else "not-performed",
                       "platform": sys.platform}, sort_keys=True))
 
 
