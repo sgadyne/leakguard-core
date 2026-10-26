@@ -10,7 +10,6 @@ import os
 import platform
 import re
 import shutil
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -184,6 +183,16 @@ def read_manifest(path: Path) -> dict[str, Any]:
         raise DeployError("invalid service command in manifest")
     if data.get("wheelhouse", "wheelhouse") != "wheelhouse":
         raise DeployError("unsupported wheelhouse directory in release manifest")
+    target_platform = data.get("target_platform")
+    quality = data.get("release_quality")
+    backend_version = data.get("backend_version")
+    if (not isinstance(target_platform, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", target_platform)
+            or target_platform in {".", ".."}):
+        raise DeployError("release manifest has no valid target platform")
+    if quality not in {"complete", "partial"}:
+        raise DeployError("release manifest has invalid release quality")
+    if not isinstance(backend_version, str) or not VERSION_RE.fullmatch(backend_version):
+        raise DeployError("release manifest has no exact backend version")
     return data
 
 
@@ -319,6 +328,7 @@ def validate_wheelhouse(bundle: Path, manifest: dict[str, Any]) -> list[Path]:
     if not isinstance(backend_artifacts, list):
         raise DeployError("release manifest has invalid backend artifacts")
     backend_destinations: set[str] = set()
+    target_backend_count = 0
     for artifact in backend_artifacts:
         if not isinstance(artifact, dict):
             raise DeployError("release manifest has invalid backend artifact")
@@ -338,11 +348,20 @@ def validate_wheelhouse(bundle: Path, manifest: dict[str, Any]) -> list[Path]:
         if relative.casefold() in backend_destinations:
             raise DeployError("release manifest has duplicate backend artifact paths")
         backend_destinations.add(relative.casefold())
+        if platform_name == manifest["target_platform"]:
+            expected_name = "gitleaks.exe" if platform_name.startswith("windows-") else "gitleaks"
+            if filename != expected_name:
+                raise DeployError("target release includes an unexpected backend executable name")
+            target_backend_count += 1
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise DeployError("release manifest has invalid backend artifact hash")
         path = _bundle_child(bundle, Path(relative))
         if path.is_symlink() or not path.is_file() or sha256_file(path) != digest:
             raise DeployError("backend artifact is missing or its SHA-256 does not match")
+    if any(item.get("platform") != manifest["target_platform"] for item in backend_artifacts):
+        raise DeployError("release bundle contains a backend for a different target platform")
+    if target_backend_count > 1 or (manifest["release_quality"] == "complete") != (target_backend_count == 1):
+        raise DeployError("release quality does not match its target Gitleaks backend artifacts")
     return verified
 
 
@@ -350,6 +369,32 @@ def python_for_release(release: Path) -> Path:
     if os.name == "nt":
         return release / "venv" / "Scripts" / "python.exe"
     return release / "venv" / "bin" / "python"
+
+
+def _platform_label(system: str | None = None, machine: str | None = None) -> str:
+    system = (system or platform.system()).lower()
+    machine = (machine or platform.machine()).lower()
+    os_name = {"darwin": "macos", "macos": "macos", "windows": "windows", "linux": "linux"}.get(system)
+    arch = {"amd64": "x86_64", "x64": "x86_64", "x86_64": "x86_64",
+            "arm64": "arm64", "aarch64": "arm64"}.get(machine)
+    if not os_name or not arch:
+        raise DeployError("this release does not identify the current operating system and CPU architecture")
+    return f"{os_name}-{arch}"
+
+
+def _release_complete(release: Path, version: str | None = None) -> bool:
+    marker = release / ".leakguard-release.json"
+    try:
+        if release.is_symlink() or marker.is_symlink() or not marker.is_file():
+            return False
+        value = json.loads(marker.read_text(encoding="utf-8"))
+        if (not isinstance(value, dict) or value.get("schema_version") != 1
+                or value.get("complete") is not True):
+            return False
+        manifest = read_manifest(release / MANIFEST_NAME)
+        return manifest["release_version"] == value.get("release_version") and (version is None or version == value.get("release_version"))
+    except (OSError, json.JSONDecodeError, DeployError):
+        return False
 
 
 def active_version(root: Path) -> str | None:
@@ -508,6 +553,147 @@ def _run(argv: Sequence[str], *, check: bool = True, timeout: int = 120) -> subp
     return result
 
 
+def _expected_backend_path(release: Path, manifest: dict[str, Any]) -> Path:
+    filename = "gitleaks.exe" if manifest["target_platform"].startswith("windows-") else "gitleaks"
+    return release / "backends" / manifest["target_platform"] / filename
+
+
+def _check_backend_runtime(release: Path, manifest: dict[str, Any], *, required: bool) -> tuple[bool, str]:
+    backend = _expected_backend_path(release, manifest)
+    records = manifest.get("backend_artifacts", [])
+    record = next((item for item in records if item.get("platform") == manifest["target_platform"]), None)
+    if record is None or not backend.is_file():
+        if required:
+            raise DeployError("complete release is missing its selected Gitleaks backend")
+        return False, "backend not included in partial release"
+    if sha256_file(backend) != record.get("sha256"):
+        raise DeployError("installed Gitleaks backend hash does not match the release manifest")
+    if os.name != "nt" and not os.access(backend, os.X_OK):
+        raise DeployError("installed Gitleaks backend is not executable")
+    try:
+        result = subprocess.run([str(backend), "version"], text=True, capture_output=True,
+                                timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DeployError("installed Gitleaks backend could not report its version") from exc
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    if result.returncode != 0 or not re.search(r"(?<![0-9.])" + re.escape(manifest["backend_version"]) + r"(?![0-9.])", output):
+        raise DeployError("installed Gitleaks backend version does not match the release manifest")
+    return True, "selected backend hash and version verified"
+
+
+def _buddy_start_smoke(release: Path, manifest: dict[str, Any]) -> None:
+    buddy = _script_path(release, manifest.get("buddy_command", "leakguard-buddy"))
+    if not buddy.is_file():
+        raise DeployError("installed Buddy console entrypoint is missing")
+    _run([str(buddy), "--help"], timeout=30)
+    core_cli = _script_path(release, "leakguard")
+    if core_cli.is_file():
+        _run([str(core_cli), "--help"], timeout=30)
+    with tempfile.TemporaryDirectory(prefix="leakguard-start-smoke-") as temporary:
+        scratch = Path(temporary)
+        state = scratch / "state"
+        _private_mkdir(state)
+        config = json.loads((release / "deploy" / "default-config.json").read_text(encoding="utf-8"))
+        config["observation_backend"] = "encrypted"
+        config["observation_path"] = str(state / "observations.lgo")
+        config["gitleaks_executable"] = str(release / "backends" / manifest["target_platform"] /
+                                                ("gitleaks.exe" if manifest["target_platform"].startswith("windows-") else "gitleaks"))
+        config_path = scratch / "config.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        argv = [str(buddy), "--no-browser", "--state-dir", str(state), "--config", str(config_path)]
+        try:
+            child = subprocess.Popen(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            timed_out = False
+            try:
+                stdout, _stderr = child.communicate(timeout=7)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                child.kill()
+                stdout, _stderr = child.communicate(timeout=3)
+        except OSError as exc:
+            raise DeployError("installed Buddy could not start in its loopback smoke check") from exc
+        marker = re.compile(r"Password Buddy listening at http://127\.0\.0\.1:\d+")
+        if not marker.search(stdout or "") or (not timed_out and child.returncode not in (0, None)):
+            # Do not surface captured process output: it can contain bootstrap
+            # material if a future UI accidentally changes its startup logging.
+            raise DeployError("installed Buddy did not report its loopback startup marker")
+
+
+def _build_release(bundle: Path, release: Path, manifest: dict[str, Any], wheels: list[Path]) -> None:
+    if release.is_symlink():
+        raise DeployError("versioned release path may not be a symbolic link")
+    _private_mkdir(release)
+    try:
+        _private_mkdir(release / "deploy")
+        shutil.copy2(_bundle_child(bundle, Path(MANIFEST_NAME)), release / MANIFEST_NAME)
+        for filename in MANAGED_FILES:
+            shutil.copy2(_bundle_child(bundle, Path("deploy") / filename), release / "deploy" / filename)
+        source_manifest = _bundle_child(bundle, Path("deploy/release-manifest.json"))
+        shutil.copy2(source_manifest, release / "deploy" / source_manifest.name)
+        wheel_dir = release / "wheelhouse"
+        _private_mkdir(wheel_dir)
+        for source in wheels:
+            shutil.copyfile(source, wheel_dir / source.name)
+
+        import venv
+        uv = shutil.which("uv")
+        venv_dir = release / "venv"
+        if uv:
+            _run([uv, "venv", "--python", sys.executable, str(venv_dir)], timeout=120)
+        else:
+            try:
+                venv.EnvBuilder(with_pip=True, clear=True).create(venv_dir)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise DeployError("Python could not create a private venv. Install uv for this user or use Python with ensurepip.") from exc
+        interpreter = python_for_release(release)
+        if uv:
+            install_args = [uv, "pip", "install", "--python", str(interpreter), "--offline", "--no-deps"]
+            install_args.extend(str(wheel_dir / item["filename"]) for item in manifest["packages"])
+            _run(install_args, timeout=900)
+            _run([uv, "pip", "check", "--python", str(interpreter)], timeout=120)
+        else:
+            install_args = [str(interpreter), "-m", "pip", "install", "--disable-pip-version-check", "--no-index", "--no-deps"]
+            install_args.extend(str(wheel_dir / item["filename"]) for item in manifest["packages"])
+            _run(install_args, timeout=900)
+            _run([str(interpreter), "-m", "pip", "check"], timeout=120)
+        pip_record = next((item for item in manifest["packages"] if normalized_name(item["name"]) == "pip"), None)
+        if pip_record is None:
+            raise DeployError("release closure must include an exact pip wheel for private extension installs")
+        pip_result = _run([str(interpreter), "-m", "pip", "--version"], timeout=30)
+        if pip_record["version"] not in pip_result.stdout:
+            raise DeployError("installed private runtime pip version does not match the release manifest")
+        versions_code = "import importlib.metadata as m,json,sys; print(json.dumps({n:m.version(n) for n in json.loads(sys.argv[1])},sort_keys=True))"
+        versions = _runtime_json(interpreter, versions_code, json.dumps([item["name"] for item in manifest["packages"]]))
+        if versions is None or any(versions.get(item["name"]) != item["version"] for item in manifest["packages"]):
+            raise DeployError("private runtime package versions do not match the release manifest")
+
+        for artifact in manifest.get("backend_artifacts", []):
+            source = _bundle_child(bundle, Path(artifact["bundle_path"]))
+            destination = release / artifact["bundle_path"]
+            _private_mkdir(destination.parent)
+            shutil.copyfile(source, destination)
+            if os.name != "nt":
+                destination.chmod(0o700)
+        _check_backend_runtime(release, manifest, required=manifest["release_quality"] == "complete")
+        _buddy_start_smoke(release, manifest)
+
+        if os.name != "nt":
+            for current, dirs, files in os.walk(release):
+                Path(current).chmod(0o700)
+                for filename in files:
+                    file_path = Path(current) / filename
+                    if not file_path.is_symlink():
+                        # Keep executable bits on installed entrypoints and the native backend.
+                        mode = stat.S_IMODE(file_path.stat().st_mode)
+                        file_path.chmod((mode & 0o700) | 0o600)
+        _atomic_json(release / ".leakguard-release.json", {
+            "schema_version": 1, "release_version": manifest["release_version"], "complete": True,
+        })
+    except BaseException:
+        shutil.rmtree(release, ignore_errors=True)
+        raise
+
+
 def install_bundle(bundle_arg: Path, *, root: Path | None = None, state: Path | None = None, activate: bool = True) -> Path:
     bundle = find_bundle_root(bundle_arg)
     owns_temp = bundle_arg.is_file()
@@ -524,6 +710,9 @@ def install_bundle(bundle_arg: Path, *, root: Path | None = None, state: Path | 
         raise DeployError("install prefix and state directory may not be symbolic links")
     try:
         manifest = read_manifest(_bundle_child(bundle, Path(MANIFEST_NAME)))
+        actual_platform = _platform_label()
+        if manifest["target_platform"] != actual_platform:
+            raise DeployError(f"bundle targets {manifest['target_platform']}; this host is {actual_platform}")
         wheels = validate_wheelhouse(bundle, manifest)
         if sys.version_info < (3, 11):
             raise DeployError("LeakGuard requires Python 3.11 or newer")
@@ -534,73 +723,20 @@ def install_bundle(bundle_arg: Path, *, root: Path | None = None, state: Path | 
         _private_mkdir(base / "releases")
         release = base / "releases" / manifest["release_version"]
         if release.exists():
-            raise DeployError(f"release {manifest['release_version']} already exists; install a new version or use rollback")
-        stage = base / "releases" / (".staging-" + manifest["release_version"] + f"-{os.getpid()}")
-        if stage.exists():
-            shutil.rmtree(stage)
-        _private_mkdir(stage)
-        try:
-            shutil.copy2(bundle / MANIFEST_NAME, stage / MANIFEST_NAME)
-            for filename in MANAGED_FILES:
-                source = bundle / "deploy" / filename
-                if source.is_file():
-                    _private_mkdir(stage / "deploy")
-                    shutil.copy2(source, stage / "deploy" / filename)
-            source_manifest = bundle / "deploy" / "release-manifest.json"
-            if source_manifest.is_file():
-                _private_mkdir(stage / "deploy")
-                shutil.copy2(source_manifest, stage / "deploy" / source_manifest.name)
-            wheel_dir = stage / "wheelhouse"
-            _private_mkdir(wheel_dir)
-            for source in wheels:
-                shutil.copyfile(source, wheel_dir / source.name)
-            venv_dir = stage / "venv"
-            import venv
-            uv = shutil.which("uv")
-            if uv:
-                _run([uv, "venv", "--python", sys.executable, str(venv_dir)], timeout=120)
+            if release.is_symlink():
+                raise DeployError("versioned release path may not be a symbolic link")
+            if not _release_complete(release, manifest["release_version"]):
+                if active_version(base) == manifest["release_version"]:
+                    raise DeployError("active release is incomplete and will not be replaced")
+                shutil.rmtree(release)
             else:
-                try:
-                    venv.EnvBuilder(with_pip=True, clear=True).create(venv_dir)
-                except (OSError, subprocess.SubprocessError) as exc:
-                    raise DeployError("Python could not create a private venv. Install uv for this user or use Python with ensurepip.") from exc
-            interpreter = python_for_release(stage)
-            if uv:
-                install_args = [uv, "pip", "install", "--python", str(interpreter), "--offline", "--no-deps"]
-                install_args.extend(str(wheel_dir / item["filename"]) for item in manifest["packages"])
-                _run(install_args, timeout=900)
-                _run([uv, "pip", "check", "--python", str(interpreter)], timeout=120)
-            else:
-                install_args = [str(interpreter), "-m", "pip", "install", "--disable-pip-version-check", "--no-index", "--no-deps"]
-                install_args.extend(str(wheel_dir / item["filename"]) for item in manifest["packages"])
-                _run(install_args, timeout=900)
-                _run([str(interpreter), "-m", "pip", "check"], timeout=120)
-            backend_artifacts = manifest.get("backend_artifacts", [])
-            for artifact in backend_artifacts:
-                relative = Path(artifact["bundle_path"])
-                source = bundle / relative
-                destination = stage / relative
-                _private_mkdir(destination.parent)
-                shutil.copyfile(source, destination)
-                if os.name != "nt":
-                    destination.chmod(0o700)
-            (stage / ".leakguard-release.json").write_text(
-                json.dumps({"schema_version": 1, "release_version": manifest["release_version"]}, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            if os.name != "nt":
-                for current, dirs, files in os.walk(stage):
-                    Path(current).chmod(0o700)
-                    for filename in files:
-                        file_path = Path(current) / filename
-                        if not file_path.is_symlink():
-                            file_path.chmod(stat.S_IMODE(file_path.stat().st_mode) & 0o700 | 0o600)
-            os.replace(stage, release)
-        except BaseException:
-            shutil.rmtree(stage, ignore_errors=True)
-            raise
+                old_manifest = read_manifest(release / MANIFEST_NAME)
+                if old_manifest != manifest:
+                    raise DeployError("this release version is already installed from a different artifact")
+        if not _release_complete(release, manifest["release_version"]):
+            _build_release(bundle, release, manifest, wheels)
 
-        _ensure_default_config(state, bundle / "deploy" / "default-config.json")
+        _ensure_default_config(state, release / "deploy" / "default-config.json", release, manifest)
         if activate:
             previous = active_version(base)
             previous_state = _active_state_dir(base)
@@ -613,6 +749,8 @@ def install_bundle(bundle_arg: Path, *, root: Path | None = None, state: Path | 
                     old_state = previous_state or state
                     _atomic_json(base / ACTIVE_NAME, {"schema_version": 1, "active_version": previous, "state_dir": str(old_state)})
                     old_manifest = read_manifest(base / "releases" / previous / MANIFEST_NAME)
+                    _ensure_default_config(state, base / "releases" / previous / "deploy" / "default-config.json",
+                                           base / "releases" / previous, old_manifest)
                     write_launchers(base, previous, old_manifest, old_state,
                                     external=base.resolve() == default_data_root().resolve())
                 else:
@@ -624,7 +762,7 @@ def install_bundle(bundle_arg: Path, *, root: Path | None = None, state: Path | 
             shutil.rmtree(bundle.parent if bundle.parent.name.startswith("leakguard-bundle-") else bundle, ignore_errors=True)
 
 
-def _ensure_default_config(state: Path, template: Path) -> None:
+def _ensure_default_config(state: Path, template: Path, release: Path, manifest: dict[str, Any]) -> None:
     _private_mkdir(state)
     config = state / "config.json"
     if config.is_symlink():
@@ -648,6 +786,8 @@ def _ensure_default_config(state: Path, template: Path) -> None:
     # selected by an installed configuration.
     value["observation_backend"] = "encrypted"
     value["observation_path"] = str(state / "observations.lgo")
+    backend_name = "gitleaks.exe" if manifest["target_platform"].startswith("windows-") else "gitleaks"
+    value["gitleaks_executable"] = str((release / "backends" / manifest["target_platform"] / backend_name).resolve())
     if sys.platform == "darwin":
         value["worker_policy"] = "supervised-alpha"
     _atomic_json(config, value)
@@ -660,6 +800,8 @@ def _current_release(root: Path) -> tuple[str, Path, dict[str, Any]]:
     release = root / "releases" / version
     if not release.is_dir():
         raise DeployError("active LeakGuard release directory is missing")
+    if not _release_complete(release, version):
+        raise DeployError("active LeakGuard release is incomplete")
     return version, release, read_manifest(release / MANIFEST_NAME)
 
 
@@ -672,11 +814,12 @@ def rollback(root: Path | None = None) -> str:
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
-    prior = next((path for path in candidates if path.name != current and (path / MANIFEST_NAME).is_file()), None)
+    prior = next((path for path in candidates if path.name != current and _release_complete(path, path.name)), None)
     if prior is None:
         raise DeployError("no earlier installed version is available for rollback")
     manifest = read_manifest(prior / MANIFEST_NAME)
     state = _active_state_dir(root) or state_root()
+    _ensure_default_config(state, prior / "deploy" / "default-config.json", prior, manifest)
     _atomic_json(root / ACTIVE_NAME, {"schema_version": 1, "active_version": prior.name, "previous_version": current,
                                       "state_dir": str(state)})
     write_launchers(root, prior.name, manifest, state, external=root == default_data_root().resolve())
@@ -791,7 +934,9 @@ def manage_service(action: str, root: Path | None = None) -> dict[str, Any]:
     argv = spec.get({"enable": "enable_argv", "status": "status_argv"}[action])
     command = _substitute_argv(argv)
     result = _run(command, check=action != "status", timeout=60)
-    _, _, unattended_available, keyring_code = _observation_keyring(state, python_for_release(release))
+    _, observation_path, encrypted_config, _ = _observation_config(state, state / "config.json")
+    _, _, keyring_available, keyring_code = _observation_keyring(observation_path, python_for_release(release))
+    unattended_available = encrypted_config and keyring_available
     return {"action": action, "platform": system, "service_file": str(service_file), "returncode": result.returncode,
             "status": (result.stdout or result.stderr).strip()[:300],
             "unattended_requires": spec.get("unattended_requires"),
@@ -817,8 +962,59 @@ def _runtime_json(interpreter: Path, code: str, argument: str) -> dict[str, Any]
     return value if isinstance(value, dict) else None
 
 
-def _observation_keyring(state: Path, interpreter: Path | None) -> tuple[str, str, bool, str]:
-    observation_path = state / "observations.lgo"
+def _observation_config(state: Path, config_path: Path | None = None) -> tuple[dict[str, Any] | None, Path, bool, str]:
+    path = config_path or Path(os.environ.get("LEAKGUARD_CONFIG", str(state / "config.json"))).expanduser()
+    fallback = state / "observations.lgo"
+    if not path.is_absolute() or path.is_symlink():
+        return None, fallback, False, "runtime config path is invalid"
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            return None, fallback, False, "runtime config exceeds the 1 MiB limit"
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, fallback, False, "runtime config is missing or invalid"
+    if not isinstance(config, dict):
+        return None, fallback, False, "runtime config must be a JSON object"
+    raw_observation_path = config.get("observation_path")
+    if raw_observation_path is None:
+        observation_path = fallback
+        path_valid = True
+    elif isinstance(raw_observation_path, str) and Path(raw_observation_path).is_absolute():
+        observation_path = Path(raw_observation_path)
+        path_valid = (os.path.normcase(os.path.abspath(observation_path)) ==
+                      os.path.normcase(os.path.abspath(fallback))) and not observation_path.is_symlink()
+        if not path_valid:
+            observation_path = fallback
+    else:
+        observation_path = fallback
+        path_valid = False
+    encrypted = config.get("observation_backend") == "encrypted" and path_valid
+    detail = "encrypted backend selected" if encrypted else "installed config does not select a valid encrypted observation store"
+    return config, observation_path, encrypted, detail
+
+
+def _sqlite_serialization_probe(interpreter: Path | None) -> tuple[bool, str]:
+    if interpreter is None:
+        return False, "installed LeakGuard runtime is unavailable"
+    code = """
+import json
+from leakguard_core.scan_store import SQLiteScanStore
+
+store = SQLiteScanStore.from_memory()
+payload = store.serialize()
+reopened = SQLiteScanStore.from_memory(payload)
+reopened.close()
+store.close()
+print(json.dumps({"ok": isinstance(payload, bytes) and len(payload) > 0, "bytes": len(payload)}))
+"""
+    result = _runtime_json(interpreter, code, "")
+    if result is None or result.get("ok") is not True:
+        return False, "in-memory SQLiteScanStore serialize/deserialize failed"
+    size = result.get("bytes")
+    return True, f"in-memory SQLiteScanStore serialized {size} bytes"
+
+
+def _observation_keyring(observation_path: Path, interpreter: Path | None) -> tuple[str, str, bool, str]:
     if interpreter is None:
         return "unavailable", "installed runtime is unavailable", False, "runtime-unavailable"
     code = """
@@ -884,32 +1080,48 @@ def doctor(root: Path | None = None) -> tuple[dict[str, Any], int]:
         add("release_hashes", "pass", "all installed wheel artifacts match the release manifest")
     except (DeployError, OSError) as exc:
         add("active_release", "fail", str(exc))
-    sqlite_ok = hasattr(sqlite3.Connection, "serialize") and hasattr(sqlite3.Connection, "deserialize")
-    if sqlite_ok:
-        try:
-            connection = sqlite3.connect(":memory:")
-            connection.execute("create table doctor_check (value integer)")
-            blob = connection.serialize()
-            check = sqlite3.connect(":memory:")
-            check.deserialize(blob)
-            sqlite_ok = check.execute("select count(*) from doctor_check").fetchone() == (0,)
-            connection.close()
-            check.close()
-        except Exception:
-            sqlite_ok = False
-    add("sqlite_serialization", "pass" if sqlite_ok else "fail", "serialize/deserialize " + ("available" if sqlite_ok else "unavailable or failed"))
     state = _active_state_dir(root) or (root / "state" if explicit_root else state_root())
     runtime_python = python_for_release(release) if release is not None else None
-    keyring_label, keyring_detail, unattended_available, keyring_code = _observation_keyring(state, runtime_python)
-    key_status = "pass" if unattended_available else "warning"
+    sqlite_ok, sqlite_detail = _sqlite_serialization_probe(runtime_python)
+    add("sqlite_serialization", "pass" if sqlite_ok else "fail", sqlite_detail)
+    config_path = Path(os.environ.get("LEAKGUARD_CONFIG", str(state / "config.json"))).expanduser()
+    config, observation_path, encrypted_config, config_detail = _observation_config(state, config_path)
+    config_status = "pass" if encrypted_config else "fail"
+    add("observation_backend", config_status, config_detail)
+    keyring_label, keyring_detail, keyring_available, keyring_code = _observation_keyring(observation_path, runtime_python)
+    unattended_available = encrypted_config and keyring_available
+    key_status = "pass" if keyring_available else "warning"
     add("native_keyring", key_status, f"{keyring_label}: {keyring_detail}")
-    config_path = Path(os.environ.get("LEAKGUARD_CONFIG", str(state / "config.json")))
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        worker_policy = config.get("worker_policy", "strict") if isinstance(config, dict) else "invalid"
+    if config is not None:
+        try:
+            worker_policy = config.get("worker_policy", "strict")
+            add("runtime_config", "pass", "configuration is readable")
+        except Exception:
+            worker_policy = "invalid"
+            add("runtime_config", "warning", "configuration fields are invalid")
         add("worker_policy", "info", str(worker_policy))
-    except (OSError, json.JSONDecodeError):
+    else:
         add("runtime_config", "warning", "configuration file is missing or invalid")
+    backend_ok = False
+    backend_path: Path | None = None
+    if release is not None and manifest is not None:
+        backend_path = _expected_backend_path(release, manifest)
+        configured_backend = config.get("gitleaks_executable") if isinstance(config, dict) else None
+        config_matches = isinstance(configured_backend, str) and Path(configured_backend).is_absolute() \
+            and os.path.normcase(os.path.abspath(configured_backend)) == os.path.normcase(os.path.abspath(backend_path))
+        try:
+            backend_ok, backend_detail = _check_backend_runtime(
+                release, manifest, required=manifest["release_quality"] == "complete")
+            if not config_matches:
+                backend_ok = False
+                backend_detail = "installed config does not select the release-pinned Gitleaks path"
+            backend_status = "pass" if backend_ok else ("warning" if manifest["release_quality"] == "partial" and not backend_path.is_file() else "fail")
+        except (DeployError, OSError) as exc:
+            backend_detail = str(exc)
+            backend_status = "warning" if manifest["release_quality"] == "partial" and not backend_path.exists() else "fail"
+        add("gitleaks_backend", backend_status, backend_detail)
+    else:
+        add("gitleaks_backend", "fail", "no validated active release backend")
     package_results = []
     if manifest is not None:
         version_code = """
@@ -956,6 +1168,10 @@ print(json.dumps(versions, sort_keys=True))
     report = {"schema_version": 1, "platform": platform.system().lower(), "checks": checks,
               "capabilities": {"sqlite_serialization": sqlite_ok, "native_keyring": keyring_label,
                                "observation_keyring_error": keyring_code,
+                               "gitleaks": {"available": backend_ok,
+                                            "path": str(backend_path) if backend_path else None,
+                                            "version": manifest.get("backend_version") if manifest else None,
+                                            "release_quality": manifest.get("release_quality") if manifest else None},
                                "unattended_observation_store": unattended_available,
                                "native_execution": native_execution}}
     failed = any(item["status"] == "fail" for item in checks)

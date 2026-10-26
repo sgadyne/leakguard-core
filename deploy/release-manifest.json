@@ -4,6 +4,7 @@
   "python_requires": ">=3.11",
   "wheelhouse": "wheelhouse",
   "pinned_distributions": {
+    "pip": "26.2.2",
     "cryptography": "50.0.2",
     "keyring": "25.7.0",
     "leakguard-core": "0.2.0",
@@ -12,6 +13,7 @@
     "leakguard-vault": "0.1.0",
     "psutil": "7.2.2"
   },
+  "backend_version": "8.30.1",
   "buddy_command": "leakguard-buddy",
   "service_command": [
     "leakguard-buddy",

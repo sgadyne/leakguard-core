@@ -80,6 +80,12 @@ def make_bundle(args: argparse.Namespace) -> Path:
     if not VERSION_RE.fullmatch(version) or version in {".", ".."}:
         raise ValueError("invalid release version")
     validate_commit(args.source_commit)
+    target_platform = args.target_platform
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", target_platform) or target_platform in {".", ".."}:
+        raise ValueError("target platform must be a short OS-architecture label")
+    backend_version = args.backend_version or release_spec.get("backend_version")
+    if not isinstance(backend_version, str) or not VERSION_RE.fullmatch(backend_version):
+        raise ValueError("release manifest must declare an exact backend_version")
     wheelhouse = args.wheelhouse.resolve(strict=True)
     if not wheelhouse.is_dir():
         raise ValueError("wheelhouse must be a directory")
@@ -129,6 +135,7 @@ def make_bundle(args: argparse.Namespace) -> Path:
         target, separator, raw_path = spec.partition("=")
         platform_name, slash, artifact_name = target.partition("/")
         if (not separator or not slash or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", platform_name)
+                or platform_name in {".", ".."}
                 or not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", artifact_name)
                 or artifact_name in {".", ".."}):
             raise ValueError("backend artifacts use PLATFORM/NAME=PATH")
@@ -145,6 +152,16 @@ def make_bundle(args: argparse.Namespace) -> Path:
         backend_artifacts.append({"platform": platform_name, "filename": artifact_name,
                                   "bundle_path": f"backends/{platform_name}/{artifact_name}",
                                   "sha256": sha256_file(source), "source_path": str(source)})
+
+    target_backends = [item for item in backend_artifacts if item["platform"] == target_platform]
+    if any(item["platform"] != target_platform for item in backend_artifacts):
+        raise ValueError("a target-platform bundle may contain backend artifacts only for that platform")
+    expected_backend_name = "gitleaks.exe" if target_platform.lower().startswith("windows-") else "gitleaks"
+    if target_backends:
+        if len(target_backends) != 1 or target_backends[0]["filename"] != expected_backend_name:
+            raise ValueError(f"target bundle backend must be exactly {expected_backend_name}")
+    elif not args.partial:
+        raise ValueError("a complete release requires the target platform's pinned Gitleaks executable; use --partial only for an explicitly incomplete target")
 
     if len(wheels) + len(backend_artifacts) + 6 > 1000:
         raise ValueError("bundle would exceed the installer 1,000-member limit")
@@ -182,6 +199,9 @@ def make_bundle(args: argparse.Namespace) -> Path:
             "schema_version": 1,
             "release_version": version,
             "source_commit": args.source_commit.lower(),
+            "target_platform": target_platform,
+            "release_quality": "partial" if not target_backends else "complete",
+            "backend_version": backend_version,
             "source_manifest_sha256": sha256_file(release_spec_path),
             "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "python_requires": release_spec.get("python_requires", ">=3.11"),
@@ -216,6 +236,9 @@ def main() -> int:
     parser.add_argument("--release-manifest", type=Path, default=ROOT / "deploy" / "release-manifest.json")
     parser.add_argument("--version", help="release version label (defaults to the checked-in manifest)")
     parser.add_argument("--source-commit", required=True, help="integrated source commit ID")
+    parser.add_argument("--target-platform", required=True, help="target OS-architecture label, e.g. linux-x86_64 or macos-arm64")
+    parser.add_argument("--backend-version", help="exact Gitleaks version (defaults to checked-in manifest)")
+    parser.add_argument("--partial", action="store_true", help="allow an explicitly incomplete release without a native Gitleaks backend")
     parser.add_argument("--require-package", action="append", default=[], metavar="NAME", help="require a distribution in the wheelhouse; repeat as needed")
     parser.add_argument("--buddy-command", help="installed UI console command (defaults to the checked-in manifest)")
     parser.add_argument("--service-command", action="append", default=[], metavar="ARG", help="service argv element; repeat in order")

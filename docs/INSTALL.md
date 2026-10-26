@@ -23,28 +23,38 @@ python -m build --wheel --no-deps --outdir artifacts/wheelhouse packages/leakgua
 python -m build --wheel --no-deps --outdir artifacts/wheelhouse packages/leakguard_vault
 python -m build --wheel --no-deps --outdir artifacts/wheelhouse apps/buddy
 python -m pip download --only-binary=:all: --dest artifacts/wheelhouse \
-  cryptography==50.0.2 keyring==25.7.0 psutil==7.2.2
+  pip==26.2.2 cryptography==50.0.2 keyring==25.7.0 psutil==7.2.2
 python -m pip download --only-binary=:all: --no-index \
   --find-links artifacts/wheelhouse --dest artifacts/wheelhouse \
   leakguard-core==0.2.0 leakguard-host==0.2.0 leakguard-vault==0.1.0 \
   leakguard-buddy==0.1.0a1
 ```
 
-If a separately verified backend executable is part of the release, include it
-with `--backend-artifact PLATFORM/NAME=PATH`; the bundle manifest records its
-platform, file name, and hash. Build and hash the release archive with:
+The release needs the native Gitleaks executable for each complete target. The
+builder records its SHA-256 and exact version. The installer runs the backend's
+version command before activation and pins its absolute path in private config,
+so it never depends on an ambient `PATH`. Use `--partial` only when that target
+backend is unavailable; doctor reports the release as partial and Gitleaks as
+unavailable. Labels use `linux-x86_64`, `macos-arm64`, or `windows-x86_64`
+(also `macos-x86_64` where needed). Build and hash the release archive with:
 
 ```sh
 python deploy/build_bundle.py \
   --wheelhouse artifacts/wheelhouse \
   --output artifacts/LeakGuard-0.2.0-alpha.1-linux-x86_64.zip \
-  --source-commit "$(git rev-parse HEAD)"
+  --source-commit "$(git rev-parse HEAD)" \
+  --target-platform linux-x86_64 \
+  --backend-artifact linux-x86_64/gitleaks=/path/to/pinned/gitleaks
 ```
 
 The command prints the bundle SHA-256. Keep that digest with the archive when
 transferring it through an offline corporate channel. The builder refuses a
 missing or mismatched pinned distribution. Its manifest contains every wheel
-hash and verifies package name and version from wheel metadata before install.
+and backend hash and verifies package name and version from wheel metadata
+before install. A complete install creates its private venv at the final
+immutable release path, verifies pip for reviewed local extension installs,
+and runs installed console-script help plus a short loopback Buddy startup
+check before activating the release.
 
 ## Linux and macOS
 
@@ -58,7 +68,7 @@ cd LeakGuard
 
 The script uses `python3`. If Python's `venv` module has no `ensurepip`, install
 `uv` for the current user or use a Python build that includes `ensurepip`. The
-runtime is still created under LeakGuard's private release directory, and wheel
+runtime is created directly at its final versioned path and all wheel
 installation runs offline. On Linux, add `~/.local/bin` to `PATH` if needed.
 The Buddy shortcut is also written to the user's application menu.
 
@@ -74,7 +84,7 @@ observations ephemeral rather than falling back to a plaintext database.
 Extract the archive, then run PowerShell as the current user:
 
 ```powershell
-Expand-Archive .\LeakGuard-0.2.0-alpha.1-windows-x64.zip .\LeakGuardBundle
+Expand-Archive .\LeakGuard-0.2.0-alpha.1-windows-x86_64.zip .\LeakGuardBundle
 & .\LeakGuardBundle\LeakGuard\deploy\install.ps1
 ```
 
@@ -84,14 +94,17 @@ commands to the user's Start Menu. From PowerShell, service actions are also
 available through
 `& "$env:LOCALAPPDATA\LeakGuard\bin\leakguard-install.cmd" service enable`.
 Windows scripts are supplied with the alpha bundle; Windows is unverified until
-a native install journey completes.
+a native install journey completes. If a Windows Gitleaks binary is not in the
+bundle, the release must be explicitly marked partial and doctor will report
+that backend as unavailable.
 
 ## First launch and local checks
 
 Run `leakguard-buddy` from the user's bin directory or use the installed Buddy
 shortcut. The `leakguard` command launches the CLI with the same private config
 and state paths. Run `leakguard-doctor` for the exact package versions,
-SQLite serialization, native execution capability map, and verified
+SQLiteScanStore's actual in-memory serialize/deserialize path, selected
+Gitleaks executable and hash, native execution capability map, and verified
 observation-keyring status from the installed runtime. Doctor does not unlock
 credentials or write a keyring probe.
 
