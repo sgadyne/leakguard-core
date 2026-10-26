@@ -1,5 +1,8 @@
 # Corporate private-plugin setup
 
+For a self-contained PowerShell workflow with an isolated runtime and an explicit
+bundled Gitleaks path, use [firm-plugin-windows.md](firm-plugin-windows.md).
+
 This workflow installs a reviewed firm detector and optional fixed-argv check
 from local files. It uses the per-user Python runtime from the LeakGuard release
 bundle. It does not change a Git hook until a user selects a repository and
