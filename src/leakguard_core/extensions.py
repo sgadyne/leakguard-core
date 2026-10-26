@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 _TOKEN = re.compile(r'[a-z][a-z0-9-]{0,79}\Z', re.ASCII)
@@ -77,6 +78,12 @@ def _atomic(path, raw):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        if os.name != 'nt':
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     except OSError:
         raise ExtensionError('extension-state-failed') from None
     finally:
@@ -146,7 +153,8 @@ def inspect_wheel(path):
                     raise ExtensionError('extension-capacity-limit')
                 cases = _json(wheel.read(info))
                 from .conformance import _detector_cases
-                _detector_cases(cases)
+                if not 1 <= len(_detector_cases(cases)) <= 1000:
+                    raise ExtensionError('extension-conformance-invalid')
             return value, cases, hashlib.sha256(raw).hexdigest()
     except ExtensionError:
         raise
@@ -216,7 +224,8 @@ class ExtensionRegistry:
             validate({'script_checks': [entry['spec']]})
         if entry['cases'] is not None:
             from .conformance import _detector_cases
-            _detector_cases(entry['cases'])
+            if not 1 <= len(_detector_cases(entry['cases'])) <= 1000:
+                raise ExtensionError('extension-conformance-invalid')
 
     @contextmanager
     def _mutation(self):
@@ -324,6 +333,13 @@ class ExtensionRegistry:
     def check(self, extension_id, *, worker_policy='strict'):
         from . import plugins, conformance
         entry = self._entry(extension_id)
+        deadline = time.monotonic() + 60
+        def detect(*args, **kwargs):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise plugins.PluginError('plugin-timeout')
+            kwargs['timeout'] = min(kwargs.get('timeout') or 10, remaining)
+            return plugins.detect(*args, **kwargs, worker_policy=worker_policy)
         try:
             if entry['kind'] == 'wheel':
                 handle = plugins.load([entry['spec']], worker_policy=worker_policy)[0]
@@ -333,7 +349,7 @@ class ExtensionRegistry:
             else:
                 handle = plugins.load_scripts([entry['spec']])[0]
                 if entry['cases'] is None:
-                    tuple(plugins.detect([handle], '', 'extension-check.txt', 'text', worker_policy=worker_policy))
+                    tuple(detect([handle], '', 'extension-check.txt', 'text'))
             report = None
             if entry['cases'] is not None:
                 cases = conformance._detector_cases(entry['cases'])
@@ -343,7 +359,7 @@ class ExtensionRegistry:
                     raise ExtensionError('extension-conformance-failed')
                 from types import SimpleNamespace
                 adapter = SimpleNamespace(PluginError=plugins.PluginError,
-                    detect=lambda *args, **kwargs: plugins.detect(*args, **kwargs, worker_policy=worker_policy))
+                    detect=detect)
                 report = conformance._check_detector_loaded(adapter, handle, component, cases)
                 if not report.passed:
                     return {'id': entry['id'], 'passed': False, 'conformance': report.to_dict()}
