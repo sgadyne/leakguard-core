@@ -194,9 +194,10 @@ def clean_environment(base_python, state):
                "WINDIR", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ"}
     environment = {key: value for key, value in os.environ.items() if key in allowed}
     # Existing installer discovers uv through PATH. This path contains only copied CPython.
+    # State/config are explicit installer arguments. Do not select its not-yet-created
+    # config in the environment: the installed core --help smoke reads that setting.
     environment.update(PATH=str(base_python.parent), PYTHONNOUSERSITE="1", PIP_NO_INDEX="1",
-                       PIP_DISABLE_PIP_VERSION_CHECK="1", PIP_CONFIG_FILE=os.devnull,
-                       LEAKGUARD_STATE_DIR=str(state), LEAKGUARD_CONFIG=str(state / "config.json"))
+                       PIP_DISABLE_PIP_VERSION_CHECK="1", PIP_CONFIG_FILE=os.devnull)
     return environment
 
 

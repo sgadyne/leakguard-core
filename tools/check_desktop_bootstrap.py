@@ -7,6 +7,7 @@ from pathlib import Path
 import platform
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("bootstrap", ROOT / "deploy/desktop/bootstrap.py")
@@ -114,6 +115,14 @@ class ResourceBoundary(unittest.TestCase):
             self.assertFalse((data / "runtimes").exists())
         finally:
             ownership.close()
+
+    def test_installer_environment_hides_uv_and_not_yet_created_config(self):
+        with patch.dict(os.environ, {"LEAKGUARD_CONFIG": "/legacy/config", "PYTHONPATH": "/checkout"}):
+            environment = bootstrap.clean_environment(self.root / "python/bin/python3", self.root / "state")
+        self.assertEqual(environment["PATH"], str(self.root / "python/bin"))
+        self.assertNotIn("LEAKGUARD_CONFIG", environment)
+        self.assertNotIn("LEAKGUARD_STATE_DIR", environment)
+        self.assertNotIn("PYTHONPATH", environment)
 
 
 if __name__ == "__main__":
