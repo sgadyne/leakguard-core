@@ -48,6 +48,9 @@
     "session-expired": "Your local Buddy session expired. Run `leakguard-buddy open` from its private runtime.",
     "source-unavailable": "This source is unavailable or offline.",
     "source-not-found": "That source was removed.",
+    "source-disabled": "Enable this source before resuming its scan.",
+    "scan-progress-stalled": "The scan made no progress within its limits. Select a smaller folder or adjust scan limits before resuming.",
+    "scheduler-failed": "The background scheduler stopped unexpectedly. Refresh Buddy or restart the service.",
     "job-not-found": "That scan job is no longer available.",
     "plugin-invalid": "Buddy could not validate this plugin wheel or module.",
     "plugin-review-required": "Confirm that you reviewed and trust this plugin before installing it.",
@@ -171,7 +174,7 @@
     const stats = byId("source-stats"); clear(stats);
     stats.append(stat("Configured sources", rows.length, "Folders and mounted locations"), stat("Active jobs", running, "Queued, scanning or retrying"), stat("Files checked", totalFiles, "Across visible scan activity"), stat("Successful scans", completed, "Sources with a completed scan"));
     renderSources(rows);
-    renderJobs(tasks, rows);
+    renderJobs(tasks, rows, status.host || {});
   }
 
   function renderObservationGate(status) {
@@ -206,28 +209,32 @@
     }
   }
 
-  function renderJobs(jobs, sources) {
+  function renderJobs(jobs, sources, hostStatus = {}) {
     const list = byId("jobs-list"); clear(list);
+    if (hostStatus.worker_error) list.append(node("div", "notice", friendlyErrors[hostStatus.worker_error] || "The background scheduler reported an error."));
     if (!jobs.length) { list.append(empty("No scans yet. Your scan progress and coverage will appear here.")); return; }
-    const names = new Map(sources.map((source) => [source.id, source.label || source.root]));
+    const sourceById = new Map(sources.map((source) => [source.id, source]));
     for (const job of jobs.slice(0, 30)) {
       const card = node("article", "job-card");
       const main = node("div");
-      main.append(node("div", "job-title", names.get(job.source_id) || job.source_id || "Scan job"));
+      const source = sourceById.get(job.source_id);
+      main.append(node("div", "job-title", source?.label || source?.root || job.source_id || "Scan job"));
       const details = [job.state, `${job.files_scanned || 0} files checked`];
       if (job.pending_files !== null && job.pending_files !== undefined) details.push(`${job.pending_files} pending`);
       if (job.coverage) details.push(`coverage ${job.coverage}`);
-      if (job.last_error) details.push(`issue ${job.last_error}`);
+      if (job.stalled_slices) details.push(`${job.stalled_slices} no-progress slices`);
+      if (job.last_error) details.push(friendlyErrors[job.last_error] || `issue ${job.last_error}`);
       main.append(node("div", "path", details.join(" · ")));
       if (["running", "queued"].includes(job.state)) {
-        const progress = node("div", "job-progress"); const fill = node("span");
+        const progress = node("progress", "job-progress"); progress.max = 100; progress.setAttribute("aria-label", "Scan progress");
         const pending = Number(job.pending_files) || 0;
-        fill.style.width = pending ? `${Math.max(4, Math.min(90, 100 * (Number(job.files_scanned) || 0) / ((Number(job.files_scanned) || 0) + pending)))}%` : "18%";
-        progress.append(fill); main.append(progress);
+        progress.value = pending ? Math.max(4, Math.min(90, 100 * (Number(job.files_scanned) || 0) / ((Number(job.files_scanned) || 0) + pending))) : 18;
+        main.append(progress);
       }
       const actions = node("div", "source-actions");
       if (["running", "queued"].includes(job.state)) actions.append(button("Pause", "job-pause", "small-button", job.id));
-      if (job.state === "paused" || job.state === "backoff") actions.append(button("Resume", "job-resume", "small-button", job.id));
+      if ((job.state === "paused" || job.state === "backoff") && source?.enabled !== false) actions.append(button("Resume", "job-resume", "small-button", job.id));
+      else if (job.state === "paused" && source?.enabled === false) actions.append(badge("Enable source before resuming", "warn"));
       if (["running", "queued", "paused", "backoff"].includes(job.state)) actions.append(button("Cancel", "job-cancel", "small-button", job.id));
       card.append(main, actions); list.append(card);
     }
@@ -537,12 +544,12 @@
 
   async function revealEntry(id, copy = false) {
     const secret = await request(`/api/vault/entries/${encodeURIComponent(id)}/${copy ? "copy" : "reveal"}`, "POST", {});
-    revealed = secret;
     if (copy) {
       await copyText(secret.secret || "");
       notify("Secret copied to the clipboard. Buddy will try to clear it in one minute.");
       return;
     }
+    revealed = secret;
     const content = byId("reveal-content"); clear(content);
     for (const [label, value] of [["Title", secret.title], ["Username", secret.username], ["Secret", secret.secret], ["Notes", secret.notes]]) {
       if (value === undefined || value === null || value === "") continue;
@@ -617,7 +624,11 @@
       }
       else if (action === "credential-lock") { await request("/api/vault/lock", "POST", {}); await loadVault(); notify("Credential vault locked."); }
       else if (action === "vault-add") { const status = await request("/api/vault/status"); if (!status.unlocked) { openUnlock(status.created ? "vault" : "vault-create"); return; } openCredential(); }
-      else if (action === "vault-backup") { byId("backup-passphrase").value = ""; byId("backup-dialog").showModal(); }
+      else if (action === "vault-backup") {
+        const status = await request("/api/vault/status");
+        if (!status.unlocked) { openUnlock(status.created ? "vault" : "vault-create"); return; }
+        byId("backup-passphrase").value = ""; byId("backup-dialog").showModal();
+      }
       else if (action === "scan-source") { await request("/api/scans", "POST", { source_id: id }); await loadSources(); notify("Scan queued."); }
       else if (action === "toggle-source") {
         const all = await request("/api/sources"); const sources = Array.isArray(all) ? all : all.sources || []; const source = sources.find((x) => x.id === id);

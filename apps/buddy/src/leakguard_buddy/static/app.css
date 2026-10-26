@@ -3,3 +3,4 @@
 @media(max-width:640px){.manual-root,.keyring-line{align-items:stretch;flex-direction:column}.keyring-card{margin-top:-12px}.linked-finding{align-items:flex-start;flex-direction:column}}
 .readout{display:block;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#f5f8f6;color:var(--ink);font-weight:650}
 .hook-result{display:grid;gap:7px;margin-top:16px;overflow-wrap:anywhere}.hook-result:empty{display:none}
+progress.job-progress{display:block;width:100%;border:0;appearance:none;-webkit-appearance:none;background:#eef2ef}progress.job-progress::-webkit-progress-bar{background:#eef2ef;border-radius:6px}progress.job-progress::-webkit-progress-value{background:#58a67d;border-radius:6px}progress.job-progress::-moz-progress-bar{background:#58a67d;border-radius:6px}

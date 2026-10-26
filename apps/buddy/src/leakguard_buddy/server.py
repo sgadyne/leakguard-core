@@ -38,7 +38,7 @@ _SAFE_BACKEND_ERRORS = {
     "state-locked", "state-checkpoint-failed", "state-capacity-limit",
     "state-query-invalid", "state-cycle-busy", "plugin-invalid",
     "plugin-crashed", "plugin-timeout", "dependency-unavailable",
-    "source-not-found", "source-unavailable", "job-not-found", "job-busy",
+    "source-not-found", "source-unavailable", "source-disabled", "job-not-found", "job-busy",
     "scan-incomplete", "observation-store-exists", "observation-store-locked",
     "credential-vault-locked", "extension-invalid", "extension-not-found",
     "hook-configuration-invalid", "hook-directory-shared", "hook-target-changed",
@@ -173,7 +173,7 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
             # Do not serialize exception text or request values.
             code = getattr(error, "code", None)
             safe_code = code if type(code) is str and code in _SAFE_BACKEND_ERRORS else "request-failed"
-            conflict = {"vault-already-created", "vault-already-unlocked", "vault-busy", "source-not-found", "job-not-found", "job-busy", "observation-store-exists", "extension-not-found"}
+            conflict = {"vault-already-created", "vault-already-unlocked", "vault-busy", "source-not-found", "source-disabled", "job-not-found", "job-busy", "observation-store-exists", "extension-not-found"}
             client = {"vault-passphrase-invalid", "vault-entry-invalid", "state-query-invalid", "plugin-invalid", "plugin-review-required", "extension-invalid"}
             unavailable = {"vault-crypto-unavailable", "observation-keyring-unavailable", "observation-keyring-not-enabled", "observation-keyring-invalid", "state-checkpoint-failed", "state-capacity-limit"}
             status = 409 if safe_code in conflict else 401 if safe_code == "vault-authentication-failed" else 400 if safe_code in client else 503 if safe_code in unavailable else 500
