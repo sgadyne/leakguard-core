@@ -383,7 +383,7 @@ class ProductJourneyArtifactTests(unittest.TestCase):
             self.assertEqual(set(runtime_info["versions"]), set(check_product_journey._PACKAGES))
             self.assertEqual(set(runtime_info["versions"].values()), {"0.2.0"})
             self.assertEqual(runtime_info["python_executable"], str(python.absolute()))
-            self.assertEqual(runtime_info["runtime_prefix"], str(runtime.absolute()))
+            self.assertEqual(Path(runtime_info["runtime_prefix"]).resolve(), runtime.resolve())
 
 
 class SafeInputTests(unittest.TestCase):
