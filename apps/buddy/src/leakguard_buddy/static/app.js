@@ -76,7 +76,10 @@
     }
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (response.status === 401) { csrf = ""; sessionStorage.removeItem("buddy_csrf"); }
+      if (response.status === 401 && ["session-required", "session-expired"].includes(data.error)) {
+        csrf = "";
+        sessionStorage.removeItem("buddy_csrf");
+      }
       throw new Error(friendlyErrors[data.error] || data.error || friendlyErrors["request-failed"]);
     }
     return data;
