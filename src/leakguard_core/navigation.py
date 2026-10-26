@@ -518,7 +518,9 @@ class Navigation:
             fields = {"schema_version", "kind", "helper_version", "ignore_version",
                       "secure_fd", "hidden_entries", "ignore_filters", "follow_links",
                       "same_file_system", "direct_entries_only"}
-            if (set(response) != fields or response.get("schema_version") != 1
+            if (set(response) != fields
+                    or type(response.get("schema_version")) is not int
+                    or response["schema_version"] != 1
                     or response.get("kind") != "ready"
                     or response.get("helper_version") != "0.1.0"
                     or response.get("ignore_version") != "0.4.33"

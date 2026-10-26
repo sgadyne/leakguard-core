@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+import sys
 import unittest
 
 from leakguard_core.navigation import Navigation, NavigationError, _component_from_wire, _loads
@@ -106,6 +107,26 @@ class NavigationTests(unittest.TestCase):
             with self.assertRaises(NavigationError) as failure:
                 Navigation(missing)
             self.assertEqual(failure.exception.code, "helper-unavailable")
+
+    def test_helper_handshake_rejects_boolean_protocol_version(self):
+        if os.name != "posix":
+            self.skipTest("native helper is POSIX-only")
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = Path(temporary) / "malformed-helper"
+            ready = ('{"schema_version":true,"kind":"ready","helper_version":"0.1.0",'
+                     '"ignore_version":"0.4.33","secure_fd":true,"hidden_entries":true,'
+                     '"ignore_filters":false,"follow_links":false,"same_file_system":true,'
+                     '"direct_entries_only":true}')
+            fake.write_text(
+                f"#!{sys.executable}\nimport signal, socket, sys\n"
+                f"channel = socket.socket(fileno=int(sys.argv[2]))\n"
+                f"channel.sendall({(ready + chr(10))!r}.encode())\nsignal.pause()\n",
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            with self.assertRaises(NavigationError) as failure:
+                Navigation(fake)
+            self.assertEqual(failure.exception.code, "helper-handshake-invalid")
 
     def test_boundary_denial_and_root_retarget_are_surfaced(self):
         with tempfile.TemporaryDirectory() as temporary:
