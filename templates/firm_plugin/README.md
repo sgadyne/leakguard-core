@@ -20,6 +20,11 @@ Use `leakguard-extensions install` for the `firm` profile, then explicitly
 enable the `firm-example` component and run `leakguard-extensions check` before
 using it in scans or selected Git hooks. The registry reads the static record
 without importing the package; execution happens only after explicit enable.
+The default bundled cases expect review-only severity. If promoting
+`firm-customer-number`, distribute `fixtures/cases-promoted.json` beside the
+wheel and pass it as `--cases` together with the promotion `--options` during
+install. A custom customer prefix also needs a reviewed case file with matching
+positive values.
 
 `script-check.json` and `scripts/firm_check.py` show a second, fixed-argv path
 for firms that distribute a command instead of a Python wheel. The command

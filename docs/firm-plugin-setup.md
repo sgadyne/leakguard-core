@@ -25,8 +25,15 @@ STATE=/absolute/path/to/user-private/leakguard
 CORE_CONFIG=/absolute/path/to/user-private/leakguard/sources.json
 SENSITIVE_WHEEL=/absolute/path/to/release/plugins/leakguard_sensitive_basics-0.1.0-py3-none-any.whl
 FIRM_WHEEL=/absolute/path/to/reviewed/leakguard_firm_example-0.1.0-py3-none-any.whl
+SENSITIVE_PROMOTED_CASES=/absolute/path/to/release/sensitive-basics/cases-promoted.json
+FIRM_PROMOTED_CASES=/absolute/path/to/reviewed/firm_plugin/cases-promoted.json
 WORKER_POLICY="" # On macOS, set to: --worker-policy supervised-alpha
 ```
+
+Keep the option-specific case files beside the reviewed wheel in the approved
+offline release bundle. The wheel's default conformance cases cover its default
+options; a promotion or custom identifier prefix needs a matching reviewed
+`--cases` file because it changes expected findings.
 
 `sources.json` is the local source configuration already used by the firm. Keep
 the chosen roots and exclusions there; do not store passwords or personal
@@ -63,8 +70,7 @@ dependencies in the offline bundle, and publish the wheel only to its approved
 internal distribution. Do not edit the engine to add firm-specific rules.
 
 Create an options file in the private configuration directory. Leave
-`promote-rules` empty for review-only behavior, or list only rule IDs that the
-firm has explicitly approved to block:
+`promote-rules` empty for review-only behavior:
 
 ```json
 {
@@ -85,10 +91,37 @@ FIRM_REGISTRY="$STATE/extensions-firm"
 ```
 
 To promote a Sensitive Basics rule for firm scans, install the wheel into the
-firm registry with an options file such as `{"promote-rules":["pii-identifier-employee"]}`
-and enable it only there. Keep the sensitive registry unpromoted. Registry
-options belong to an installed extension entry, so use separate registries when
-the same wheel needs different options in different profiles.
+firm registry with an options file such as
+`{"promote-rules":["pii-identifier-employee"]}` and its matching reviewed
+case file. Enable it only in `firm`; keep the sensitive registry unpromoted:
+
+```sh
+cat > "$STATE/sensitive-firm-options.json" <<'EOF'
+{"promote-rules":["pii-identifier-employee"]}
+EOF
+"$EXT" --registry "$FIRM_REGISTRY" $WORKER_POLICY install "$SENSITIVE_WHEEL" \
+  --options "$STATE/sensitive-firm-options.json" --cases "$SENSITIVE_PROMOTED_CASES"
+"$EXT" --registry "$FIRM_REGISTRY" $WORKER_POLICY check sensitive-basics
+"$EXT" --registry "$FIRM_REGISTRY" $WORKER_POLICY enable sensitive-basics --profile firm
+```
+
+To promote `firm-customer-number`, use this instead of the review-only install
+above and make the choice before first activation:
+
+```sh
+cat > "$STATE/firm-promoted-options.json" <<'EOF'
+{"promote-rules":["firm-customer-number"]}
+EOF
+"$EXT" --registry "$FIRM_REGISTRY" $WORKER_POLICY install "$FIRM_WHEEL" \
+  --options "$STATE/firm-promoted-options.json" --cases "$FIRM_PROMOTED_CASES"
+"$EXT" --registry "$FIRM_REGISTRY" $WORKER_POLICY check firm-example
+"$EXT" --registry "$FIRM_REGISTRY" $WORKER_POLICY enable firm-example --profile firm
+```
+
+Registry options belong to an installed extension entry, so use separate
+registries when the same wheel needs different options in different profiles.
+When changing a prefix, supply a reviewed case file whose positive values use
+that prefix.
 
 ## 4. Register a fixed-argv firm check (optional)
 

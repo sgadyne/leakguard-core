@@ -34,6 +34,27 @@
       "part_id": "text"
     },
     {
+      "case_id": "ordinary-ops-log-control",
+      "text": "2026-10-26T09:18:32Z user alex@example.invalid dialed +1 (202) 555-0147; status=closed",
+      "logical_path": "fixtures/notes.txt",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
+      "case_id": "generic-csv-support-log-control",
+      "text": "record_id,summary,status\n4821,caller used +1 (202) 555-0147,closed",
+      "logical_path": "fixtures/notes.csv",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
+      "case_id": "short-office-extension-control",
+      "text": "phone: 555-0123",
+      "logical_path": "fixtures/contact.txt",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
       "case_id": "context-address",
       "text": "shipping_address: 42 Example Avenue, Testville",
       "logical_path": "fixtures/contact.txt",
@@ -121,6 +142,27 @@
       "case_id": "unlabelled-identifier-control",
       "text": "EMP-004821",
       "logical_path": "fixtures/notes.txt",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
+      "case_id": "short-employee-code-control",
+      "text": "employee_id: E42",
+      "logical_path": "fixtures/identifiers.txt",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
+      "case_id": "small-numeric-account-control",
+      "text": "account_number: 12345",
+      "logical_path": "fixtures/identifiers.txt",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
+      "case_id": "technical-build-metadata-control",
+      "text": "version=1.23.4\nbuild=20261026\nrelease=2026-10-26",
+      "logical_path": "fixtures/build.txt",
       "format_id": "text",
       "part_id": "text"
     }

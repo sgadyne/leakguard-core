@@ -21,28 +21,32 @@ recognized contextual header. This is a modest format-level check, not broad
 document understanding or a medical/legal classifier.
 
 Rule ID prefixes encode category because the stable v2 result schema contains
-only `{rule, line, severity}`: `pii-contact-*`, `pii-financial-*`, and
-`pii-identifier-*`. Findings carry no match, source text, fingerprint or
-category value copied from the file. The labeled examples in
+only `{rule, line, severity}`. A value-free UI can map `pii-contact-*` to
+contact, `pii-financial-*` to financial identifier, and `pii-identifier-*` to
+organization identifier; the suffix names the specific check. Findings carry
+no match, source text, fingerprint or category value copied from the file. The labeled examples in
 `src/sensitive_basics/cases.json` are synthetic and independently specify the
 expected rule and severity for each case. Registry `check` uses that same
 conformance file.
 
-Example configuration options for firm promotion and custom prefixes:
+Example firm option for promoting one identifier rule with the default
+prefixes:
 
 ```json
 {
   "module": "sensitive_basics.plugin",
   "component": "sensitive-basics",
   "options": {
-    "employee-prefix": "STAFF",
-    "customer-prefix": "CLIENT",
-    "account-prefix": "LEDGER",
     "promote-rules": ["pii-identifier-employee"]
   }
 }
 ```
 
-Promote only rules that the organization has reviewed and wants to block. V2
-plugins are trusted local code running with the scanner account's permissions;
-process supervision is not an operating-system sandbox.
+Because promotion changes expected severities, install with the matching
+independently reviewed `fixtures/cases-promoted.json` sidecar using
+`leakguard-extensions install WHEEL --options OPTIONS.json --cases CASES.json`.
+Changing any identifier prefix also changes the expected case inputs; provide a
+case sidecar with those firm-specific identifiers. Promote only rules that the
+organization has reviewed and wants to block. V2 plugins are trusted local code
+running with the scanner account's permissions; process supervision is not an
+operating-system sandbox.
