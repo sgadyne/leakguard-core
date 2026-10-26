@@ -274,3 +274,19 @@ sys.exit(3)
 """
     completed = subprocess.run([sys.executable, '-c', code, str(fifo)], capture_output=True, timeout=3)
     assert completed.returncode == 0
+
+
+def test_multi_field_credential_edit_validates_before_single_durable_change(tmp_path):
+    vault = CredentialVault(tmp_path / 'credentials.lgv')
+    session = vault.create(PASS)
+    entry = session.save_entry(title='Original', secret=SECRET, username='hidden-user', notes='hidden-notes')
+    original = vault.path.read_bytes()
+    with pytest.raises(VaultError, match='vault-entry-invalid'):
+        session.update_entry(entry['id'], title='   ', secret='synthetic-replacement')
+    assert vault.path.read_bytes() == original
+    assert session.reveal_entry(entry['id'])['secret'] == SECRET
+    session.update_entry(entry['id'], title='Updated', secret='synthetic-replacement')
+    value = session.reveal_entry(entry['id'])
+    assert value['username'] == 'hidden-user' and value['notes'] == 'hidden-notes'
+    assert value['title'] == 'Updated' and value['secret'] == 'synthetic-replacement'
+    vault.lock()

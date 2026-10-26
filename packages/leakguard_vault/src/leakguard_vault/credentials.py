@@ -206,26 +206,27 @@ class CredentialSession:
             return _metadata(entry)
 
     def update_metadata(self, entry_id, *, title=None, username=None, location=None, notes=None, finding_id=_OMITTED):
+        return self.update_entry(entry_id, title=title, username=username, location=location,
+                                 notes=notes, finding_id=finding_id)
+
+    def update_entry(self, entry_id, *, title=None, secret=None, username=None,
+                     location=None, notes=None, finding_id=_OMITTED):
+        """Validate and save one atomic edit while preserving omitted fields."""
         with self._vault._mutex:
             self._ensure_active()
             if type(entry_id) is not str or entry_id not in self._entries:
                 raise VaultError("vault-entry-not-found")
             old = self._entries[entry_id]
             return self.save_entry(entry_id=entry_id, title=old["title"] if title is None else title,
+                                   secret=secret,
                                    username=old["username"] if username is None else username,
                                    location=old["location"] if location is None else location,
                                    notes=old["notes"] if notes is None else notes,
                                    finding_id=old["finding_id"] if finding_id is _OMITTED else finding_id)
 
     def update_secret(self, entry_id, secret):
-        with self._vault._mutex:
-            self._ensure_active()
-            if type(entry_id) is not str or entry_id not in self._entries:
-                raise VaultError("vault-entry-not-found")
-            old = self._entries[entry_id]
-            return self.save_entry(entry_id=entry_id, title=old["title"], secret=secret,
-                                   username=old["username"], location=old["location"],
-                                   notes=old["notes"], finding_id=old["finding_id"])
+        _text(secret, 65536, required=True)
+        return self.update_entry(entry_id, secret=secret)
 
     def reveal_entry(self, entry_id):
         with self._vault._mutex:
