@@ -1,0 +1,8 @@
+{
+  "name": "password-buddy-desktop-release",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "22.23.2" },
+  "devDependencies": { "@electron/packager": "20.3.0" }
+}
