@@ -418,7 +418,12 @@ class RegistryTests(unittest.TestCase):
                 script = '''
 $ErrorActionPreference = 'Stop'
 $allowed = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
-$bad = @((Get-Acl -LiteralPath $env:LEAKGUARD_TEST_REGISTRY).Access | Where-Object {
+$acl = Get-Acl -LiteralPath $env:LEAKGUARD_TEST_REGISTRY
+if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed) { exit 2 }
+# Python 3.13's 0700 directory DACL uses OWNER RIGHTS (OW), not a user SID.
+# Admit OW only after checking that the actual owner is private/privileged.
+$allowed += 'S-1-3-4'
+$bad = @($acl.Access | Where-Object {
     $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed
 })
 if ($bad.Count -ne 0) { exit 1 }
