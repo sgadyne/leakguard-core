@@ -1,7 +1,7 @@
 """Bounded byte acquisition and version-pinned contextual proof readers."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import contextmanager
 import hashlib
 import json
@@ -126,16 +126,19 @@ class ScopedFileInput(m.FileInput):
 
 
 @contextmanager
-def scoped_scandir(path, boundary=None):
-    descriptor = boundary.directory_fd(path) if boundary is not None else None
+def scoped_scandir(path, boundary=None, *, navigation=None, deadline=None,
+                   cancel=None, same_file_system=False):
+    """The one directory-navigation seam, with the same acquisition boundary."""
+    from .navigation import Navigation
+    owned = navigation is None
+    navigator = Navigation() if owned else navigation
     try:
-        with os.scandir(descriptor if descriptor is not None else path) as entries:
+        with navigator.scandir(path, boundary=boundary, deadline=deadline,
+                               cancel=cancel, same_file_system=same_file_system) as entries:
             yield entries
-        if boundary is not None:
-            boundary.check(path, directory=True)
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        if owned:
+            navigator.close()
 
 
 def _bounded_file(path, maximum, *, boundary=None):
@@ -276,14 +279,20 @@ class ProofContext:
 @dataclass(frozen=True)
 class SnapshotInput:
     source: m.SourceRef
-    data: bytes
+    data: bytes = field(repr=False)
     context: ProofContext
     revalidate: object = None
     anchor: object = None
+    _content: m.ContentIdentity = field(init=False, repr=False)
+
+    def __post_init__(self):
+        if type(self.data) is not bytes:
+            raise TypeError('immutable-input-required')
+        object.__setattr__(self, '_content', content_identity(self.data))
 
     @property
     def content(self):
-        return content_identity(self.data)
+        return self._content
 
     def detach_validator(self):
         context_check = self.context.detach_validator()
@@ -316,14 +325,18 @@ def acquire_file(path: Path, *, max_bytes: int, boundary=None):
     context = ProofContext(sibling, validator=sibling)
     context.prepare(data, str(path))
 
-    expected_digest = hashlib.sha256(data).digest()
+    expected_digest = None
     def valid():
         try:
             return anchor.valid() and hashlib.sha256(_bounded_file(path, max_bytes, boundary=boundary)).digest() == expected_digest
         except AcquisitionError:
             return False
 
-    return SnapshotInput(source, data, context, valid, anchor)
+    snapshot = SnapshotInput(source, data, context, valid, anchor)
+    # The validator retains only the already-computed digest, not the snapshot
+    # or its source bytes. Avoid hashing acquired content a second time here.
+    expected_digest = bytes.fromhex(snapshot.content.digest)
+    return snapshot
 
 
 def acquire_bytes(data, logical_path, *, max_bytes):

@@ -32,6 +32,8 @@ DEFAULTS = {
     'extension_registry': None,
     'observation_backend': 'legacy',
     'observation_path': None,
+    'navigation_helper': None,
+    'navigation_same_filesystem': False,
 }
 
 
@@ -100,6 +102,11 @@ def validate(mapping):
         fail('worker_policy')
     if type(result['scan_workers']) is not int or result['scan_workers'] not in {1, 2}:
         fail('scan_workers')
+    if type(result['navigation_same_filesystem']) is not bool:
+        fail('navigation_same_filesystem')
+    helper = result['navigation_helper']
+    if helper is not None and (not text(helper) or not pathlib.Path(helper).is_absolute()):
+        fail('navigation_helper')
     if type(result['detection_profile']) is not str or result['detection_profile'] not in {'credentials', 'sensitive', 'firm'}:
         fail('detection_profile')
     if type(result['observation_backend']) is not str or result['observation_backend'] not in {'legacy', 'encrypted'}:

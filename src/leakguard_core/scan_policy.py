@@ -282,8 +282,10 @@ def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manif
     if executable and not Path(executable).is_file():
         executable = shutil.which(str(executable))
     binary_id = _file_identity(executable) if executable else 'unavailable'
+    navigation_helper = config.get('navigation_helper')
+    navigation_id = _file_identity(navigation_helper) if navigation_helper else None
     specs = list(plugin_specs or config.get('plugins', ()))
-    dependencies = ['pypdf', 'olefile', 'packaging', 'psutil']
+    dependencies = ['pypdf', 'olefile', 'packaging', 'psutil', 'cachetools']
     module_artifacts = []
     try:
         distributions = importlib.metadata.packages_distributions() if specs else {}
@@ -314,6 +316,9 @@ def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manif
         rule_artifacts = [('unavailable', 'unavailable')]
         complete = False
     value = {'abi': 'leakguard-runtime-3', 'core': core,
+             'navigation': {'protocol': 1, 'backend': 'rust-ignore' if navigation_helper else 'python',
+                            'artifact': navigation_id,
+                            'same_filesystem': config.get('navigation_same_filesystem', False)},
              'worker_policy': config.get('worker_policy', 'strict'),
              'detection_profile': config.get('detection_profile', 'credentials'),
              'python': [sys.implementation.name, platform.python_version(), _file_identity(sys.executable)],
@@ -325,7 +330,7 @@ def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manif
     if specs or value['scripts'] or config.get('credential_store'):
         complete = False
     _check_budget()
-    complete = complete and all(identity != 'unavailable' for _, identity in core)
+    complete = complete and navigation_id != 'unavailable' and all(identity != 'unavailable' for _, identity in core)
     return _digest(value), complete and binary_id != 'unavailable' and value['rules'] != 'unavailable'
 
 

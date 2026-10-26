@@ -499,7 +499,12 @@ class ScanService:
         self.store = store if store is not None else open_scan_store(self.state_dir, config=self.config)
         self._owns_store = store is None
         self._closed = False
+        from ._result_cache import CacheScope
+        self._observation_scope = CacheScope()
+        from .navigation import Navigation
+        self._navigation = None
         try:
+            self._navigation = Navigation(helper=self.config.get('navigation_helper'))
             self._plugins = plugins.load(self.config.get('plugins', []), worker_policy=self.config.get('worker_policy', 'strict'))
             if self.config.get('script_checks'):
                 self._plugins.extend(plugins.load_scripts(self.config['script_checks']))
@@ -508,6 +513,10 @@ class ScanService:
             # supported and persistent semantic reuse is deliberately disabled.
             self._cache_eligible = self._cache_eligible and not self._plugins
         except Exception:
+            from ._result_cache import OBSERVATIONS
+            OBSERVATIONS.close_scope(self._observation_scope)
+            if self._navigation is not None:
+                self._navigation.close()
             if self._owns_store:
                 self.store.close()
             raise
@@ -515,8 +524,24 @@ class ScanService:
     def close(self):
         if not self._closed:
             self._closed = True
+            from ._result_cache import OBSERVATIONS
+            OBSERVATIONS.close_scope(self._observation_scope)
+            self._navigation.close()
             if self._owns_store:
                 self.store.close()
+
+    def cache_metrics(self):
+        """Aggregate L1 budgets/counters; never keys, paths or observations."""
+        from ._result_cache import OBSERVATIONS
+        return OBSERVATIONS.metrics()
+
+    def clear_cache(self):
+        from ._result_cache import OBSERVATIONS
+        OBSERVATIONS.clear_scope(self._observation_scope)
+
+    def navigation_capabilities(self):
+        return dict(self._navigation.capabilities(),
+                    same_filesystem=self.config['navigation_same_filesystem'])
 
     def _material_snapshot(self, limits):
         try:
@@ -614,7 +639,7 @@ class ScanService:
                     try:
                         before = directory_signature(path, boundary)
                         signatures[path] = before
-                        with scoped_scandir(path, boundary) as entries:
+                        with scoped_scandir(path, boundary, navigation=self._navigation, deadline=deadline, cancel=cancel, same_file_system=self.config['navigation_same_filesystem']) as entries:
                             for entry in entries:
                                 if time.monotonic() >= deadline or admitted >= limits.max_directory_entries or (cancel and cancel()):
                                     state['complete'] = False
@@ -825,7 +850,7 @@ class ScanService:
                             issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
                             progress = None
                         resume = progress.entries if progress is not None else 0
-                        with scoped_scandir(path, boundary) as entries:
+                        with scoped_scandir(path, boundary, navigation=self._navigation, deadline=deadline, cancel=cancel, same_file_system=self.config['navigation_same_filesystem']) as entries:
                             for entry in entries:
                                 if time.monotonic() >= deadline or (cancel and cancel()):
                                     exhausted = False
@@ -1279,6 +1304,7 @@ class ScanService:
         from .execution import Cancellation, InputFailure, ordered_work
         from .sources import SnapshotInput, acquire_file, acquire_bytes
         stopped = Cancellation(cancel)
+        cache_domain = object()  # One invocation's deadline/cancellation domain.
 
         def check():
             if stopped():
@@ -1322,7 +1348,7 @@ class ScanService:
             try:
                 if error is not None:
                     raise error
-                result, cache_key, observations = self._scan_snapshot(snapshot, policy, policy_id, limits, deadline, use_cache, stopped, materials, cached=cached, prepared=backend)
+                result, cache_key, observations = self._scan_snapshot(snapshot, policy, policy_id, limits, deadline, use_cache, stopped, materials, cached=cached, prepared=backend, cache_domain=cache_domain)
             except Exception as failure:
                 code = self._error_code(getattr(failure, 'code', 'input-unreadable'), 'input-unreadable')
                 when = dt.datetime.now(dt.timezone.utc)
@@ -1332,7 +1358,7 @@ class ScanService:
         # At most two input byte buffers and proof contexts are admitted. Store
         # reservations, cache reads and publication all stay on this thread.
         workers = min(self.config.get('scan_workers', 2), limits.max_files)
-        with backends.prepare(binary=self.binary, rules=self.rules, check=check) as backend:
+        with backends.prepare(binary=self.binary, rules=self.rules, check=check, cache_native=use_cache) as backend:
             yield from ordered_work(inputs, prepare=prepare, execute=execute, workers=workers,
                                     max_items=limits.max_files, stop=stopped.stop)
 
@@ -1345,13 +1371,13 @@ class ScanService:
         key_data = [snapshot.content.digest, snapshot.content.size_bytes, identity.runtime_id, policy_id, source.kind.value, source.path, source.repository, source.commit, source.index_tree_oid, identity.context_id]
         return identity, hashlib.sha256(json.dumps(key_data, separators=(',', ':')).encode()).hexdigest()
 
-    def _scan_snapshot(self, snapshot, policy, policy_id, limits, deadline, use_cache, cancel, materials=None, *, cached=None, prepared=None):
+    def _scan_snapshot(self, snapshot, policy, policy_id, limits, deadline, use_cache, cancel, materials=None, *, cached=None, prepared=None, cache_domain=None):
         from dataclasses import replace
         from . import models as m, extraction, backends
         source = snapshot.source
         identity, cache_key = self._snapshot_identity(snapshot, policy_id, materials)
         if use_cache and identity.cache_eligible:
-            if cached is not None and cached.coverage is m.CoverageState.COMPLETE and cached.identity == identity and cached.content == snapshot.content and snapshot.valid():
+            if cached is not None and cached.coverage is m.CoverageState.COMPLETE and cached.identity == identity and cached.content == snapshot.content:
                 when = dt.datetime.now(dt.timezone.utc)
                 return replace(cached, source=source, outcome=m.ScanOutcome.REUSED, observed_at=when, last_verified_at=when, reused_from=cached.reused_from or hashlib.sha256(_legacy_origin(cached).encode()).hexdigest()), cache_key, ()
         when = dt.datetime.now(dt.timezone.utc)
@@ -1405,7 +1431,7 @@ class ScanService:
                 issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
                 break
             try:
-                detected = backends.detect(part.text, binary=self.binary, rules=self.rules, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), max_findings=limits.max_findings, cancel=cancel, prepared=prepared, worker_policy=self.config.get('worker_policy', 'strict'))
+                detected = backends.detect(part.text, binary=self.binary, rules=self.rules, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), max_findings=limits.max_findings, cancel=cancel, prepared=prepared, worker_policy=self.config.get('worker_policy', 'strict'), cache_scope=self._observation_scope if use_cache else None, cache_identity=self._runtime + ':' + policy_id, cache_domain=cache_domain)
                 for item in detected:
                     if not admit_finding(part):
                         break
@@ -1436,8 +1462,8 @@ class ScanService:
             key = (finding.part_id, finding.start_line, finding.end_line, finding.rule)
             if key not in merged or rank[finding.severity.value] > rank[merged[key].severity.value]:
                 merged[key] = finding
-        if not snapshot.valid():
-            issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, source, required=True))
+        # _run_inner validates each detached source/context once, after all work
+        # and immediately before publication. Do not reread it here as well.
         coverage = m.CoverageState.INCOMPLETE if any(issue.required for issue in issues) else m.CoverageState.OMITTED if issues else m.CoverageState.COMPLETE
         outcome = m.ScanOutcome.SCANNED if extracted.parts else m.ScanOutcome.SKIPPED
         # A document's declared nontext omissions are not eligible negatives.

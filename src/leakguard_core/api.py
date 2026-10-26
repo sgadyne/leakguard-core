@@ -164,7 +164,14 @@ class Scanner:
         """Report selected execution policy and actual platform primitives."""
         self._ensure_open()
         from ._supervision import worker_capabilities
-        return worker_capabilities(self._service.config["worker_policy"])
+        return dict(worker_capabilities(self._service.config["worker_policy"]),
+                    navigation=self._service.navigation_capabilities(),
+                    observation_cache=self._service.cache_metrics())
+
+    def clear_memory_cache(self) -> None:
+        """Clear this scanner's redacted L1 and fence late cache writers."""
+        self._ensure_open()
+        self._service.clear_cache()
 
     def work_identity(self, *, policy: ScanPolicy, limits: ScanLimits) -> dict[str, str]:
         """Identify this prepared service's effective policy and runtime bytes.
@@ -338,6 +345,7 @@ _SAFE_CONFIG_FIELDS = frozenset({
     "gitleaks_config", "script_checks", "required_formats", "omissions",
     "extractor_overrides", "worker_policy", "scan_workers", "detection_profile",
     "extension_registry", "observation_backend", "observation_path", "configuration",
+    "navigation_helper", "navigation_same_filesystem",
 })
 
 

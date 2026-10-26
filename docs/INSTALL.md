@@ -25,7 +25,7 @@ python -m build --wheel --outdir artifacts/wheelhouse apps/buddy
 python -m build --wheel --outdir artifacts/wheelhouse plugins/sensitive_basics
 python -m build --wheel --outdir artifacts/wheelhouse templates/firm_plugin
 python -m pip download --only-binary=:all: --dest artifacts/wheelhouse \
-  pip==26.2.2 cryptography==50.0.2 keyring==25.7.0 psutil==7.2.2 \
+  pip==26.2.2 cryptography==50.0.2 keyring==25.7.0 psutil==7.2.2 cachetools==7.2.5 \
   pypdf==6.21.2 olefile==0.47 'packaging>=24,<27'
 python -m pip download --only-binary=:all: --no-index \
   --find-links artifacts/wheelhouse --dest artifacts/wheelhouse \

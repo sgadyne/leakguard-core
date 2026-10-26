@@ -334,7 +334,7 @@ def _write_worker_policy_config(root: Path, worker_policy: str) -> Path:
 
 def _installed_dependencies() -> dict[str, str]:
     dependencies = {}
-    for package in ("packaging", "pypdf", "olefile", "psutil"):
+    for package in ("packaging", "pypdf", "olefile", "psutil", "cachetools"):
         try:
             dependencies[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:

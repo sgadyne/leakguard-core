@@ -120,11 +120,20 @@ def _doctor(config: dict[str, object], output_format: str) -> int:
             probe.close()
     selected = config.get('gitleaks_executable') or os.environ.get('LEAKGUARD_GITLEAKS') or 'gitleaks'
     backend_available = bool(shutil.which(selected))
-    healthy = execution['available'] and checkpoint and backend_available
+    from .navigation import Navigation, NavigationError
+    try:
+        with Navigation(helper=config.get('navigation_helper')) as navigator:
+            navigation = dict(navigator.capabilities(),
+                              same_filesystem=config['navigation_same_filesystem'])
+        navigation_available = True
+    except NavigationError as error:
+        navigation = {'backend': 'rust-ignore', 'status': 'unavailable', 'code': error.code}
+        navigation_available = False
+    healthy = execution['available'] and checkpoint and backend_available and navigation_available
     result = {'schema_version': 1, 'healthy': healthy, 'execution': execution,
               'sqlite_serialization': checkpoint, 'backend_available': backend_available,
               'detection_profile': config['detection_profile'],
-              'scan_workers': config['scan_workers']}
+              'scan_workers': config['scan_workers'], 'navigation': navigation}
     if output_format == 'json':
         print(json.dumps(result, sort_keys=True, separators=(',', ':')))
     else:

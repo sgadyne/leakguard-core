@@ -57,7 +57,7 @@ def main():
         run('private-runtime', [args.uv, 'venv', '--python', sys.executable, root / 'runtime'])
         python = root / 'runtime' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
         run('private-build-dependencies', [args.uv, 'pip', 'install', '--python', python, '--no-deps',
-                                          'pip==25.3', 'setuptools==80.9.0', 'wheel==0.45.1', 'packaging==26.0', 'psutil==7.2.2'])
+                                          'pip==25.3', 'setuptools==80.9.0', 'wheel==0.45.1', 'packaging==26.0', 'psutil==7.2.2', 'cachetools==7.2.5'])
         wheels = root / 'wheels'; wheels.mkdir()
         for label, project in [('core', source), ('sensitive', source / 'plugins/sensitive_basics'), ('firm', source / 'templates/firm_plugin')]:
             run('build-' + label, [python, '-I', '-m', 'pip', 'wheel', '--no-deps', '--no-build-isolation', '--no-index',
