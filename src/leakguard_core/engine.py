@@ -955,7 +955,8 @@ class ScanService:
                 materials = self.store.material_snapshot(max_bytes=min(limits.max_file_bytes, 1_000_000), max_sources=100)
             except Exception:
                 materials = catalog.MaterialSnapshot((), 'unavailable', ('source-unavailable',))
-        iterator = iter(inputs)
+        iterator = self._iter_scanned(inputs, policy=policy, policy_id=policy_id, limits=limits,
+                                      deadline=deadline, use_cache=use_cache, cancel=cancel, materials=materials)
         while runtime_valid:
             if time.monotonic() >= deadline or (cancel and cancel()):
                 code = m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED
@@ -963,53 +964,15 @@ class ScanService:
                 enumeration_complete = False
                 break
             try:
-                item = next(iterator)
+                source, generation, snapshot, result, cache_key, material_observations = next(iterator)
             except StopIteration:
                 break
             except Exception as error:
                 code = getattr(error, 'code', 'enumeration-failed')
-                run_issues.append(m.CoverageIssue(self._error_code(code, 'enumeration-failed'), required=True))
+                source = getattr(error, 'source', None)
+                run_issues.append(m.CoverageIssue(self._error_code(code, 'enumeration-failed'), source, required=True))
                 enumeration_complete = False
                 break
-            if len(results) >= limits.max_files:
-                run_issues.append(m.CoverageIssue(m.ErrorCode.BUDGET_EXHAUSTED, required=True))
-                enumeration_complete = False
-                break
-            try:
-                source = item.source if isinstance(item, SnapshotInput) else m.SourceRef(m.SourceKind.FILESYSTEM, str(item.path.absolute())) if isinstance(item, m.FileInput) else m.SourceRef(m.SourceKind.BYTES, item.logical_path) if isinstance(item, m.BytesInput) else None
-            except (TypeError, ValueError, OSError):
-                # Normalization can exceed the public provenance bound even if
-                # the caller's relative path met FileInput's validation bound.
-                run_issues.append(m.CoverageIssue(m.ErrorCode.INPUT_LIMIT, required=True))
-                enumeration_complete = False
-                break
-            if source is None:
-                run_issues.append(m.CoverageIssue(m.ErrorCode.CONFIGURATION_INVALID, required=True))
-                enumeration_complete = False
-                break
-            try:
-                generation = self.store.reserve(source)
-            except Exception:
-                run_issues.append(m.CoverageIssue(m.ErrorCode.STATE_FAILED, source, required=True))
-                enumeration_complete = False
-                break
-            snapshot = None
-            cache_key = None
-            material_observations = ()
-            try:
-                if not runtime_valid:
-                    raise AcquisitionError('source-unavailable')
-                if isinstance(item, SnapshotInput):
-                    snapshot = item
-                elif isinstance(item, m.FileInput):
-                    snapshot = acquire_file(item.path, max_bytes=limits.max_file_bytes)
-                else:
-                    snapshot = acquire_bytes(item.data, item.logical_path, max_bytes=limits.max_file_bytes)
-                result, cache_key, material_observations = self._scan_snapshot(snapshot, policy, policy_id, limits, deadline, use_cache, cancel, materials)
-            except Exception as error:
-                code = self._error_code(getattr(error, 'code', 'input-unreadable'), 'input-unreadable')
-                when = dt.datetime.now(dt.timezone.utc)
-                result = m.ScanResult(source, snapshot.content if snapshot else None, m.RuntimeIdentity(policy_id, self._runtime, snapshot.context.identity if snapshot else 'unavailable', False), m.ScanOutcome.ERROR, m.CoverageState.INCOMPLETE, (), (m.CoverageIssue(code, source, required=True),), when)
             if finding_count + len(result.findings) > limits.max_findings:
                 remaining = max(0, limits.max_findings - finding_count)
                 result = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, findings=result.findings[:remaining], coverage=m.CoverageState.INCOMPLETE, issues=result.issues + (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, result.source, required=True),), last_verified_at=None)
@@ -1118,23 +1081,89 @@ class ScanService:
         except ValueError:
             return ErrorCode(fallback)
 
-    def _scan_snapshot(self, snapshot, policy, policy_id, limits, deadline, use_cache, cancel, materials=None):
-        from dataclasses import replace
-        from . import models as m, extraction, backends
+    def _iter_scanned(self, inputs, *, policy, policy_id, limits, deadline, use_cache, cancel, materials):
+        from . import models as m, backends
+        from .execution import Cancellation, InputFailure, ordered_work
+        from .sources import SnapshotInput, acquire_file, acquire_bytes
+        stopped = Cancellation(cancel)
+
+        def check():
+            if stopped():
+                raise InputFailure('cancelled')
+            if time.monotonic() >= deadline:
+                raise InputFailure('budget-exhausted')
+
+        def prepare(item):
+            check()
+            try:
+                source = item.source if isinstance(item, SnapshotInput) else m.SourceRef(m.SourceKind.FILESYSTEM, str(item.path.absolute())) if isinstance(item, m.FileInput) else m.SourceRef(m.SourceKind.BYTES, item.logical_path) if isinstance(item, m.BytesInput) else None
+            except (TypeError, ValueError, OSError):
+                raise InputFailure('input-limit') from None
+            if source is None:
+                raise InputFailure('configuration-invalid')
+            try:
+                generation = self.store.reserve(source)
+            except Exception:
+                raise InputFailure('state-failed', source) from None
+            snapshot = None
+            cached = None
+            error = None
+            try:
+                if isinstance(item, SnapshotInput):
+                    snapshot = item
+                elif isinstance(item, m.FileInput):
+                    snapshot = acquire_file(item.path, max_bytes=limits.max_file_bytes)
+                else:
+                    snapshot = acquire_bytes(item.data, item.logical_path, max_bytes=limits.max_file_bytes)
+                identity, cache_key = self._snapshot_identity(snapshot, policy_id, materials)
+                if use_cache and identity.cache_eligible:
+                    cached = self.store.get_cached(cache_key)
+            except Exception as failure:
+                error = failure
+            return source, generation, snapshot, cached, error
+
+        def execute(work):
+            source, generation, snapshot, cached, error = work
+            cache_key = None
+            observations = ()
+            try:
+                if error is not None:
+                    raise error
+                result, cache_key, observations = self._scan_snapshot(snapshot, policy, policy_id, limits, deadline, use_cache, stopped, materials, cached=cached, prepared=backend)
+            except Exception as failure:
+                code = self._error_code(getattr(failure, 'code', 'input-unreadable'), 'input-unreadable')
+                when = dt.datetime.now(dt.timezone.utc)
+                result = m.ScanResult(source, snapshot.content if snapshot else None, m.RuntimeIdentity(policy_id, self._runtime, snapshot.context.identity if snapshot else 'unavailable', False), m.ScanOutcome.ERROR, m.CoverageState.INCOMPLETE, (), (m.CoverageIssue(code, source, required=True),), when)
+            return source, generation, snapshot, result, cache_key, observations
+
+        # At most two input byte buffers and proof contexts are admitted. Store
+        # reservations, cache reads and publication all stay on this thread.
+        workers = min(self.config.get('scan_workers', 2), limits.max_files)
+        with backends.prepare(binary=self.binary, rules=self.rules, check=check) as backend:
+            yield from ordered_work(inputs, prepare=prepare, execute=execute, workers=workers,
+                                    max_items=limits.max_files, stop=stopped.stop)
+
+    def _snapshot_identity(self, snapshot, policy_id, materials=None):
+        from . import models as m
         source = snapshot.source
         material_enabled = materials is not None and bool(materials.references or materials.issues)
         runtime_id = hashlib.sha256((self._runtime + '|' + materials.identity).encode()).hexdigest() if material_enabled else self._runtime
         identity = m.RuntimeIdentity(policy_id, runtime_id, snapshot.context.identity, self._cache_eligible and not snapshot.context.truncated and not material_enabled)
         key_data = [snapshot.content.digest, snapshot.content.size_bytes, identity.runtime_id, policy_id, source.kind.value, source.path, source.repository, source.commit, source.index_tree_oid, identity.context_id]
-        cache_key = hashlib.sha256(json.dumps(key_data, separators=(',', ':')).encode()).hexdigest()
+        return identity, hashlib.sha256(json.dumps(key_data, separators=(',', ':')).encode()).hexdigest()
+
+    def _scan_snapshot(self, snapshot, policy, policy_id, limits, deadline, use_cache, cancel, materials=None, *, cached=None, prepared=None):
+        from dataclasses import replace
+        from . import models as m, extraction, backends
+        source = snapshot.source
+        identity, cache_key = self._snapshot_identity(snapshot, policy_id, materials)
         if use_cache and identity.cache_eligible:
-            cached = self.store.get_cached(cache_key)
             if cached is not None and cached.coverage is m.CoverageState.COMPLETE and cached.identity == identity and cached.content == snapshot.content and snapshot.valid():
                 when = dt.datetime.now(dt.timezone.utc)
                 return replace(cached, source=source, outcome=m.ScanOutcome.REUSED, observed_at=when, last_verified_at=when, reused_from=cached.reused_from or hashlib.sha256(_legacy_origin(cached).encode()).hexdigest()), cache_key, ()
         when = dt.datetime.now(dt.timezone.utc)
         remaining = max(0.001, deadline - time.monotonic())
-        extracted = extraction.extract(snapshot.data, source.path, limits=limits, timeout=min(limits.extract_timeout_seconds, remaining), plugins=self._plugins, cancel=cancel, extractor_overrides=self.config.get('extractor_overrides'))
+        extracted = extraction.extract(snapshot.data, source.path, limits=limits, timeout=min(limits.extract_timeout_seconds, remaining), plugins=self._plugins, cancel=cancel, extractor_overrides=self.config.get('extractor_overrides'), worker_policy=self.config.get('worker_policy', 'strict'))
         issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
         if materials is not None:
             issues.extend(m.CoverageIssue(self._error_code(code), source, required=True) for code in materials.issues)
@@ -1183,7 +1212,7 @@ class ScanService:
                 issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
                 break
             try:
-                detected = backends.detect(part.text, binary=self.binary, rules=self.rules, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), max_findings=limits.max_findings, cancel=cancel)
+                detected = backends.detect(part.text, binary=self.binary, rules=self.rules, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), max_findings=limits.max_findings, cancel=cancel, prepared=prepared, worker_policy=self.config.get('worker_policy', 'strict'))
                 for item in detected:
                     if not admit_finding(part):
                         break
@@ -1198,7 +1227,7 @@ class ScanService:
                     issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if stopped else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
                     break
                 try:
-                    for item in plugins.detect([instance], part.text, source.path, part.part_id, format_id=part.format_id, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), limits=limits, cancel=cancel):
+                    for item in plugins.detect([instance], part.text, source.path, part.part_id, format_id=part.format_id, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), limits=limits, cancel=cancel, worker_policy=self.config.get('worker_policy', 'strict')):
                         if not admit_finding(part):
                             break
                         findings.append(self._finding(snapshot, part, item.rule, item.line, item.line, item.severity, plugins.detector_id(instance), mode=policy.mode))

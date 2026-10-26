@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -28,8 +29,35 @@ class BackendFinding:
     severity: str = 'block'
 
 
+@dataclass(frozen=True, repr=False)
+class PreparedBackend:
+    """Private immutable rule snapshot shared only within one bounded job."""
+    executable: str
+    directory: Path
+    rules: Path
+
+
+@contextmanager
+def prepare(*, binary=None, rules=None, check=None):
+    """Inspect and stage rules once; callers retain final runtime validation."""
+    selected = str(binary or os.environ.get('LEAKGUARD_GITLEAKS') or shutil.which('gitleaks') or 'gitleaks')
+    executable = str(Path(shutil.which(selected) or selected).absolute())
+    rule_path = str(Path(rules or Path(__file__).with_name('rules.toml')).absolute())
+    from ._rules import inspect, stage, RuleConfigError
+    try:
+        closure = inspect(rule_path, check=check)
+        with tempfile.TemporaryDirectory(prefix='leakguard-backend-') as scratch:
+            directory, staged_config = stage(closure, scratch)
+            if check is not None:
+                check()
+            yield PreparedBackend(executable, directory, staged_config)
+    except RuleConfigError:
+        raise BackendError('configuration-invalid') from None
+
+
 def detect(text: str, *, binary=None, rules=None, timeout=45,
-           max_findings=100_000, cancel=None) -> tuple[BackendFinding, ...]:
+           max_findings=100_000, cancel=None, prepared=None,
+           worker_policy='strict') -> tuple[BackendFinding, ...]:
     if type(text) is not str or type(max_findings) is not int or max_findings <= 0:
         raise BackendError('detector-output-invalid')
     started = time.monotonic()
@@ -38,34 +66,29 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
             raise BackendError('cancelled')
         if time.monotonic() - started >= timeout:
             raise BackendError('detector-timeout')
-    selected = str(binary or os.environ.get('LEAKGUARD_GITLEAKS') or shutil.which('gitleaks') or 'gitleaks')
-    executable = str(Path(shutil.which(selected) or selected).absolute())
-    rule_path = str(Path(rules or Path(__file__).with_name('rules.toml')).absolute())
-    command = [executable, 'stdin', '--config', rule_path, '--redact=100',
+    check_budget()
+    if prepared is None:
+        with prepare(binary=binary, rules=rules, check=check_budget) as setup:
+            return detect(text, timeout=max(0.001, timeout - (time.monotonic() - started)),
+                          max_findings=max_findings, cancel=cancel, prepared=setup,
+                          worker_policy=worker_policy)
+    if type(prepared) is not PreparedBackend:
+        raise BackendError('configuration-invalid')
+    command = [prepared.executable, 'stdin', '--config', str(prepared.rules), '--redact=100',
                '--ignore-gitleaks-allow', '--no-banner', '--no-color', '--log-level', 'fatal',
                '--report-format', 'json', '--report-path', '-', '--timeout', str(max(1, math.ceil(timeout)))]
     try:
-        from ._rules import inspect, stage, RuleConfigError
-        closure = inspect(rule_path, check=check_budget)
-        with tempfile.TemporaryDirectory(prefix='leakguard-backend-') as scratch:
-            # stdin still reads CWD/.gitleaksignore in the pinned backend. Keep
-            # repository content out of its policy context while preserving
-            # explicitly configured relative rule inheritance in private files.
-            directory, staged_config = stage(closure, scratch)
-            command[command.index('--config') + 1] = str(staged_config)
-            check_budget()
-            process = run_worker(command, text.encode('utf-8'), timeout=max(0.001, timeout - (time.monotonic() - started)),
-                                 max_input_bytes=80_000_000,
-                                 max_output_bytes=min(64_000_000, max(1_048_576, max_findings * 4096)),
-                                 # Go reserves a large virtual arena; applying
-                                 # RLIMIT_AS would prevent startup.
-                                 memory_bytes=None, env=worker_environment(),
-                                 cwd=directory, cancel=cancel)
-    except RuleConfigError:
-        raise BackendError('configuration-invalid') from None
+        process = run_worker(command, text.encode('utf-8'), timeout=max(0.001, timeout - (time.monotonic() - started)),
+                             max_input_bytes=80_000_000,
+                             max_output_bytes=min(64_000_000, max(1_048_576, max_findings * 4096)),
+                             # Go reserves a large virtual arena; applying
+                             # RLIMIT_AS would prevent startup.
+                             memory_bytes=None, env=worker_environment(),
+                             cwd=prepared.directory, cancel=cancel,
+                             worker_policy=worker_policy)
     except WorkerError as error:
         code = {'worker-timeout': 'detector-timeout', 'worker-output-limit': 'detector-output-limit',
-                'cancelled': 'cancelled'}.get(error.code, 'detector-failed')
+                'cancelled': 'cancelled', 'resource-bound-unavailable': 'resource-bound-unavailable'}.get(error.code, 'detector-failed')
         raise BackendError(code) from None
     if process.returncode not in (0, 1):
         raise BackendError('detector-failed')
