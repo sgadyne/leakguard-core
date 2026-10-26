@@ -133,36 +133,32 @@ class EncryptedScanStore:
             else:
                 self._deadlines[threading.get_ident()] = deadline
 
-    def __getattr__(self, name):
-        if name not in _METHODS:
-            raise AttributeError(name)
-        def invoke(*args, **kwargs):
-            with self._mutex:
-                self._ensure_open()
-                self._store.set_deadline(self._deadlines.get(threading.get_ident()))
-                if name in _MUTATIONS and self._size() >= self._max_bytes:
-                    raise StateError("state-capacity-limit")
-                if name in _MUTATIONS:
-                    self._dirty = True
-                try:
-                    result = getattr(self._store, name)(*args, **kwargs)
-                    if name == 'material_snapshot':
-                        original = result
-                        def valid():
-                            with self._mutex:
-                                if self._closed or self._poisoned:
-                                    return False
-                                self._store.set_deadline(self._deadlines.get(threading.get_ident()))
-                                return original.valid()
-                        result = replace(result, validate=valid)
-                    return result
-                except StateError:
-                    # SQLite FULL is intentionally redacted by core; preserve a
-                    # useful capacity reason when the profile reached its bound.
-                    if self._size() >= self._max_bytes:
-                        raise StateError("state-capacity-limit") from None
-                    raise
-        return invoke
+    def _invoke(self, name, *args, **kwargs):
+        with self._mutex:
+            self._ensure_open()
+            self._store.set_deadline(self._deadlines.get(threading.get_ident()))
+            if name in _MUTATIONS and self._size() >= self._max_bytes:
+                raise StateError("state-capacity-limit")
+            if name in _MUTATIONS:
+                self._dirty = True
+            try:
+                result = getattr(self._store, name)(*args, **kwargs)
+                if name == 'material_snapshot':
+                    original = result
+                    def valid():
+                        with self._mutex:
+                            if self._closed or self._poisoned:
+                                return False
+                            self._store.set_deadline(self._deadlines.get(threading.get_ident()))
+                            return original.valid()
+                    result = replace(result, validate=valid)
+                return result
+            except StateError:
+                # SQLite FULL is intentionally redacted by core; preserve a
+                # useful capacity reason when the profile reached its bound.
+                if self._size() >= self._max_bytes:
+                    raise StateError("state-capacity-limit") from None
+                raise
 
     def _size(self):
         conn = self._store.conn
@@ -347,3 +343,18 @@ class EncryptedScanStore:
                 self._dispose()
 
     lock = close
+
+
+def _forward(name):
+    def method(self, *args, **kwargs):
+        return self._invoke(name, *args, **kwargs)
+    method.__name__ = name
+    method.__qualname__ = "EncryptedScanStore." + name
+    return method
+
+
+# Real class attributes satisfy Python3.12+ runtime Protocol checks, which use
+# static lookup rather than __getattr__. Keep one synchronized implementation.
+for _name in _METHODS:
+    setattr(EncryptedScanStore, _name, _forward(_name))
+del _name
