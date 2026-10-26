@@ -900,6 +900,12 @@ class SQLiteScanStore:
             cycle_columns = {row[1] for row in conn.execute('PRAGMA table_info(audit_cycles)')}
             if 'work_identity' not in cycle_columns:
                 conn.execute('ALTER TABLE audit_cycles ADD COLUMN work_identity TEXT')
+            if 'result_scan_id' not in work_columns:
+                conn.execute('ALTER TABLE audit_work ADD COLUMN result_scan_id TEXT')
+                # Older completed claims lack exact accepted-result linkage.
+                # Replay unfinished cycles through the identity fence rather
+                # than treating their partial evidence as a complete verdict.
+                conn.execute("UPDATE audit_cycles SET work_identity=NULL WHERE completed IS NULL AND EXISTS(SELECT 1 FROM audit_work w WHERE w.scope=audit_cycles.scope AND w.generation=audit_cycles.generation AND w.kind='file' AND w.done=1 AND w.result_scan_id IS NULL)")
             conn.execute('CREATE INDEX IF NOT EXISTS audit_directory_checks ON audit_work(scope,generation,kind,directory_checked,done,path)')
             conn.execute('PRAGMA user_version=2')
             conn.commit()

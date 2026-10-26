@@ -298,12 +298,48 @@ def test_older_encrypted_observation_checkpoint_gets_additive_directory_cursor(t
     store.save_host_state({'progress': 7})
     store._store.conn.execute('ALTER TABLE audit_work DROP COLUMN directory_progress')
     store._store.conn.execute('ALTER TABLE audit_cycles DROP COLUMN work_identity')
+    store._store.conn.execute('ALTER TABLE audit_work DROP COLUMN result_scan_id')
     store.checkpoint()
     store.close()
     upgraded = EncryptedScanStore.open(path, PASS)
     columns = {row[1] for row in upgraded._store.conn.execute('PRAGMA table_info(audit_work)')}
     assert 'directory_progress' in columns
+    assert 'result_scan_id' in columns
     cycle_columns = {row[1] for row in upgraded._store.conn.execute('PRAGMA table_info(audit_cycles)')}
     assert 'work_identity' in cycle_columns
     assert upgraded.load_host_state() == {'progress': 7}
     upgraded.close()
+
+
+def test_old_encrypted_done_claims_replay_only_unfinished_cycles(tmp_path):
+    path = tmp_path / 'observations.lgo'
+    store = EncryptedScanStore.create(path, PASS)
+    connection = store._store.conn
+    with connection:
+        connection.executemany(
+            'INSERT INTO audit_cycles(scope,generation,started,completed,work_identity) VALUES(?,1,?,?,?)',
+            [('unfinished', 'synthetic-start', None, 'a' * 64),
+             ('completed', 'synthetic-start', 'synthetic-finish', 'b' * 64),
+             ('pending', 'synthetic-start', None, 'c' * 64)],
+        )
+        connection.executemany(
+            "INSERT INTO audit_work(scope,generation,path,kind,priority,done) VALUES(?,1,'/synthetic/file','file',100,?)",
+            [('unfinished', 1), ('completed', 1), ('pending', 0)],
+        )
+        connection.execute('ALTER TABLE audit_work DROP COLUMN result_scan_id')
+    store.save_host_state({'progress': 11})
+    store.close()
+    upgraded = EncryptedScanStore.open(path, PASS)
+    identities = dict(upgraded._store.conn.execute('SELECT scope,work_identity FROM audit_cycles'))
+    assert identities == {'unfinished': None, 'completed': 'b' * 64, 'pending': 'c' * 64}
+    assert upgraded._store.conn.execute('SELECT count(*) FROM audit_work').fetchone()[0] == 3
+    assert upgraded.load_host_state() == {'progress': 11}
+    # A gap in the current schema must fail closed in the evidence reader,
+    # rather than having every subsequent reopen silently reset identity.
+    with upgraded._store.conn:
+        upgraded._store.conn.execute("UPDATE audit_cycles SET work_identity=? WHERE scope='unfinished'", ('d' * 64,))
+    upgraded.checkpoint()
+    upgraded.close()
+    current = EncryptedScanStore.open(path, PASS)
+    assert current._store.conn.execute("SELECT work_identity FROM audit_cycles WHERE scope='unfinished'").fetchone()[0] == 'd' * 64
+    current.close()
