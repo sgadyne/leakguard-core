@@ -105,6 +105,9 @@ the effective configuration and runtime. Its policy digest excludes slice-only
 budgets and worker count, so it differs from the full per-report `policy_id`.
 Changes to detection, acquisition, extraction, or worker policy restart persisted
 work conservatively rather than combining results from different policies.
+Registered material-reference changes also restart continuation; they do not
+open or use the credential vault. See [audit-continuation.md](audit-continuation.md)
+for completed-cycle decisions and the scope of per-slice counts.
 `parse_report(str_or_bytes)` validates the strict value-free report wire schema,
 including counts and coverage, and rejects unknown fields and duplicate keys.
 
