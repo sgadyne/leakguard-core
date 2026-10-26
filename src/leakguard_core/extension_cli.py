@@ -17,7 +17,8 @@ class _Parser(argparse.ArgumentParser):
 def main(argv=None):
     parser = _Parser(prog='leakguard-extensions', description=__doc__)
     parser.add_argument('--registry', type=Path, required=True, help='private absolute extension registry directory')
-    parser.add_argument('--worker-policy', choices=['strict', 'supervised-alpha'], default='strict')
+    parser.add_argument('--worker-policy', choices=['strict', 'supervised-alpha'],
+                        help='execution policy; profile export preserves the base configuration unless specified')
     commands = parser.add_subparsers(dest='command', required=True)
     inspect = commands.add_parser('inspect', help='read wheel metadata without importing or installing it')
     inspect.add_argument('wheel', type=Path)
@@ -53,9 +54,9 @@ def main(argv=None):
         elif args.command == 'list':
             result = {'extensions': registry.list()}
         elif args.command == 'check':
-            result = registry.check(args.id, worker_policy=args.worker_policy)
+            result = registry.check(args.id, worker_policy=args.worker_policy or 'strict')
         elif args.command == 'enable':
-            result = registry.enable(args.id, profile=args.profile, worker_policy=args.worker_policy)
+            result = registry.enable(args.id, profile=args.profile, worker_policy=args.worker_policy or 'strict')
         elif args.command == 'disable':
             result = registry.disable(args.id, profile=args.profile)
         else:
@@ -64,7 +65,8 @@ def main(argv=None):
             config = read_config(args.base_config) if args.base_config else validate({})
             config['extension_registry'] = str(args.registry)
             config['detection_profile'] = args.profile
-            config['worker_policy'] = args.worker_policy
+            if args.worker_policy is not None:
+                config['worker_policy'] = args.worker_policy
             # Resolve now to reject an invalid registry, but save only the
             # registry reference so later disable operations affect this profile.
             registry.apply(config, args.profile)

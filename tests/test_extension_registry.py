@@ -1,5 +1,7 @@
 """Registry discovery is inert; explicit activation is checked and profile scoped."""
 import hashlib
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +13,24 @@ from leakguard_core.extensions import ExtensionError, ExtensionRegistry, inspect
 
 
 class RegistryTests(unittest.TestCase):
+    def test_export_preserves_base_worker_policy_unless_explicitly_overridden(self):
+        from leakguard_core.extension_cli import main
+        with tempfile.TemporaryDirectory(prefix='leakguard-profile-policy-') as folder:
+            root = Path(folder)
+            registry = ExtensionRegistry(root / 'registry')
+            registry.initialize()
+            base = root / 'base.json'
+            base.write_text(json.dumps({'worker_policy': 'supervised-alpha'}))
+            output = root / 'firm.json'
+            args = ['--registry', str(registry.directory), 'export-profile', '--profile', 'firm',
+                    '--base-config', str(base), '--output', str(output)]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(args), 0)
+            self.assertEqual(json.loads(output.read_text())['worker_policy'], 'supervised-alpha')
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(['--worker-policy', 'strict', *args]), 0)
+            self.assertEqual(json.loads(output.read_text())['worker_policy'], 'strict')
+
     def test_wheel_inspection_never_imports_code_and_rejects_traversal(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
             wheel = Path(folder) / 'example-1-py3-none-any.whl'
