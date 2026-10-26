@@ -658,7 +658,7 @@
         const vaultStatus = await request("/api/vault/status");
         if (vaultStatus.unlocked) {
           selectedFinding = null;
-          openCredential({ title: `${finding.rule || "Finding"} · ${lastComponent(finding.source?.path || finding.path || "source")}`, location: finding.source?.path || finding.path || "", finding_id: finding.id });
+          openCredential({ title: `${finding.rule || "Finding"} · ${lastComponent(finding.source?.path || finding.path || "source")}`.slice(0, 256), location: finding.source?.path || finding.path || "", finding_id: finding.id });
         } else openUnlock(vaultStatus.created ? "vault-add-finding" : "vault-create-finding");
         byId("unlock-help").textContent = "After unlocking, Buddy fills the title and location only. Enter the credential yourself and choose Save.";
       }
@@ -717,7 +717,7 @@
         byId("unlock-dialog").close(); await loadVault();
         if ((target === "vault-add-finding" || target === "vault-create-finding") && selectedFinding) {
           const finding = selectedFinding; selectedFinding = null;
-          openCredential({ title: `${finding.rule || "Finding"} · ${lastComponent(finding.source?.path || finding.path || "source")}`, location: finding.source?.path || finding.path || "", finding_id: finding.id });
+          openCredential({ title: `${finding.rule || "Finding"} · ${lastComponent(finding.source?.path || finding.path || "source")}`.slice(0, 256), location: finding.source?.path || finding.path || "", finding_id: finding.id });
         }
         notify(creating ? "Credential vault created." : "Credential vault unlocked.");
       }

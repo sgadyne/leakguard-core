@@ -92,7 +92,7 @@
 
   <dialog id="vault-dialog" class="dialog"><div class="dialog-head"><div><p class="eyebrow">EXPLICIT SAVE</p><h2 id="vault-dialog-title">Add credential</h2></div><button class="icon-button" data-action="close-dialog" aria-label="Close">×</button></div><form id="credential-form" class="form-grid">
     <input type="hidden" id="credential-id"><input type="hidden" id="credential-finding-id">
-    <label class="wide">Title<input id="credential-title" maxlength="200" required autocomplete="off"></label>
+    <label class="wide">Title<input id="credential-title" maxlength="256" required autocomplete="off"></label>
     <label class="wide">Secret<input id="credential-secret" maxlength="65536" type="password" required autocomplete="new-password"></label>
     <label>Username<input id="credential-username" maxlength="2048" autocomplete="off"><span id="credential-clear-username-row" class="check-row"><input id="credential-clear-username" type="checkbox"> Clear saved username</span></label>
     <label>Location<input id="credential-location" maxlength="4096" autocomplete="off"></label>
