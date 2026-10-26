@@ -26,14 +26,15 @@ import venv
 import zipfile
 
 if __package__:
-    from ._safe_inputs import read_empty_json_object, source_identity
+    from ._safe_inputs import read_json_object, source_identity
 else:
-    from _safe_inputs import read_empty_json_object, source_identity
+    from _safe_inputs import read_json_object, source_identity
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OFFICIAL_INDEX = "https://pypi.org/simple"
 MAX_STAGE_SECONDS = 900
+WORKER_POLICIES = {"strict", "supervised-alpha"}
 
 
 class AcceptanceFailure(RuntimeError):
@@ -64,6 +65,35 @@ def _write_exclusive(path: Path, payload: bytes) -> None:
 
 def _source_identity() -> tuple[str, str]:
     return source_identity(ROOT)
+
+
+def _read_policy_config(path: Path, *, require_policy: bool = False) -> dict:
+    try:
+        config = read_json_object(path)
+        if (set(config) - {"worker_policy"}
+                or ("worker_policy" in config
+                    and (type(config["worker_policy"]) is not str
+                         or config["worker_policy"] not in WORKER_POLICIES))
+                or (require_policy and "worker_policy" not in config)):
+            raise ValueError
+        return config
+    except (OSError, ValueError, TypeError):
+        raise AcceptanceFailure("worker-policy-config") from None
+
+
+def _configured_worker_policy(env: dict[str, str], stage: str) -> str:
+    config_path = env.get("LEAKGUARD_CONFIG")
+    if not config_path:
+        raise AcceptanceFailure(stage)
+    try:
+        config = read_json_object(Path(config_path))
+    except (OSError, ValueError, TypeError):
+        raise AcceptanceFailure(stage) from None
+    policy = config.get("worker_policy")
+    if (set(config) != {"worker_policy"} or type(policy) is not str
+            or policy not in WORKER_POLICIES):
+        raise AcceptanceFailure(stage)
+    return policy
 
 
 def _command(argv, *, cwd: Path, env: dict[str, str], stage: str,
@@ -255,8 +285,10 @@ def _fixture_case_files(work: Path) -> tuple[Path, Path, Path]:
 
 def _run_conformance(python: Path, module: str, kind: str, cases: Path,
                      cwd: Path, env: dict[str, str], stage: str) -> dict:
+    worker_policy = _configured_worker_policy(env, stage)
     result = _command([str(python), "-m", "leakguard_core.conformance", "--kind", kind,
-                       "--module", module, "--cases", str(cases)],
+                       "--module", module, "--cases", str(cases),
+                       "--worker-policy", worker_policy],
                       cwd=cwd, env=env, stage=stage, timeout=90)
     try:
         lines = result.stdout.decode("utf-8").splitlines()
@@ -273,6 +305,7 @@ def _run_conformance(python: Path, module: str, kind: str, cases: Path,
 
 
 def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
+    _read_policy_config(config, require_policy=True)
     builder_site = work / "build-tools"
     builder_site.mkdir(mode=0o700)
     env = dict(os.environ)
@@ -451,7 +484,8 @@ def main(argv=None) -> int:
     parser.add_argument("--mode", choices=("source", "wheel"), default="wheel")
     parser.add_argument("--output", required=True, help="new redacted JSON receipt path")
     parser.add_argument("--gitleaks", required=True)
-    parser.add_argument("--config", required=True, help="must be an owned empty JSON object")
+    parser.add_argument("--config", required=True,
+                        help="owned bounded JSON object; optional worker_policy is strict or supervised-alpha")
     parser.add_argument("--python", help="target interpreter for the clean installed environment")
     parser.add_argument("--documents-extra", action="store_true")
     args = parser.parse_args(argv)
@@ -465,7 +499,7 @@ def main(argv=None) -> int:
         config_input, backend_input = Path(args.config), Path(args.gitleaks)
         if config_input.is_symlink() or backend_input.is_symlink():
             raise AcceptanceFailure("preflight")
-        read_empty_json_object(config_input)
+        _read_policy_config(config_input)
         config = config_input.resolve(strict=True)
         backend = backend_input.resolve(strict=True)
         if not backend.is_file() or not os.access(backend, os.X_OK):

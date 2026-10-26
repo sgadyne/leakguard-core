@@ -12,6 +12,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 import ast
 from xml.sax.saxutils import escape
@@ -271,6 +272,35 @@ def _msg_fixture(*, subject_text="synthetic subject", body_text="first body line
 
 
 class DeterministicCorpusTests(unittest.TestCase):
+    def test_detector_cases_are_scored_as_isolated_inputs_with_explicit_policy(self):
+        cases = [
+            ("literal-password", 'password = "K4x"', "finding"),
+            ("ordinary-control", "routine release note", "none"),
+        ]
+        seen = []
+
+        def detect(text, **kwargs):
+            seen.append((text, kwargs))
+            if text == cases[0][1]:
+                from types import SimpleNamespace
+                return [SimpleNamespace(rule="literal-password")]
+            return []
+
+        with patch.object(backends, "detect", side_effect=detect):
+            observed = _detect_labeled_cases(
+                cases, binary="synthetic-gitleaks", rules="synthetic-rules",
+                worker_policy="supervised-alpha", timeout=3,
+            )
+        self.assertEqual(len(seen), len(cases))
+        self.assertEqual([row[0] for row in seen], [item[1] for item in cases])
+        self.assertTrue(all("\n" not in text for text, _kwargs in seen))
+        self.assertTrue(all(kwargs["worker_policy"] == "supervised-alpha"
+                            for _text, kwargs in seen))
+        self.assertEqual(observed, {
+            "literal-password": {"literal-password"},
+            "ordinary-control": set(),
+        })
+
     def test_seeded_label_manifest_is_repeatable(self):
         def manifest(seed):
             rng = random.Random(seed)
@@ -465,8 +495,22 @@ def _docx_parts(members) -> bytes:
     return _docx_payload(members)
 
 
-def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
+def _detect_labeled_cases(detector_cases, *, binary, rules, worker_policy, timeout=15):
+    if type(worker_policy) is not str or worker_policy not in {"strict", "supervised-alpha"}:
+        raise ValueError("invalid worker policy")
+    observed = {}
+    for case_id, text, _expected in detector_cases:
+        findings = backends.detect(text, binary=binary, rules=rules, timeout=timeout,
+                                   worker_policy=worker_policy)
+        observed[case_id] = {finding.rule for finding in findings}
+    return observed
+
+
+def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str], *,
+                       worker_policy: str = "strict") -> dict:
     """Execute each declared fixture and return only closed labels/counts/hashes."""
+    if type(worker_policy) is not str or worker_policy not in {"strict", "supervised-alpha"}:
+        raise ValueError("invalid worker policy")
     catalog = {item["case_id"]: item for item in CASE_CATALOG}
     secret = _seeded_secret(seed)
     provider_token = "ghp_" + hashlib.sha256(
@@ -527,15 +571,12 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
         ("literal-password-positive-01", f'password = "{secret}"', "finding"),
         ("provider-github-token-positive", f'github_token = "{provider_token}"', "finding"),
     ))
-    detector_text = "\n".join(row[1] for row in detector_cases)
-    findings = backends.detect(detector_text, binary=gitleaks,
-                               rules=engine.RULES,
-                               timeout=15)
-    found_rules_by_line = {}
-    for finding in findings:
-        found_rules_by_line.setdefault(finding.start_line, set()).add(finding.rule)
-    for line, (case_id, value, _expected) in enumerate(detector_cases, 1):
-        observed_rules = found_rules_by_line.get(line, set())
+    found_rules_by_case = _detect_labeled_cases(
+        detector_cases, binary=gitleaks, rules=engine.RULES,
+        worker_policy=worker_policy, timeout=15,
+    )
+    for case_id, value, _expected in detector_cases:
+        observed_rules = found_rules_by_case[case_id]
         put(case_id, "finding" if observed_rules else "none",
             digest_input=value.encode("utf-8"), rules=observed_rules)
 
@@ -595,13 +636,14 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
                                 "status": "uncovered", "artifact_sha256": hashlib.sha256(data).hexdigest(),
                                 "rules": []}
             return
-        result = extract(data, path, timeout=15)
+        result = extract(data, path, timeout=15, worker_policy=worker_policy)
         digest = hashlib.sha256(data).hexdigest()
         detected_rules = set()
         if result.disposition == "extracted":
             for part in result.parts:
                 detected_rules.update(finding.rule for finding in backends.detect(
-                    part.text, binary=gitleaks, rules=engine.RULES, timeout=15))
+                    part.text, binary=gitleaks, rules=engine.RULES, timeout=15,
+                    worker_policy=worker_policy))
             actual = "finding" if detected_rules else "none"
             coverage = "complete"
         elif result.disposition in {"unsupported", "no-text", "encrypted"}:
@@ -675,17 +717,20 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
             (root / name).write_text(source_text, encoding="utf-8")
         sys.path.insert(0, temporary)
         try:
-            loaded = [plugins.load([{"module": module, "options": {}}])[0]
+            loaded = [plugins.load([{"module": module, "options": {}}],
+                                   worker_policy=worker_policy)[0]
                       for module in ("corpus_block", "corpus_review")]
             for case_id, handle, expected in zip(
                 ("plugin-collision-block", "plugin-collision-review"), loaded, ("block", "review")
             ):
-                observed = tuple(plugins.detect([handle], "fixture", "fixture.txt", "text", timeout=15))
+                observed = tuple(plugins.detect([handle], "fixture", "fixture.txt", "text",
+                                                timeout=15, worker_policy=worker_policy))
                 actual = observed[0].severity if observed else "none"
                 put(case_id, actual, digest_input=definitions["corpus_block.py" if expected == "block" else "corpus_review.py"].encode())
-                service = engine.ScanService({
-                    "gitleaks_executable": str(gitleaks),
-                    "gitleaks_config": str(engine.RULES),
+            service = engine.ScanService({
+                "gitleaks_executable": str(gitleaks),
+                "gitleaks_config": str(engine.RULES),
+                "worker_policy": worker_policy,
                 "plugins": [{"module": "corpus_block", "options": {}},
                             {"module": "corpus_review", "options": {}}],
             })
@@ -763,7 +808,8 @@ def run_labeled_corpus(seed: int, gitleaks: str | os.PathLike[str]) -> dict:
         else:
             counts["metric_not_scored_cases"] += 1
             bucket["metric_not_scored"] += 1
-    return {"seed": seed, "policy_id": policy_id, "runtime_id": runtime_id,
+    return {"seed": seed, "worker_policy": worker_policy,
+            "policy_id": policy_id, "runtime_id": runtime_id,
             "counts": counts, "detector_metrics": {
                 **{key: counts[key] for key in metric_names},
                 "by_rule": by_rule,

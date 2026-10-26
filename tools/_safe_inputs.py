@@ -12,8 +12,8 @@ import subprocess
 MAX_CONFIG_BYTES = 1_000_000
 
 
-def read_empty_json_object(path: Path) -> None:
-    """Admit only a regular, bounded, unique-key JSON empty object.
+def read_json_object(path: Path) -> dict:
+    """Read a bounded unique-key JSON object without following a link.
 
     O_NONBLOCK prevents a FIFO from stalling a validation command; fstat then
     rejects it before any read. O_NOFOLLOW is used where supported, in addition
@@ -57,7 +57,14 @@ def read_empty_json_object(path: Path) -> None:
                            parse_constant=reject_constant)
     except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
         raise ValueError("config-invalid") from error
-    if type(value) is not dict or value:
+    if type(value) is not dict:
+        raise ValueError("config-invalid")
+    return value
+
+
+def read_empty_json_object(path: Path) -> None:
+    """Admit only a regular, bounded, unique-key JSON empty object."""
+    if read_json_object(path):
         raise ValueError("config-invalid")
 
 

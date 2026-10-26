@@ -223,6 +223,11 @@ class SafeInputTests(unittest.TestCase):
             config = root / "config.json"
             config.write_text("{}\n", encoding="utf-8")
             safe_inputs.read_empty_json_object(config)
+            config.write_text('{"worker_policy":"supervised-alpha"}\n', encoding="utf-8")
+            self.assertEqual(safe_inputs.read_json_object(config),
+                             {"worker_policy": "supervised-alpha"})
+            with self.assertRaises(ValueError):
+                safe_inputs.read_empty_json_object(config)
             for content in ('{"x":1}', '{"x":1,"x":1}', '{"x":NaN}'):
                 config.write_text(content, encoding="utf-8")
                 with self.assertRaises(ValueError):
@@ -313,6 +318,12 @@ class BenchmarkAggregationTests(unittest.TestCase):
                                    state=root / "state", output=root / "receipt.json")
             resolved = run_corpus._validate(args)
             self.assertEqual(resolved[-1], args.output.with_suffix(".json.manifest.json"))
+            config.write_text('{"worker_policy":"supervised-alpha"}\n', encoding="utf-8")
+            resolved = run_corpus._validate(args)
+            self.assertEqual(resolved[0], config.resolve())
+            config.write_text('{"worker_policy":"implicit"}\n', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                run_corpus._validate(args)
 
     def test_report_aggregation_uses_backend_metric_and_case_local_identities(self):
         def case(files, policy_id):
@@ -450,6 +461,48 @@ class BenchmarkAggregationTests(unittest.TestCase):
 
 
 class AcceptanceSummaryTests(unittest.TestCase):
+    def test_conformance_requires_and_passes_an_explicit_worker_policy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "config.json"
+            config.write_text('{"worker_policy":"supervised-alpha"}\n', encoding="utf-8")
+            env = {"LEAKGUARD_CONFIG": str(config)}
+            response = subprocess.CompletedProcess(
+                ["python"], 0,
+                stdout=b'{"passed":true,"failed_cases":0,"issues":[],"passed_cases":1,"component_id":"example","kind":"detector"}\n',
+                stderr=b"",
+            )
+            with patch.object(run_acceptance, "_command", return_value=response) as command:
+                report = run_acceptance._run_conformance(
+                    Path("private-python"), "example", "detector", root / "cases.json",
+                    root, env, "conformance-test",
+                )
+            self.assertTrue(report["passed"])
+            argv = command.call_args.args[0]
+            self.assertEqual(argv[argv.index("--worker-policy") + 1], "supervised-alpha")
+
+            config.write_text("{}\n", encoding="utf-8")
+            with patch.object(run_acceptance, "_command") as command:
+                with self.assertRaises(run_acceptance.AcceptanceFailure):
+                    run_acceptance._run_conformance(
+                        Path("private-python"), "example", "detector", root / "cases.json",
+                        root, env, "conformance-test",
+                    )
+                command.assert_not_called()
+
+    def test_acceptance_policy_config_is_bounded_to_two_supported_values(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.json"
+            for policy in ("strict", "supervised-alpha"):
+                config.write_text(json.dumps({"worker_policy": policy}), encoding="utf-8")
+                self.assertEqual(run_acceptance._read_policy_config(config, require_policy=True),
+                                 {"worker_policy": policy})
+            for body in ('{}', '{"worker_policy":"other"}', '{"extra":true}',
+                         '{"worker_policy":"strict","worker_policy":"supervised-alpha"}'):
+                config.write_text(body, encoding="utf-8")
+                with self.assertRaises(run_acceptance.AcceptanceFailure):
+                    run_acceptance._read_policy_config(config, require_policy=True)
+
     def test_unittest_summary_reports_counts_and_only_fixed_skip_ids(self):
         output = (
             "test_native_only (test_runtime_identity.RuntimeIdentityTests) ... skipped 'Windows only'\n"

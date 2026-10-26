@@ -19,7 +19,9 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "tests" / "fixtures" / "corpus_catalog.json"
 sys.path.insert(0, str(ROOT / "src"))
-from _safe_inputs import read_empty_json_object, source_identity
+from _safe_inputs import read_json_object, source_identity
+
+WORKER_POLICIES = {"strict", "supervised-alpha"}
 
 
 def _sha(data: bytes) -> str:
@@ -70,7 +72,12 @@ def _file_sha(path: Path) -> str:
 
 def _validate(args):
     config_input = Path(args.config)
-    read_empty_json_object(config_input)
+    config_data = read_json_object(config_input)
+    if (set(config_data) - {"worker_policy"}
+            or ("worker_policy" in config_data
+                and (type(config_data["worker_policy"]) is not str
+                     or config_data["worker_policy"] not in WORKER_POLICIES))):
+        raise ValueError
     config = config_input.resolve(strict=True)
     backend_input = Path(args.gitleaks)
     if backend_input.is_symlink():
@@ -104,7 +111,8 @@ def main(argv=None) -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=20261025)
     parser.add_argument("--gitleaks", required=True)
-    parser.add_argument("--config", required=True, help="must be an owned empty JSON object")
+    parser.add_argument("--config", required=True,
+                        help="owned bounded JSON object; optional worker_policy is strict or supervised-alpha")
     parser.add_argument("--state", required=True, help="new or empty private state directory")
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
     args = parser.parse_args(argv)
@@ -122,6 +130,7 @@ def main(argv=None) -> int:
         if args.seed < 0 or not 1 <= args.timeout_seconds <= 900:
             raise ValueError
         config, backend, state, output, manifest_path = _validate(args)
+        config_data = read_json_object(config)
         catalog_data = json.loads(CATALOG.read_text(encoding="utf-8"))
         labels = [{"case_id": row["case_id"], "category": row["category"],
                    "declared_state": row["state"]} for row in catalog_data["cases"]]
@@ -146,8 +155,9 @@ def main(argv=None) -> int:
                 max_output_bytes=8 * 1024 * 1024, max_input_bytes=1024, memory_bytes=None,
             )
             summary = json.loads(completed.stdout)
-            if (type(summary) is not dict or set(summary) != {"seed", "policy_id", "runtime_id", "counts", "detector_metrics", "by_category", "cases"}
+            if (type(summary) is not dict or set(summary) != {"seed", "worker_policy", "policy_id", "runtime_id", "counts", "detector_metrics", "by_category", "cases"}
                     or summary["seed"] != args.seed
+                    or summary["worker_policy"] != config_data.get("worker_policy")
                     or summary["counts"].get("labeled_cases") != len(catalog_data["cases"])
                     or len(summary["cases"]) != len(catalog_data["cases"])):
                 raise ValueError
@@ -203,6 +213,7 @@ def main(argv=None) -> int:
         "runtime_id": summary.get("runtime_id") if summary else None,
         "command": ["python", "tools/_corpus_runner.py", "--seed", str(args.seed)],
         "seed": args.seed,
+        "worker_policy": summary.get("worker_policy") if summary else None,
         "started_utc": started.isoformat(),
         "finished_utc": finished.isoformat(),
         "elapsed_seconds": round(time.monotonic() - monotonic_start, 3),
