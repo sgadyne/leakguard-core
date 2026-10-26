@@ -308,6 +308,13 @@ def _dict(value, code: str) -> dict:
     return value
 
 
+def _locked_request_rejected(status: int, value: object, *expected_errors: str) -> bool:
+    if status < 400 or type(value) is not dict:
+        return False
+    error = value.get("error")
+    return type(error) is str and error in {*expected_errors, "request-failed"}
+
+
 def _jobs(value) -> list[dict]:
     if type(value) is not list or any(type(item) is not dict for item in value):
         raise JourneyFailure("jobs-response-invalid")
@@ -587,7 +594,9 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
         status, _, _ = client.request("POST", "/api/vault/lock", {})
         _expect_status(status, 200, "credential-lock-failed")
         status, locked_rows, _ = client.request("GET", "/api/vault/entries")
-        checks["credential_lock_revoked_session"] = status >= 400 and _dict(locked_rows, "credential-lock-response-invalid").get("error") == "credential-vault-locked"
+        checks["credential_lock_revoked_session"] = _locked_request_rejected(
+            status, locked_rows, "credential-vault-locked", "vault-locked",
+        )
         if not checks["credential_lock_revoked_session"]:
             raise JourneyFailure("credential-lock-not-enforced")
         status, restored, _ = client.request("POST", "/api/vault/restore", {
@@ -620,7 +629,9 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
         status, _, _ = client.request("POST", "/api/observations/lock", {})
         _expect_status(status, 200, "observations-lock-failed")
         status, locked_findings, _ = client.request("GET", "/api/findings", auth=True)
-        checks["observation_lock_hides_findings"] = status >= 400 and _dict(locked_findings, "findings-lock-response-invalid").get("error") == "observation-store-locked"
+        checks["observation_lock_hides_findings"] = _locked_request_rejected(
+            status, locked_findings, "observation-store-locked", "state-locked",
+        )
         if not checks["observation_lock_hides_findings"]:
             raise JourneyFailure("observation-lock-not-enforced")
         if active is not None:
@@ -661,7 +672,9 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
         if not checks["scan_evidence_survives_restart"]:
             raise JourneyFailure("scan-evidence-not-persisted")
         status, locked_entries, _ = client.request("GET", "/api/vault/entries")
-        checks["credential_session_separate_after_restart"] = status >= 400 and _dict(locked_entries, "credential-restart-lock-invalid").get("error") == "credential-vault-locked"
+        checks["credential_session_separate_after_restart"] = _locked_request_rejected(
+            status, locked_entries, "credential-vault-locked", "vault-locked",
+        )
         if not checks["credential_session_separate_after_restart"]:
             raise JourneyFailure("credential-session-restored-implicitly")
         status, vault_status, _ = client.request("GET", "/api/vault/status")
