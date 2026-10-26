@@ -1086,10 +1086,12 @@ def doctor(root: Path | None = None) -> tuple[dict[str, Any], int]:
         version, release, manifest = _current_release(root)
         add("active_release", "pass", version)
         runtime_python = python_for_release(release)
-        runtime_minor = _runtime_json(
+        runtime_python_info = _runtime_json(
             runtime_python,
-            "import json, sys; print(json.dumps(f'{sys.version_info.major}.{sys.version_info.minor}'))",
+            "import json, sys; print(json.dumps({'minor': f'{sys.version_info.major}.{sys.version_info.minor}'}))",
+            "{}",
         ) if runtime_python else None
+        runtime_minor = runtime_python_info.get("minor") if runtime_python_info else None
         python_ok = runtime_minor == manifest["target_python"]
         add("target_python", "pass" if python_ok else "fail",
             f"bundle targets Python {manifest['target_python']}; installed runtime is "
