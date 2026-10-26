@@ -114,6 +114,16 @@ class IndependentLabelTests(unittest.TestCase):
                     patch.object(run_independent_labels.resources, "files", return_value=package):
                 self.assertEqual(run_independent_labels._rules_path(), rules)
 
+    def test_invalid_existing_checkout_rules_do_not_fall_back_to_installed_package(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source_rules = Path(folder) / "src" / "leakguard_core" / "rules.toml"
+            source_rules.mkdir(parents=True)
+            with patch.object(run_independent_labels, "RULES", source_rules), \
+                    patch.object(run_independent_labels.resources, "files") as package_files:
+                with self.assertRaisesRegex(ValueError, "rules-invalid"):
+                    run_independent_labels._rules_path()
+                package_files.assert_not_called()
+
 
 class AcceptanceStagingTests(unittest.TestCase):
     def test_wheel_pip_install_and_check_target_the_runtime_being_tested(self):
@@ -717,7 +727,8 @@ class AcceptanceSummaryTests(unittest.TestCase):
         summary = run_acceptance._parse_unittest_summary(
             output, "harmless plugin stdout after the unittest summary")
         self.assertEqual(summary, {
-            "total": 3, "passed": 1, "skipped": 2, "failures": 0, "errors": 0,
+            "total": 3, "passed": 1, "passed_count_exact": True,
+            "skipped": 2, "failures": 0, "errors": 0,
             "skip_test_ids": [
                 "test_corpus.CorpusTests.test_pdf_optional",
                 "test_runtime_identity.RuntimeIdentityTests.test_native_only",
@@ -739,6 +750,8 @@ class AcceptanceSummaryTests(unittest.TestCase):
             "Ran 2 tests in 0.012s\n\nFAILED (failures=1, errors=1)\n"
         )
         summary = run_acceptance._parse_unittest_summary(output)
+        self.assertEqual(summary["passed"], 0)
+        self.assertTrue(summary["passed_count_exact"])
         self.assertEqual(summary["failed_test_ids"], ["test_paths.PathTests.test_path_case"])
         self.assertEqual(summary["error_test_ids"], ["test_policy.PolicyTests.test_policy_case"])
         self.assertEqual(summary["failure_types"], [
@@ -772,6 +785,34 @@ class AcceptanceSummaryTests(unittest.TestCase):
              "exception_type": "ValueError"},
         ])
         self.assertNotIn(marker, json.dumps(summary))
+
+    def test_unittest_subtest_failures_count_parent_methods_once(self):
+        method = "pkg.tests.Case.test_validation"
+        marker = "SYNTHETIC_SUBTEST_PARAMETER"
+        output = [f"test_validation ({method}) ... FAIL"]
+        for index in range(4):
+            output.extend([
+                f"FAIL: test_validation ({method}) (case_id='{marker}-{index}')",
+                "Traceback (most recent call last):",
+                "AssertionError: synthetic condition",
+                "",
+            ])
+        output.extend(["Ran 2 tests in 0.012s", "", "FAILED (failures=4)"])
+        summary = run_acceptance._parse_unittest_summary("\n".join(output))
+        self.assertEqual(summary["failures"], 4)
+        self.assertEqual(summary["failed_test_ids"], [method])
+        self.assertEqual(summary["passed"], 1)
+        self.assertTrue(summary["passed_count_exact"])
+        self.assertNotIn(marker, json.dumps(summary))
+
+    def test_unittest_summary_marks_pass_count_inexact_when_failure_ids_are_missing(self):
+        output = (
+            "Ran 2 tests in 0.012s\n\nFAILED (failures=1)\n"
+        )
+        summary = run_acceptance._parse_unittest_summary(output)
+        self.assertEqual(summary["failures"], 1)
+        self.assertIsNone(summary["passed"])
+        self.assertFalse(summary["passed_count_exact"])
 
 
 if __name__ == "__main__":

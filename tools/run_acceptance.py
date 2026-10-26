@@ -213,20 +213,24 @@ def _parse_unittest_summary(stderr: str, stdout: str = "") -> dict | None:
             exception = exception_line.match(line.strip())
             if exception and exception.group(1) in safe_exception_types:
                 active_failure["exception_type"] = exception.group(1)
-    passed = total - skipped - failures - errors
-    if min(total, skipped, failures, errors, passed) < 0:
+    if min(total, skipped, failures, errors) < 0:
         return None
+    failed_ids = {row["test_id"] for row in result_rows if row["result"] == "fail"}
+    error_ids = {row["test_id"] for row in result_rows if row["result"] == "error"}
+    failed_ids.update(row["test_id"] for row in exception_rows if row["result"] == "fail")
+    error_ids.update(row["test_id"] for row in exception_rows if row["result"] == "error")
+    skipped_ids = set(skip_ids)
+    nonpassing_ids = skipped_ids | failed_ids | error_ids
+    outcomes_exact = (len(exception_rows) == failures + errors
+                      and len(skipped_ids) == skipped
+                      and len(nonpassing_ids) <= total)
+    passed = total - len(nonpassing_ids) if outcomes_exact else None
     return {"total": total, "passed": passed, "skipped": skipped,
+            "passed_count_exact": outcomes_exact,
             "failures": failures, "errors": errors,
             "skip_test_ids": sorted(set(skip_ids)),
-            "failed_test_ids": sorted({row["test_id"] for row in result_rows
-                                        if row["result"] == "fail"}
-                                       | {row["test_id"] for row in exception_rows
-                                          if row["result"] == "fail"}),
-            "error_test_ids": sorted({row["test_id"] for row in result_rows
-                                       if row["result"] == "error"}
-                                      | {row["test_id"] for row in exception_rows
-                                         if row["result"] == "error"}),
+            "failed_test_ids": sorted(failed_ids),
+            "error_test_ids": sorted(error_ids),
             "failure_types": sorted(exception_rows, key=lambda row: row["test_id"])}
 
 

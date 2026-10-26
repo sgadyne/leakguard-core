@@ -86,15 +86,38 @@ def _catalog() -> tuple[dict, bytes]:
 
 def _rules_path() -> Path:
     """Find rules in the checkout or in the installed core package."""
-    if RULES.is_file() and not RULES.is_symlink():
-        return RULES
+    try:
+        RULES.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        raise ValueError("rules-invalid") from None
+    else:
+        return _validated_rules_file(RULES)
     try:
         installed = Path(os.fspath(resources.files("leakguard_core").joinpath("rules.toml")))
     except (ImportError, ModuleNotFoundError, OSError, TypeError, ValueError):
         raise ValueError("rules-invalid") from None
-    if installed.is_symlink() or not installed.is_file():
+    return _validated_rules_file(installed)
+
+
+def _validated_rules_file(path: Path) -> Path:
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
         raise ValueError("rules-invalid")
-    return installed
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("rules-invalid")
+    except OSError:
+        raise ValueError("rules-invalid") from None
+    finally:
+        os.close(descriptor)
+    return path
 
 
 def run(backend: Path, timeout: float) -> dict:
