@@ -138,11 +138,15 @@ def render_scan_report(report: ScanReport, report_path=None, limit=20):
         DecisionVerdict.INCOMPLETE: "INCOMPLETE",
     }
     counts = report.counts
+    cycle_evidence = any(issue.code is ErrorCode.AUDIT_CYCLE_EVIDENCE for issue in report.issues)
+    count_scope = ' in this slice' if cycle_evidence else ''
     lines = [
         f"LeakGuard scan {clean(report.run_id)}: {verdict_titles[report.decision.verdict]} "
         f"({counts.block_findings} blocking, {counts.review_findings} review, "
-        f"{counts.info_findings} informational; {counts.results} inputs)"
+        f"{counts.info_findings} informational; {counts.results} inputs{count_scope})"
     ]
+    if cycle_evidence:
+        lines.append('Decision covers the completed audit cycle; counts and listed findings cover this slice.')
     lines.append(
         f"Coverage: {'complete' if report.coverage.enumeration_complete else 'incomplete'} enumeration, "
         f"{'required surfaces complete' if report.coverage.required_complete else 'required surfaces incomplete'}, "
@@ -174,7 +178,8 @@ def render_scan_report(report: ScanReport, report_path=None, limit=20):
         location = issue.source.path if issue.source else "scan"
         if issue.part_id:
             location += f" part={issue.part_id}"
-        requirement = "required" if issue.required else "omitted"
+        requirement = ("information" if issue.code is ErrorCode.AUDIT_CYCLE_EVIDENCE
+                       else "required" if issue.required else "omitted")
         lines.append(f"  {clean(location)}: {clean(issue.code.value)} ({requirement})")
     if report_path:
         lines.append("Report: " + clean(report_path))

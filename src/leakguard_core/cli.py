@@ -68,7 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if report.decision.verdict is DecisionVerdict.INCOMPLETE:
         return 2
-    if args.fail_on == "block" and report.counts.block_findings:
+    if args.fail_on == "block" and (report.decision.verdict is DecisionVerdict.BLOCK or report.counts.block_findings):
         return 1
     return 0
 

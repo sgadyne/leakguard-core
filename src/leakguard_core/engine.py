@@ -713,7 +713,7 @@ class ScanService:
                 self.store.set_deadline(deadline)
             except Exception:
                 return self._state_failure_report(m.ScanPolicy.inventory(), limits)
-        if root is not None and not hasattr(self.store, 'bind_cycle_identity'):
+        if root is not None and any(not hasattr(self.store, name) for name in ('bind_cycle_identity', 'cycle_decision_evidence')):
             return failure(m.ErrorCode.WORK_IDENTITY_UNAVAILABLE)
         if root is not None and not root.is_dir():
             try:
@@ -887,7 +887,17 @@ class ScanService:
                     metadata = {**metadata, 'complete': False}
                 if metadata.get('failed'):
                     issues.append(m.CoverageIssue(m.ErrorCode.ENUMERATION_FAILED, required=True))
-                return {**metadata, 'complete': metadata['complete'] and not any(issue.required for issue in issues), 'issues': tuple(issues)}
+                complete = metadata['complete'] and not any(issue.required for issue in issues)
+                evidence = None
+                if root is not None and complete:
+                    evidence = self.store.cycle_decision_evidence(lease)
+                    if (type(evidence) is not dict or set(evidence) != {'severities', 'has_omissions', 'files'}
+                            or type(evidence['severities']) is not tuple
+                            or any(value not in {'block', 'review', 'info'} for value in evidence['severities'])
+                            or type(evidence['has_omissions']) is not bool
+                            or type(evidence['files']) is not int or evidence['files'] < 0):
+                        raise StateError()
+                return {**metadata, 'complete': complete, 'issues': tuple(issues), 'cycle_evidence': evidence}
             report = self._run(work_inputs(), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=use_cache, cancel=cancel, enumeration=status, final_check=lambda: self.store.lease_valid(lease), work_claims=claims, _deadline=deadline)
             if report.coverage.enumeration_complete and report.coverage.required_complete:
                 try:
@@ -1167,8 +1177,19 @@ class ScanService:
             metadata = {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)}
         enumeration_complete = enumeration_complete and metadata.get('complete', True)
         run_issues.extend(metadata.get('issues', ()))
+        cycle_evidence = metadata.get('cycle_evidence')
+        if cycle_evidence is not None and cycle_evidence['files'] > len({result.source.path for result in results}):
+            run_issues.append(m.CoverageIssue(m.ErrorCode.AUDIT_CYCLE_EVIDENCE))
         enumeration_complete = enumeration_complete and not run_issues.truncated
         coverage, decision = scan_policy.evaluate(tuple(results), policy=policy, policy_id=policy_id, enumeration_complete=enumeration_complete, issues=tuple(run_issues), pending_files=metadata.get('pending_files'), pending_directories=metadata.get('pending_directories'), cycle_id=metadata.get('cycle_id'))
+        if coverage.required_complete and cycle_evidence is not None:
+            # Coverage/decision span the completed audit cycle; immutable results,
+            # counts and typed omission_count remain scoped to this report slice.
+            blocking = {severity.value for severity in policy.block_severities}
+            verdict = (m.DecisionVerdict.BLOCK if blocking.intersection(cycle_evidence['severities'])
+                       else m.DecisionVerdict.ALLOW_WITH_OMISSIONS if cycle_evidence['has_omissions']
+                       else m.DecisionVerdict.ALLOW)
+            decision = m.PolicyDecision(verdict, (), policy_id)
         report = m.ScanReport(1, uuid.uuid4().hex, started, dt.datetime.now(dt.timezone.utc), policy_id, tuple(results), coverage, decision, tuple(run_issues))
         report = _cap_report(report, limits.max_report_bytes)
         try:

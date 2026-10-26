@@ -264,7 +264,7 @@ class MemoryScanStore:
             self.anchors[key] = anchor
         if materials_checked and result.source.kind is m.SourceKind.FILESYSTEM:
             self._record_materials(result, material_observations, complete=materials_complete)
-        self._finish_work(work, result)
+        self._finish_work(work, result, scan_id=scan_id)
         return scan_id
 
     @_synchronized
@@ -354,7 +354,7 @@ class MemoryScanStore:
         for path, kind, priority in entries:
             key = (lease.scope, lease.generation, path, kind)
             if refresh or key not in self.work:
-                self.work[key] = {'priority': priority, 'attempts': 0, 'failed': False, 'done': False, 'claimed': None, 'verified': False, 'directory_signature': None, 'directory_checked': False, 'directory_progress': None}
+                self.work[key] = {'priority': priority, 'attempts': 0, 'failed': False, 'done': False, 'claimed': None, 'verified': False, 'directory_signature': None, 'directory_checked': False, 'directory_progress': None, 'result_scan_id': None}
                 changed = True
         if changed:
             self._reset_directory_checks(lease)
@@ -445,11 +445,39 @@ class MemoryScanStore:
                 row.update(done=False, claimed=None, failed=False, attempts=0, directory_signature=None, directory_checked=False, directory_progress=None)
 
     @_synchronized
-    def _finish_work(self, work, result):
+    def cycle_decision_evidence(self, lease):
+        """Summarize this completed cycle's accepted results, not global history."""
+        if not self.lease_valid(lease) or not self.cycle_status(lease)['complete']:
+            raise StateError()
+        severities = set()
+        omissions = False
+        files = 0
+        for key, row in self.work.items():
+            if key[:2] != (lease.scope, lease.generation) or key[3] != 'file':
+                continue
+            result = self.results.get(row.get('result_scan_id'))
+            if (not row['done'] or result is None or result.source.path != key[2]
+                    or result.coverage is m.CoverageState.INCOMPLETE):
+                raise StateError()
+            files += 1
+            omissions |= result.coverage is m.CoverageState.OMITTED or any(
+                not issue.required and issue.omission_id is not None for issue in result.issues)
+            input_key = source_key(result.source)
+            for finding in result.findings:
+                state = self.states.get((input_key, finding.id))
+                if state is None or state['state'] != 'resolved':
+                    severities.add(finding.severity.value)
+        return {'severities': tuple(sorted(severities)), 'has_omissions': omissions, 'files': files}
+
+    @_synchronized
+    def _finish_work(self, work, result, *, scan_id):
         if work is None:
             return
-        row = self.work[(work.lease.scope, work.lease.generation, work.path, work.kind)]
+        row = self.work.get((work.lease.scope, work.lease.generation, work.path, work.kind))
+        if row is None or row['claimed'] != work.lease.owner:
+            return
         self._reset_directory_checks(work.lease)
+        row['result_scan_id'] = scan_id
         row['done'] = result.coverage is not m.CoverageState.INCOMPLETE
         row['verified'] = result.coverage is m.CoverageState.COMPLETE
         if not row['done']:
@@ -728,7 +756,7 @@ CREATE INDEX IF NOT EXISTS scan_runs_finished ON scan_runs(finished_at DESC);
 CREATE TABLE IF NOT EXISTS source_anchors(input_key TEXT PRIMARY KEY,payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scan_cache(cache_key TEXT PRIMARY KEY,scan_id TEXT NOT NULL REFERENCES input_scans(scan_id));
 CREATE TABLE IF NOT EXISTS audit_cycles(scope TEXT PRIMARY KEY,generation INTEGER,started TEXT,completed TEXT,failed INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_until REAL,work_identity TEXT);
-CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,verified INTEGER NOT NULL DEFAULT 0,directory_signature TEXT,directory_checked INTEGER NOT NULL DEFAULT 0,directory_progress TEXT,PRIMARY KEY(scope,generation,path,kind));
+CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,verified INTEGER NOT NULL DEFAULT 0,directory_signature TEXT,directory_checked INTEGER NOT NULL DEFAULT 0,directory_progress TEXT,result_scan_id TEXT,PRIMARY KEY(scope,generation,path,kind));
 '''
 
 
@@ -772,7 +800,7 @@ def open_database(state_dir):
             'cache': [('policy', 'TEXT'), ('digest', 'TEXT'), ('payload', 'TEXT'), ('executed_at', 'TEXT')],
             'directories': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
             'files': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
-            'audit_work': [('done', 'INTEGER NOT NULL DEFAULT 0'), ('claimed', 'TEXT'), ('verified', 'INTEGER NOT NULL DEFAULT 0'), ('directory_signature', 'TEXT'), ('directory_checked', 'INTEGER NOT NULL DEFAULT 0'), ('directory_progress', 'TEXT')],
+            'audit_work': [('done', 'INTEGER NOT NULL DEFAULT 0'), ('claimed', 'TEXT'), ('verified', 'INTEGER NOT NULL DEFAULT 0'), ('directory_signature', 'TEXT'), ('directory_checked', 'INTEGER NOT NULL DEFAULT 0'), ('directory_progress', 'TEXT'), ('result_scan_id', 'TEXT')],
             'current_inputs': [('reserved_at', 'TEXT')],
             'audit_cycles': [('work_identity', 'TEXT')],
         }.items():
@@ -780,6 +808,9 @@ def open_database(state_dir):
             for column, declaration in additions:
                 if column not in present:
                     conn.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + declaration)
+        # A pre-link checkpoint cannot prove which results completed its files.
+        # Preserve evidence, but force the next semantic bind to replay that root.
+        conn.execute("UPDATE audit_cycles SET work_identity=NULL WHERE completed IS NULL AND EXISTS(SELECT 1 FROM audit_work w WHERE w.scope=audit_cycles.scope AND w.generation=audit_cycles.generation AND w.kind='file' AND w.done=1 AND w.result_scan_id IS NULL)")
         conn.execute('CREATE INDEX IF NOT EXISTS audit_directory_checks ON audit_work(scope,generation,kind,directory_checked,done,path)')
         if version < 2:
             _import_legacy_findings(conn)
@@ -976,7 +1007,7 @@ class SQLiteScanStore:
                     self.conn.execute('INSERT OR REPLACE INTO source_anchors VALUES(?,?)', (key, _anchor_data(anchor)))
                 if materials_checked and result.source.kind is m.SourceKind.FILESYSTEM:
                     self._record_materials(result, material_observations, complete=materials_complete)
-                self._finish_work(work, result)
+                self._finish_work(work, result, scan_id=scan_id)
                 self.conn.execute('UPDATE current_inputs SET latest_attempt_id=?,last_complete_scan_id=CASE WHEN ? THEN ? ELSE last_complete_scan_id END,current_state=?,state_reason=?,policy_id=?,runtime_id=? WHERE input_key=? AND generation=?', (scan_id, complete, scan_id, 'verified' if complete else 'unknown', 'complete-content-scan' if complete else 'incomplete-scan', result.identity.policy_id, result.identity.runtime_id, key, generation))
             return scan_id
         except Exception as error:
@@ -1141,7 +1172,7 @@ class SQLiteScanStore:
                 raise StateError()
             before = self.conn.total_changes
             if refresh:
-                self.conn.executemany('INSERT INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,?) ON CONFLICT(scope,generation,path,kind) DO UPDATE SET done=0,attempts=0,failed=0,claimed=NULL,directory_signature=NULL,directory_checked=0,directory_progress=NULL', ((lease.scope, lease.generation, path, kind, priority) for path, kind, priority in entries))
+                self.conn.executemany('INSERT INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,?) ON CONFLICT(scope,generation,path,kind) DO UPDATE SET done=0,attempts=0,failed=0,claimed=NULL,directory_signature=NULL,directory_checked=0,directory_progress=NULL,result_scan_id=NULL', ((lease.scope, lease.generation, path, kind, priority) for path, kind, priority in entries))
             else:
                 self.conn.executemany('INSERT OR IGNORE INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,?)', ((lease.scope, lease.generation, path, kind, priority) for path, kind, priority in entries))
             if self.conn.total_changes != before:
@@ -1232,12 +1263,29 @@ class SQLiteScanStore:
                 else:
                     self.conn.execute("UPDATE audit_work SET done=0,claimed=NULL,failed=0,attempts=0,directory_signature=NULL,directory_checked=0,directory_progress=NULL WHERE scope=? AND generation=? AND path=? AND kind='directory'", (lease.scope, lease.generation, path))
 
-    def _finish_work(self, work, result):
+    @_bounded_sql
+    def cycle_decision_evidence(self, lease):
+        """Aggregate exact accepted work results; stale/unknown policy rows do not vote."""
+        if not self._lease_valid(lease) or not self.cycle_status(lease)['complete']:
+            raise StateError()
+        parameters = (lease.scope, lease.generation)
+        invalid = self.conn.execute("SELECT 1 FROM audit_work w LEFT JOIN input_scans s ON s.scan_id=w.result_scan_id WHERE w.scope=? AND w.generation=? AND w.kind='file' AND (w.done=0 OR s.scan_id IS NULL OR s.path<>w.path OR s.coverage='incomplete') LIMIT 1", parameters).fetchone()
+        if invalid:
+            raise StateError()
+        files = self.conn.execute("SELECT count(*) FROM audit_work WHERE scope=? AND generation=? AND kind='file'", parameters).fetchone()[0]
+        rows = self.conn.execute("SELECT DISTINCT json_extract(f.payload,'$.severity') FROM audit_work w JOIN input_scans s ON s.scan_id=w.result_scan_id JOIN scan_findings f ON f.scan_id=s.scan_id LEFT JOIN finding_state e ON e.input_key=s.input_key AND e.finding_id=f.finding_id WHERE w.scope=? AND w.generation=? AND w.kind='file' AND (e.state IS NULL OR e.state<>'resolved')", parameters).fetchall()
+        severities = tuple(sorted(row[0] for row in rows))
+        if any(value not in {'block', 'review', 'info'} for value in severities):
+            raise StateError()
+        omissions = self.conn.execute("SELECT 1 FROM audit_work w JOIN input_scans s ON s.scan_id=w.result_scan_id WHERE w.scope=? AND w.generation=? AND w.kind='file' AND (s.coverage='omitted' OR EXISTS(SELECT 1 FROM json_each(s.payload,'$.issues') i WHERE json_extract(i.value,'$.required')=0 AND json_extract(i.value,'$.omission_id') IS NOT NULL)) LIMIT 1", parameters).fetchone() is not None
+        return {'severities': severities, 'has_omissions': omissions, 'files': files}
+
+    def _finish_work(self, work, result, *, scan_id):
         if work is None:
             return
         complete = result.coverage is not m.CoverageState.INCOMPLETE
         self._reset_directory_checks(work.lease)
-        self.conn.execute('UPDATE audit_work SET done=?,verified=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (complete, result.coverage is m.CoverageState.COMPLETE, not complete, not complete, work.lease.scope, work.lease.generation, work.path, work.kind, work.lease.owner))
+        self.conn.execute('UPDATE audit_work SET done=?,verified=?,result_scan_id=?,attempts=attempts+?,failed=CASE WHEN attempts+? >= 3 THEN 1 ELSE failed END WHERE scope=? AND generation=? AND path=? AND kind=? AND claimed=?', (complete, result.coverage is m.CoverageState.COMPLETE, scan_id, not complete, not complete, work.lease.scope, work.lease.generation, work.path, work.kind, work.lease.owner))
 
     @_bounded_sql
     def cycle_status(self, lease):
