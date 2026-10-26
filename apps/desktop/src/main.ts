@@ -6,7 +6,7 @@ import { ClipboardOwner } from './clipboard.ts';
 import { Control } from './control.ts';
 import { CHANNELS, type BackendStatus, type ClearReason, type DesktopEvent, type Page, type Preferences } from './contracts.ts';
 import { backupBytes, failure, pageAllowed, record } from './policy.ts';
-import { canonicalDataDirectory, cleanEnvironment, prepareRuntime } from './runtime.ts';
+import { canonicalDataDirectory, cleanEnvironment, prepareRuntime, waitForPreparation } from './runtime.ts';
 
 let window:BrowserWindow|undefined;
 let tray:Tray|undefined;
@@ -19,6 +19,8 @@ let preferences:Preferences={theme:'system',startAtLogin:false};
 let firstCloseExplained=false;
 let quitAllowed=false;
 let quitting=false;
+let requestedOpen=false;
+let pendingPage:Page|undefined;
 let startup:Promise<void>|undefined;
 let recovering=false;
 let lockInFlight:Promise<void>|undefined;
@@ -69,10 +71,11 @@ function updateMenus(){
   Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenu));
 }
 function show(page?:Page){
+  requestedOpen=true;if(page)pendingPage=page;
   if(!window || window.isDestroyed())return;
   if(window.isMinimized())window.restore();
   window.show();window.focus();
-  if(page)emit({type:'navigate',page});
+  if(page && !window.webContents.isLoadingMainFrame()){emit({type:'navigate',page});pendingPage=undefined;}
 }
 async function refreshStatus(){
   const current=control;
@@ -114,7 +117,7 @@ async function readPreferences(){
     if(['system','light','dark'].includes(value.theme))preferences.theme=value.theme;
     firstCloseExplained=value.firstCloseExplained===true;
   }catch{}
-  if(supportedLogin())preferences.startAtLogin=app.getLoginItemSettings().openAtLogin;
+  if(supportedLogin())preferences.startAtLogin=app.getLoginItemSettings({args:['--background']}).openAtLogin;
 }
 async function savePreferences(){
   const target=path.join(dataDir,'desktop-preferences.json');
@@ -169,7 +172,7 @@ function registerIPC(){
     if(!window?.isVisible() || !window.isFocused())return {copied:false};
     return clipboardOwner.copy(value.text);
   });
-  handle(CHANNELS.preferences,(...args:unknown[])=>{noArguments(args);return {...preferences};});
+  handle(CHANNELS.preferences,(...args:unknown[])=>{noArguments(args);if(supportedLogin())preferences.startAtLogin=app.getLoginItemSettings({args:['--background']}).openAtLogin;return {...preferences};});
   handle(CHANNELS.setPreferences,async(...args:unknown[])=>{
     if(args.length!==1)throw failure('argument-invalid');
     const patch=record(args[0],['theme','startAtLogin']);
@@ -179,7 +182,7 @@ function registerIPC(){
       if(!supportedLogin() && patch.startAtLogin)throw failure('login-unavailable');
       if(supportedLogin()){
         app.setLoginItemSettings({openAtLogin:patch.startAtLogin as boolean,args:['--background']});
-        const actual=app.getLoginItemSettings().openAtLogin;
+        const actual=app.getLoginItemSettings({args:['--background']}).openAtLogin;
         preferences.startAtLogin=actual;
         if(actual!==patch.startAtLogin)throw failure('login-setting-failed');
       }
@@ -211,7 +214,10 @@ function createWindow(){
   window.webContents.on('will-frame-navigate',event=>{if(!event.isMainFrame || !pageAllowed(event.url,origin))event.preventDefault();});
   window.webContents.on('will-attach-webview',event=>event.preventDefault());
   window.webContents.on('render-process-gone',()=>{void lockCredentials('disconnect');});
-  window.webContents.on('did-finish-load',()=>emit({type:'backend-state',state:control?.hasExited?'unavailable':'ready'}));
+  window.webContents.on('did-finish-load',()=>{
+    emit({type:'backend-state',state:control?.hasExited?'unavailable':'ready'});
+    if(pendingPage){emit({type:'navigate',page:pendingPage});pendingPage=undefined;}
+  });
   window.on('blur',()=>clearSensitive('blur'));
   window.on('hide',()=>{void lockCredentials('hide');});
   window.on('close',event=>{
@@ -219,7 +225,7 @@ function createWindow(){
     event.preventDefault();
     void lockCredentials('hide');
     if(!firstCloseExplained){
-      firstCloseExplained=true;void savePreferences();
+      firstCloseExplained=true;void savePreferences().catch(()=>{});
       void dialog.showMessageBox(window!,{type:'info',title:'Password Buddy keeps running',
         message:'Closing the window keeps scans running in the menu bar or tray. Your credential vault locks.',
         detail:'Use Quit Password Buddy to stop the owned background process safely.',
@@ -228,9 +234,11 @@ function createWindow(){
         });
     }else window?.hide();
   });
-  const hidden=process.argv.includes('--background') && status?.background==='available' && status.observations.unlocked;
+  const hidden=!requestedOpen && process.argv.includes('--background') && status?.background==='available' && status.observations.unlocked;
   window.once('ready-to-show',()=>{if(!hidden)show();});
-  void window.loadURL(origin+'/');
+  void window.loadURL(origin+'/'+(pendingPage?'#'+pendingPage:'')).catch(()=>{
+    void lockCredentials('disconnect');void recover('backend-page-unavailable');
+  });
 }
 async function startBackend(){
   const resources=app.isPackaged?path.join(process.resourcesPath,'buddy'):process.env.BUDDY_DESKTOP_RESOURCES;
@@ -262,13 +270,18 @@ function messageBox(options:Electron.MessageBoxOptions){
 async function stopOwnedBackend(){
   const current=control;
   if(!current || current.hasExited)return;
-  const result=await current.request('shutdown',120_000);
-  if(result?.stopped!==true)throw failure('backend-stop-unconfirmed');
-  await current.exited;
+  if(current.isReady){
+    const result=await current.request('shutdown',120_000);
+    if(result?.stopped!==true)throw failure('backend-stop-unconfirmed');
+  }else current.closeControl(); // EOF requests the same safe owned shutdown.
+  await new Promise<void>((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(failure('backend-exit-timeout')),120_000);
+    void current.exited.then(()=>{clearTimeout(timer);resolve();});
+  });
 }
 async function recover(initialCode:string){
   if(recovering||quitting)return;
-  recovering=true;
+  recovering=true;status=undefined;stage='Backend unavailable';updateMenus();
   let code=initialCode;
   try{
     while(!quitting){
@@ -296,6 +309,7 @@ async function requestQuit(){
   quitting=true;clearSensitive('quit');emit({type:'backend-state',state:'stopping'});stage='Stopping safely…';updateMenus();
   try{
     if(startup)await startup.catch(()=>{});
+    await waitForPreparation();
     await stopOwnedBackend();
     if(statusTimer)clearInterval(statusTimer);if(idleTimer)clearInterval(idleTimer);
     await clearClipboard();quitAllowed=true;tray?.destroy();app.quit();
@@ -323,7 +337,7 @@ async function main(){
   await app.whenReady();
   app.setAboutPanelOptions({applicationName:'Password Buddy',applicationVersion:app.getVersion(),version:'LeakGuard engine',
     copyright:'Local desktop workspace'});
-  const image=nativeImage.createFromPath(asset('tray.png'));
+  const image=nativeImage.createFromPath(asset('tray.png')).resize({width:20,height:20});
   if(process.platform==='darwin')image.setTemplateImage(true);
   tray=new Tray(image);tray.on('click',()=>show());updateMenus();
   await readPreferences();registerIPC();

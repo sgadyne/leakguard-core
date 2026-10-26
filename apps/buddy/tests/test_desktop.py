@@ -133,6 +133,23 @@ class DesktopBoundaryTests(unittest.TestCase):
             second.close()
             self.assertTrue(lock_path.exists())
 
+    def test_second_backend_refuses_owner_before_overlay_or_registry_writes(self):
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            config = state / "config.json"
+            config.write_text("{}")
+            overlay = state / "buddy-config.json"
+            overlay.write_bytes(b"untouched-invalid-overlay")
+            owner = ProfileOwnership(state / ".buddy-owner.lock")
+            try:
+                with self.assertRaises(ProfileInUse):
+                    BuddyBackend(state_dir=state, config_path=config)
+                self.assertEqual(overlay.read_bytes(), b"untouched-invalid-overlay")
+                self.assertFalse((state / "extensions").exists())
+                self.assertFalse((state / "buddy-active-config.json").exists())
+            finally:
+                owner.close()
+
     def test_backend_failed_stop_retains_store_and_ownership(self):
         class Host:
             def stop(self):
@@ -166,6 +183,32 @@ class DesktopBoundaryTests(unittest.TestCase):
 
 
 class DesktopProtocolSmoke(unittest.TestCase):
+    def test_parent_pipe_eof_safely_exits_and_releases_locked_profile(self):
+        with tempfile.TemporaryDirectory(prefix="buddy-desktop-eof-") as name:
+            state = Path(name) / "profile" / "state"
+            state.mkdir(parents=True)
+            config = state / "config.json"
+            config.write_text("{}")
+            env = dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / "src"))
+            process = subprocess.Popen([sys.executable, "-m", "leakguard_buddy.desktop",
+                "--state-dir", str(state), "--config", str(config)], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+            messages = queue.Queue()
+            threading.Thread(target=lambda: messages.put(process.stdout.readline()), daemon=True).start()
+            try:
+                self.assertEqual(json.loads(messages.get(timeout=10))["type"], "ready")
+                process.stdin.close()
+                self.assertEqual(process.wait(timeout=15), 0)
+                self.assertEqual(process.stderr.read(), b"")
+                owner = ProfileOwnership(state / ".buddy-owner.lock")
+                owner.close()
+            finally:
+                if not process.stdin.closed:
+                    process.stdin.close()
+                process.wait(timeout=15)
+                process.stdout.close()
+                process.stderr.close()
+
     def test_real_backend_ready_bootstrap_status_and_safe_shutdown(self):
         with tempfile.TemporaryDirectory(prefix="buddy-desktop-smoke-") as name:
             state = Path(name) / "profile" / "state"

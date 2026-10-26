@@ -19,3 +19,13 @@ test('private control ready/bootstrap/shutdown keeps token out of origin',async(
   await control.exited;
   assert.equal(control.hasExited,true);
 });
+
+test('ready deadline reports failure and retains the owned process for safe EOF stop',async()=>{
+  const source=`require('readline').createInterface({input:process.stdin}).on('close',()=>process.exit(0));`;
+  const control=new Control(process.execPath,['-e',source],{cwd:process.cwd(),env:{}},5);
+  await assert.rejects(control.ready,/backend-ready-timeout/);
+  assert.equal(control.hasExited,false);
+  control.closeControl();
+  await control.exited;
+  assert.equal(control.hasExited,true);
+});

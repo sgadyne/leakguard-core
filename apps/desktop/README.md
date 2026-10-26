@@ -24,6 +24,8 @@ Install Electron's binary for that developer run (`npm rebuild electron`, or run
 `node node_modules/electron/install.js`) if it was skipped. Release assembly owns
 the bundled standalone Python, offline installer and manifest. There is no system
 Python, checkout, existing LeakGuard service or global virtualenv fallback.
+Preparation reports an explicit error after ten minutes and retains the same
+owned installer; Retry reuses that operation, and Quit waits for its exit.
 
 The default profile is the OS app-data directory / Password Buddy. The entire
 profile can be selected by an explicit absolute `--buddy-data-dir PATH`; symlinked

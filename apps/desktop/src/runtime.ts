@@ -61,7 +61,26 @@ export async function verifiedResource(root:string,relative:string,manifest:Pick
   }
   return original;
 }
+let activePreparation:{key:string;completion:Promise<Runtime>}|undefined;
+export async function waitForPreparation():Promise<void>{
+  if(activePreparation)await activePreparation.completion.then(()=>{},()=>{});
+}
 export async function prepareRuntime(resourcesInput:string,dataDir:string,onProgress:(stage:string)=>void):Promise<Runtime> {
+  const key=path.resolve(resourcesInput)+'\0'+dataDir;
+  if(activePreparation && activePreparation.key!==key)throw failure('preparation-already-running');
+  if(!activePreparation){
+    const completion=performPreparation(resourcesInput,dataDir,onProgress);
+    activePreparation={key,completion};
+    const clear=()=>{if(activePreparation?.completion===completion)activePreparation=undefined;};
+    void completion.then(clear,clear);
+  }
+  const completion=activePreparation.completion;
+  return new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(failure('preparation-timeout')),10*60_000);
+    void completion.then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});
+  });
+}
+async function performPreparation(resourcesInput:string,dataDir:string,onProgress:(stage:string)=>void):Promise<Runtime> {
   const resources=await fs.realpath(resourcesInput);
   const raw=await fs.readFile(path.join(resources,'desktop-manifest.json'));
   if(raw.length>16*1024*1024)throw failure('resource-manifest-invalid');
@@ -77,9 +96,7 @@ export async function prepareRuntime(resourcesInput:string,dataDir:string,onProg
     const child=spawn(python,['-I','-B','-X','utf8',bootstrap,'--resources',resources,'--data-dir',dataDir],
       {cwd:dataDir,env:cleanEnvironment(),stdio:['ignore','pipe','pipe'],windowsHide:true,shell:false});
     let buffer=Buffer.alloc(0);let receipt:Runtime|undefined;let code:string|undefined;let invalid=false;
-    // Preparation owns its subprocess until exit. A timeout is reported but
-    // never used as authority to abandon a writer or launch another installer.
-    const timer=setTimeout(()=>onProgress('preparation-taking-longer'),10*60_000);
+    // The coalescing caller reports a deadline without abandoning this writer.
     child.stderr.on('data',()=>{});
     child.stdout.on('data',(chunk:Buffer)=>{
       if(buffer.length+chunk.length>32*1024){invalid=true;return;}
@@ -101,9 +118,8 @@ export async function prepareRuntime(resourcesInput:string,dataDir:string,onProg
         }catch{invalid=true;}
       }
     });
-    child.on('error',()=>{clearTimeout(timer);reject(failure('preparation-start-failed'));});
-    child.on('exit',async exitCode=>{
-      clearTimeout(timer);
+    child.on('error',()=>{reject(failure('preparation-start-failed'));});
+    child.on('close',async exitCode=>{
       try{
         if(exitCode!==0 || invalid || buffer.length || !receipt || code) throw failure(code || 'preparation-failed');
         const runtimeRoot=await fs.realpath(path.join(dataDir,'runtimes',manifest.runtimeId));

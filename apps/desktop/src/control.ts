@@ -19,21 +19,24 @@ export class Control {
   private pending=new Map<number,Pending>();
   private closed=false;
   private receivedReady=false;
+  private readyTimer:NodeJS.Timeout;
   onUnavailable:(code:string)=>void=()=>{};
-  constructor(python:string,args:string[],options:{cwd:string;env:NodeJS.ProcessEnv}) {
+  constructor(python:string,args:string[],options:{cwd:string;env:NodeJS.ProcessEnv},readyTimeout=60_000) {
     this.ready=new Promise((resolve,reject)=>{this.readyResolve=resolve;this.readyReject=reject;});
     this.exited=new Promise(resolve=>{this.exitResolve=resolve;});
+    this.readyTimer=setTimeout(()=>this.unavailable('backend-ready-timeout'),readyTimeout);
     this.child=spawn(python,args,{...options,stdio:['pipe','pipe','pipe'],windowsHide:true,shell:false});
     this.child.stdout.on('data',(chunk:Buffer)=>this.consume(chunk));
     // Drain but never log stderr: third-party failures can contain source data.
     this.child.stderr.on('data',()=>{});
     this.child.on('error',()=>this.unavailable('backend-start-failed'));
-    this.child.on('exit',()=>{
+    this.child.on('close',()=>{
       this.closed=true; this.unavailable('backend-exited'); this.exitResolve();
     });
     this.child.stdin.on('error',()=>this.unavailable('backend-control-unavailable'));
   }
   private unavailable(code:string) {
+    clearTimeout(this.readyTimer);
     this.readyReject(failure(code));
     for(const pending of this.pending.values()){clearTimeout(pending.timer);pending.reject(failure(code));}
     this.pending.clear();
@@ -53,7 +56,7 @@ export class Control {
         if(message.type==='ready'){
           if(this.receivedReady || message.protocol!==1 || message.apiVersion!==1 || message.pid!==this.child.pid ||
              Object.keys(message).sort().join(',')!=='apiVersion,origin,pid,protocol,type') throw failure('backend-protocol-invalid');
-          message.origin=exactOrigin(message.origin); this.receivedReady=true; this.readyResolve(message); continue;
+          message.origin=exactOrigin(message.origin); clearTimeout(this.readyTimer); this.receivedReady=true; this.readyResolve(message); continue;
         }
         if(!Number.isSafeInteger(message.id) || typeof message.ok!=='boolean' ||
           Object.keys(message).some(key=>!['id','ok','result','error'].includes(key))) throw failure('backend-protocol-invalid');
@@ -76,5 +79,7 @@ export class Control {
       });
     });
   }
+  closeControl():void{this.child.stdin.end();}
+  get isReady():boolean{return this.receivedReady;}
   get hasExited():boolean {return this.closed;}
 }
