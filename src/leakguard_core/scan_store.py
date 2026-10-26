@@ -649,21 +649,27 @@ def _finding_from(value):
 
 def _issue_from(value):
     v = _exact(value, 'code source part_id required omission_id')
-    return m.CoverageIssue(m.ErrorCode(v['code']), _source_from(v['source']) if v['source'] else None, v['part_id'], v['required'], v['omission_id'])
+    return m.CoverageIssue(m.ErrorCode(v['code']), _source_from(v['source']) if v['source'] is not None else None, v['part_id'], v['required'], v['omission_id'])
+
+
+def _array(value):
+    if type(value) is not list:
+        raise StateError()
+    return value
 
 
 def _result_from(value):
     v = _exact(value, 'source content identity outcome coverage findings issues observed_at last_executed_at last_verified_at reused_from')
-    c = _exact(v['content'], 'algorithm digest size_bytes') if v['content'] else None
+    c = _exact(v['content'], 'algorithm digest size_bytes') if v['content'] is not None else None
     i = _exact(v['identity'], 'policy_id runtime_id context_id cache_eligible')
-    return m.ScanResult(_source_from(v['source']), m.ContentIdentity(**c) if c else None, m.RuntimeIdentity(**i), m.ScanOutcome(v['outcome']), m.CoverageState(v['coverage']), tuple(_finding_from(f) for f in v['findings']), tuple(_issue_from(x) for x in v['issues']), _time(v['observed_at']), _time(v['last_executed_at']), _time(v['last_verified_at']), v['reused_from'])
+    return m.ScanResult(_source_from(v['source']), m.ContentIdentity(**c) if c is not None else None, m.RuntimeIdentity(**i), m.ScanOutcome(v['outcome']), m.CoverageState(v['coverage']), tuple(_finding_from(f) for f in _array(v['findings'])), tuple(_issue_from(x) for x in _array(v['issues'])), _time(v['observed_at']), _time(v['last_executed_at']), _time(v['last_verified_at']), v['reused_from'])
 
 
 def _report_from(value):
     v = _exact(value, 'schema_version run_id started_at finished_at policy_id results coverage decision counts issues')
     c = _exact(v['coverage'], 'enumeration_complete required_complete omission_count pending_files pending_directories cycle_id')
     d = _exact(v['decision'], 'verdict reason_codes policy_id')
-    report = m.ScanReport(v['schema_version'], v['run_id'], _time(v['started_at']), _time(v['finished_at']), v['policy_id'], tuple(_result_from(r) for r in v['results']), m.CoverageSummary(**c), m.PolicyDecision(m.DecisionVerdict(d['verdict']), tuple(m.ErrorCode(x) for x in d['reason_codes']), d['policy_id']), tuple(_issue_from(x) for x in v['issues']))
+    report = m.ScanReport(v['schema_version'], v['run_id'], _time(v['started_at']), _time(v['finished_at']), v['policy_id'], tuple(_result_from(r) for r in _array(v['results'])), m.CoverageSummary(**c), m.PolicyDecision(m.DecisionVerdict(d['verdict']), tuple(m.ErrorCode(x) for x in _array(d['reason_codes'])), d['policy_id']), tuple(_issue_from(x) for x in _array(v['issues'])))
     expected = report.to_dict()['counts']
     counts = _exact(v['counts'], ' '.join(expected))
     if any(type(value) is not int or value < 0 for value in counts.values()) or counts != expected:

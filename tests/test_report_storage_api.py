@@ -18,6 +18,40 @@ def report():
 
 
 class ReportStorageTests(unittest.TestCase):
+    def test_public_parser_rejects_falsey_wire_type_substitutions(self):
+        value = report().to_dict()
+        for key in ('results', 'issues'):
+            for wrong in ('', {}, None, False):
+                modified = json.loads(json.dumps(value))
+                modified[key] = wrong
+                with self.subTest(key=key, wrong=wrong), self.assertRaises(ReportError):
+                    parse_report(json.dumps(modified))
+        for wrong in ('', {}, None, False):
+            modified = json.loads(json.dumps(value))
+            modified['decision']['reason_codes'] = wrong
+            with self.subTest(key='reason_codes', wrong=wrong), self.assertRaises(ReportError):
+                parse_report(json.dumps(modified))
+
+        now = datetime.now(timezone.utc)
+        source = m.SourceRef(m.SourceKind.BYTES, 'synthetic.txt')
+        result = m.ScanResult(source, None, m.RuntimeIdentity('policy', 'runtime', 'context', False),
+                              m.ScanOutcome.SCANNED, m.CoverageState.COMPLETE, (), (), now)
+        nested = m.ScanReport(1, 'synthetic', now, now, 'policy', (result,),
+                             m.CoverageSummary(True, True, 0),
+                             m.PolicyDecision(m.DecisionVerdict.ALLOW, (), 'policy')).to_dict()
+        for key, wrong in (('content', {}), ('content', False), ('findings', ''), ('issues', {})):
+            modified = json.loads(json.dumps(nested))
+            modified['results'][0][key] = wrong
+            with self.subTest(key=key, wrong=wrong), self.assertRaises(ReportError):
+                parse_report(json.dumps(modified))
+        invalid_issue = {'code': 'observations-ephemeral', 'source': {}, 'part_id': None,
+                         'required': False, 'omission_id': None}
+        modified = json.loads(json.dumps(value))
+        modified['issues'] = [invalid_issue]
+        modified['counts']['issues'] = 1
+        with self.assertRaises(ReportError):
+            parse_report(json.dumps(modified))
+
     def test_public_parser_roundtrip_and_fail_closed_schema(self):
         value = report()
         self.assertEqual(parse_report(value.to_json()), value)
