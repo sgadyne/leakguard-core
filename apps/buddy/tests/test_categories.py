@@ -1,3 +1,4 @@
+import base64
 import unittest
 from types import SimpleNamespace
 
@@ -48,6 +49,21 @@ class FindingCategoryTests(unittest.TestCase):
         self.assertEqual(result["findings"][0]["classification"], "credential-candidate")
         self.assertEqual(result["findings"][0]["source_id"], "source-1")
         self.assertEqual(backend.findings({"category": "credentials"})["findings"], [])
+
+    def test_backup_uses_the_unlocked_credential_session(self):
+        from leakguard_buddy.backend import BuddyBackend
+
+        class Session:
+            def backup(self, path, passphrase):
+                self.passphrase = passphrase
+                path.write_bytes(b"encrypted-synthetic-backup")
+
+        session = Session()
+        backend = object.__new__(BuddyBackend)
+        backend._credential_session = session
+        result = backend.credential_backup("backup phrase")
+        self.assertEqual(session.passphrase, "backup phrase")
+        self.assertEqual(base64.b64decode(result["backup_base64"]), b"encrypted-synthetic-backup")
 
 
 if __name__ == "__main__":

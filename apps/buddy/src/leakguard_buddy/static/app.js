@@ -202,8 +202,10 @@
       meta.append(badge(source.last_success_at ? `Last success ${dateLabel(source.last_success_at)}` : "Never completed", source.last_success_at ? "good" : "warn"));
       content.append(meta);
       const actions = node("div", "source-actions");
-      actions.append(button("Scan now", "scan-source", "small-button", source.id));
-      actions.append(button(source.enabled === false ? "Enable" : "Pause schedule", "toggle-source", "small-button", source.id));
+      const scan = button("Scan now", "scan-source", "small-button", source.id);
+      scan.disabled = source.enabled === false;
+      actions.append(scan);
+      actions.append(button(source.enabled === false ? "Enable source" : source.schedule_seconds ? "Pause source" : "Disable source", "toggle-source", "small-button", source.id));
       actions.append(button("Remove", "remove-source", "small-button", source.id));
       card.append(content, actions); list.append(card);
     }
@@ -505,7 +507,7 @@
     const isObservation = target.startsWith("observations");
     const operationCreate = target.includes("create");
     byId("unlock-title").textContent = operationCreate ? "Create encrypted storage" : `Unlock ${isObservation ? "scan storage" : "credential vault"}`;
-    byId("unlock-help").textContent = isObservation ? "Scan observations power source browsing, jobs and review notes. Credentials remain locked separately." : "Unlocking credentials allows explicit save, reveal and copy actions. Scans and plugins do not receive this capability.";
+    byId("unlock-help").textContent = isObservation ? "Scan observations power source browsing, jobs and review notes. Credentials remain locked separately." : "Only this vault session can save, reveal or copy credentials. Scans and plugins use separate interfaces.";
     byId("unlock-passphrase").value = "";
     byId("unlock-dialog").showModal();
     if (created) byId("unlock-passphrase").focus();

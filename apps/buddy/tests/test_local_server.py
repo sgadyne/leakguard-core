@@ -3,9 +3,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from leakguard_buddy.server import LocalBuddy
+from leakguard_buddy.server import LocalBuddy, open_existing
 
 
 class StubBackend:
@@ -14,6 +15,9 @@ class StubBackend:
 
     def close(self):
         pass
+
+    def git_hooks_install(self, repository, profile):
+        return {"repository": repository, "profile": profile}
 
 
 class LocalServerTests(unittest.TestCase):
@@ -24,6 +28,10 @@ class LocalServerTests(unittest.TestCase):
             app.start()
             try:
                 initial = app.bootstrap
+                with patch("webbrowser.open", return_value=True) as browser_open:
+                    self.assertTrue(open_existing(Path(name)))
+                    browser_open.assert_called_once_with(app.url, new=1, autoraise=True)
+                self.assertFalse(launch_file.exists())
                 first = self._exchange(app, initial)
                 self.assertEqual(first.status, 200)
                 self.assertNotEqual(app.bootstrap, initial)
@@ -32,27 +40,55 @@ class LocalServerTests(unittest.TestCase):
 
                 cookie = first.getheader("Set-Cookie").split(";", 1)[0]
                 self.assertEqual(self._request(app, "GET", "/api/status", cookie=cookie)[0], 200)
-                second = self._exchange(app, app.bootstrap)
+                next_token = app.bootstrap
+                with patch("webbrowser.open", return_value=True) as browser_open:
+                    self.assertTrue(open_existing(Path(name)))
+                    browser_open.assert_called_once_with(app.url, new=1, autoraise=True)
+                second = self._exchange(app, next_token)
                 self.assertEqual(second.status, 200)
                 self.assertNotEqual(first.getheader("Set-Cookie"), second.getheader("Set-Cookie"))
             finally:
                 app.close()
             self.assertFalse(launch_file.exists())
 
+    def test_mutating_api_requires_csrf_and_exact_origin(self):
+        app = LocalBuddy(StubBackend())
+        app.start()
+        try:
+            response = self._exchange(app, app.bootstrap)
+            cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+            csrf = json.loads(response._buddy_body)["csrf"]
+            payload = {"repository": "/synthetic/repo", "profile": "firm"}
+            status, _ = self._request(app, "POST", "/api/hooks/install", cookie=cookie, payload=payload, origin=app.server.origin)
+            self.assertEqual(status, 403)
+            status, response = self._request(app, "POST", "/api/hooks/install", cookie=cookie, payload=payload, origin="http://localhost")
+            self.assertEqual(status, 403)
+            status, response = self._request(app, "POST", "/api/hooks/install", cookie=cookie, payload=payload, origin=app.server.origin, csrf=csrf)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(response._buddy_body), payload)
+        finally:
+            app.close()
+
     @staticmethod
-    def _request(app, method, path, *, token=None, cookie=None):
+    def _request(app, method, path, *, token=None, cookie=None, payload=None, origin=None, csrf=None):
         connection = http.client.HTTPConnection("127.0.0.1", app.server.server_address[1], timeout=5)
         headers = {"Host": app.server.expected_host}
         if token is not None:
             headers.update({"Origin": app.server.origin, "Content-Type": "application/json"})
             body = json.dumps({"token": token})
+        elif payload is not None:
+            headers["Content-Type"] = "application/json"
+            headers["Origin"] = origin or app.server.origin
+            if csrf is not None:
+                headers["X-Buddy-CSRF"] = csrf
+            body = json.dumps(payload)
         else:
             body = None
         if cookie is not None:
             headers["Cookie"] = cookie
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
-        response.read()
+        response._buddy_body = response.read()
         connection.close()
         return response.status, response
 

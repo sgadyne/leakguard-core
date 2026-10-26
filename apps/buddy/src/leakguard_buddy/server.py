@@ -381,8 +381,10 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self._security_headers(content_type)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
+        self.close_connection = True
         self.wfile.write(data)
 
     def _send_json(self, status: int, value: Any, *, cookie: str | None = None) -> None:
@@ -393,10 +395,12 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self._security_headers("application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(data)))
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
+        self.close_connection = True
         self.wfile.write(data)
 
     def _security_headers(self, content_type: str) -> None:

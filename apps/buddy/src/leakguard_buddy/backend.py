@@ -505,10 +505,10 @@ class BuddyBackend:
         return self._require_credential_session().delete_entry(entry_id)
 
     def credential_backup(self, passphrase: str):
-        self._require_credential_session()
+        session = self._require_credential_session()
         with tempfile.TemporaryDirectory(prefix="leakguard-buddy-") as temporary:
             path = Path(temporary) / "vault.lgbak"
-            self._vault.backup(path, passphrase)
+            session.backup(path, passphrase)
             data = path.read_bytes()
         if len(data) > 16 * 1024 * 1024:
             raise ValueError("vault-backup-too-large")
