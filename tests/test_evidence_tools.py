@@ -337,6 +337,18 @@ class BenchmarkAggregationTests(unittest.TestCase):
             self.assertEqual(json.loads(hook_config.read_text(encoding="utf-8")),
                              {"worker_policy": "supervised-alpha"})
 
+    def test_benchmark_dependency_receipt_includes_psutil_version(self):
+        def package_version(name):
+            if name == "psutil":
+                return "7.2.2"
+            raise benchmark_scan.importlib.metadata.PackageNotFoundError(name)
+
+        with patch.object(benchmark_scan.importlib.metadata, "version", side_effect=package_version):
+            self.assertEqual(benchmark_scan._installed_dependencies(), {
+                "packaging": "unavailable", "pypdf": "unavailable",
+                "olefile": "unavailable", "psutil": "7.2.2",
+            })
+
     def test_benchmark_module_uses_its_copied_tool_root(self):
         self.assertEqual(Path(benchmark_scan.__file__).resolve(), BENCHMARK.resolve())
         self.assertEqual(benchmark_scan.ROOT.resolve(), ROOT.resolve())
@@ -503,6 +515,7 @@ class BenchmarkAggregationTests(unittest.TestCase):
             receipt = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(receipt["outcome"], "passed")
             self.assertEqual(receipt["worker_policy"], "supervised-alpha")
+            self.assertEqual(receipt["details"]["worker_policy"], "supervised-alpha")
             self.assertEqual(receipt["details"]["checks"]["cache_reuse_failures"], 0)
             self.assertEqual(receipt["details"]["scan_identity_cases"][0]["policy_ids"]["warm"],
                              "policy-limit-10")

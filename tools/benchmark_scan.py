@@ -332,6 +332,16 @@ def _write_worker_policy_config(root: Path, worker_policy: str) -> Path:
     return path
 
 
+def _installed_dependencies() -> dict[str, str]:
+    dependencies = {}
+    for package in ("packaging", "pypdf", "olefile", "psutil"):
+        try:
+            dependencies[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            dependencies[package] = "unavailable"
+    return dependencies
+
+
 def _part_curve_coverage(report) -> dict:
     from leakguard_core import models
 
@@ -620,12 +630,6 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
     version_text = version_result.stdout.decode("utf-8", "replace") if version_result.returncode == 0 else ""
     version_match = re.search(r"\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b", version_text)
     backend_version = version_match.group(0) if version_match else "unavailable"
-    dependencies = {}
-    for package in ("packaging", "pypdf", "olefile", "psutil"):
-        try:
-            dependencies[package] = importlib.metadata.version(package)
-        except importlib.metadata.PackageNotFoundError:
-            dependencies[package] = "unavailable"
     return {
         "seed": seed, "repetitions": repetitions,
         "worker_policy": worker_policy,
@@ -637,7 +641,7 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
         "service_open_seconds": round(sum(service_open_seconds_by_workers.values()), 6),
         "service_open_seconds_by_workers": service_open_seconds_by_workers,
         "backend_sha256": backend_digest, "backend_version": backend_version,
-        "rules_sha256": rules_digest, "installed_dependencies": dependencies,
+        "rules_sha256": rules_digest, "installed_dependencies": _installed_dependencies(),
         "scan_identity_cases": identity_cases,
         "scan_identities_consistent": checks["scan_identity_failures"] == 0,
         "metric_definitions": {
