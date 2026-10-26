@@ -96,9 +96,23 @@ class IndependentLabelTests(unittest.TestCase):
         self.assertEqual(detector.call_count, 12)
         self.assertEqual([call.args[0] for call in detector.call_args_list],
                          [item["text"] for item in cases])
+        self.assertTrue(all(call.kwargs["rules"] == run_independent_labels.RULES
+                            for call in detector.call_args_list))
         self.assertEqual(receipt["evaluation_boundary"], "isolated-input")
         self.assertTrue(all(row["boundary"] == "isolated-input" for row in receipt["cases"]))
         self.assertEqual(receipt["outcome"], "passed")
+
+    def test_rules_resolve_from_installed_core_when_source_tree_is_absent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            package = root / "site-packages" / "leakguard_core"
+            package.mkdir(parents=True)
+            rules = package / "rules.toml"
+            rules.write_text("synthetic installed rules\n", encoding="utf-8")
+            missing_source_rules = root / "test-root" / "src" / "leakguard_core" / "rules.toml"
+            with patch.object(run_independent_labels, "RULES", missing_source_rules), \
+                    patch.object(run_independent_labels.resources, "files", return_value=package):
+                self.assertEqual(run_independent_labels._rules_path(), rules)
 
 
 class AcceptanceStagingTests(unittest.TestCase):
@@ -127,7 +141,9 @@ class AcceptanceStagingTests(unittest.TestCase):
         }
         self.assertEqual(set(run_acceptance.INSTALLED_TEST_TOOL_FILES), expected_tools)
         self.assertEqual(set(run_acceptance.INSTALLED_TEST_DEPLOY_FILES),
-                         {"installer.py", "default-config.json"})
+                         {"installer.py", "default-config.json", "build_bundle.py",
+                          "release-manifest.json"})
+        self.assertEqual(run_acceptance.INSTALLED_TEST_DOC_FILES, ("INSTALL.md",))
 
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -135,10 +151,13 @@ class AcceptanceStagingTests(unittest.TestCase):
             target = root / "unrelated-test-root"
             (source / "tools").mkdir(parents=True)
             (source / "deploy").mkdir()
+            (source / "docs").mkdir()
             for name in expected_tools:
                 (source / "tools" / name).write_text(name, encoding="utf-8")
             for name in run_acceptance.INSTALLED_TEST_DEPLOY_FILES:
                 (source / "deploy" / name).write_text(name, encoding="utf-8")
+            for name in run_acceptance.INSTALLED_TEST_DOC_FILES:
+                (source / "docs" / name).write_text(name, encoding="utf-8")
 
             tools_dir = run_acceptance._stage_test_tools(source, target)
             deploy_dir = run_acceptance._stage_test_deploy_files(source, target)
@@ -149,6 +168,9 @@ class AcceptanceStagingTests(unittest.TestCase):
                              "check_product_journey.py")
             self.assertEqual((deploy_dir / "default-config.json").read_text(),
                              "default-config.json")
+            self.assertEqual({path.name for path in (target / "docs").iterdir()},
+                             set(run_acceptance.INSTALLED_TEST_DOC_FILES))
+            self.assertEqual(((target / "docs") / "INSTALL.md").read_text(), "INSTALL.md")
 
     def test_core_driver_allows_sibling_inputs_under_request_root(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -726,6 +748,30 @@ class AcceptanceSummaryTests(unittest.TestCase):
              "exception_type": "ValueError"},
         ])
         self.assertNotIn("synthetic fixture path detail", json.dumps(summary))
+
+    def test_unittest_subtest_diagnostics_normalize_ids_and_drop_parameter_values(self):
+        marker = "SYNTHETIC_PRIVATE_SUBTEST_VALUE"
+        output = (
+            "test_source (pkg.tests.Case.test_source) ... FAIL\n"
+            "test_policy (pkg.tests.Policy.test_policy) ... ERROR\n\n"
+            f"FAIL: test_source (pkg.tests.Case.test_source) (case_id='{marker}')\n"
+            "Traceback (most recent call last):\n"
+            f"AssertionError: {marker}\n\n"
+            f"ERROR: test_policy (pkg.tests.Policy.test_policy) (profile='{marker}')\n"
+            "Traceback (most recent call last):\n"
+            f"ValueError: {marker}\n\n"
+            "Ran 2 tests in 0.012s\n\nFAILED (failures=1, errors=1)\n"
+        )
+        summary = run_acceptance._parse_unittest_summary(output)
+        self.assertEqual(summary["failed_test_ids"], ["pkg.tests.Case.test_source"])
+        self.assertEqual(summary["error_test_ids"], ["pkg.tests.Policy.test_policy"])
+        self.assertEqual(summary["failure_types"], [
+            {"test_id": "pkg.tests.Case.test_source", "result": "fail",
+             "exception_type": "AssertionError"},
+            {"test_id": "pkg.tests.Policy.test_policy", "result": "error",
+             "exception_type": "ValueError"},
+        ])
+        self.assertNotIn(marker, json.dumps(summary))
 
 
 if __name__ == "__main__":

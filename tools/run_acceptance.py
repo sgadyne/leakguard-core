@@ -51,7 +51,10 @@ LOCAL_EXTENSION_PROJECTS = (
     ("plugins/sensitive_basics", "leakguard-sensitive-basics"),
     ("templates/firm_plugin", "leakguard-firm-example"),
 )
-INSTALLED_TEST_DEPLOY_FILES = ("installer.py", "default-config.json")
+INSTALLED_TEST_DEPLOY_FILES = (
+    "installer.py", "default-config.json", "build_bundle.py", "release-manifest.json",
+)
+INSTALLED_TEST_DOC_FILES = ("INSTALL.md",)
 
 
 class AcceptanceFailure(RuntimeError):
@@ -165,31 +168,50 @@ def _parse_unittest_summary(stderr: str, stdout: str = "") -> dict | None:
         r"^(test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\) \.\.\. skipped(?:\s|$)"
     )
     result_line = re.compile(
-        r"^(test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\) \.\.\. (FAIL|ERROR)$"
+        r"^(test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\) \.\.\. (FAIL|ERROR)(?:\s+.*)?$"
     )
+
+    def normalized_test_id(method: str, qualified: str) -> str:
+        # unittest normally includes the complete id in parentheses, but some
+        # runners provide only the class. Keep only this stable method identity;
+        # any trailing subTest parameters are deliberately discarded.
+        if qualified.endswith("." + method):
+            return qualified
+        return f"{qualified}.{method}"
+
     for line in lines:
         match = skip_line.match(line)
         if match:
-            skip_ids.append(f"{match.group(2)}.{match.group(1)}")
+            skip_ids.append(normalized_test_id(match.group(1), match.group(2)))
         match = result_line.match(line)
         if match:
-            result_rows.append({"test_id": f"{match.group(2)}.{match.group(1)}",
+            result_rows.append({"test_id": normalized_test_id(match.group(1), match.group(2)),
                                 "result": match.group(3).lower()})
     exception_rows = []
-    failure_header = re.compile(r"^(FAIL|ERROR): (test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\)$")
-    exception_line = re.compile(r"^([A-Z][A-Za-z0-9_]*(?:Error|Exception))(?::|$)")
+    failure_header = re.compile(
+        r"^(FAIL|ERROR): (test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\)(?:\s+.*)?$"
+    )
+    safe_exception_types = {
+        "AssertionError", "AttributeError", "ImportError", "ModuleNotFoundError",
+        "NameError", "OSError", "PermissionError", "RuntimeError", "TimeoutError",
+        "TypeError", "ValueError", "KeyError", "IndexError", "LookupError",
+        "NotImplementedError", "NotADirectoryError", "IsADirectoryError",
+        "FileNotFoundError", "UnicodeError", "UnicodeDecodeError", "JSONDecodeError",
+        "MemoryError",
+    }
+    exception_line = re.compile(r"^([A-Z][A-Za-z0-9_]*)(?::|$)")
     active_failure = None
     for line in lines:
         header = failure_header.match(line)
         if header:
-            active_failure = {"test_id": f"{header.group(3)}.{header.group(2)}",
+            active_failure = {"test_id": normalized_test_id(header.group(2), header.group(3)),
                               "result": header.group(1).lower(),
                               "exception_type": None}
             exception_rows.append(active_failure)
             continue
         if active_failure is not None and active_failure["exception_type"] is None:
             exception = exception_line.match(line.strip())
-            if exception:
+            if exception and exception.group(1) in safe_exception_types:
                 active_failure["exception_type"] = exception.group(1)
     passed = total - skipped - failures - errors
     if min(total, skipped, failures, errors, passed) < 0:
@@ -197,10 +219,14 @@ def _parse_unittest_summary(stderr: str, stdout: str = "") -> dict | None:
     return {"total": total, "passed": passed, "skipped": skipped,
             "failures": failures, "errors": errors,
             "skip_test_ids": sorted(set(skip_ids)),
-            "failed_test_ids": sorted(row["test_id"] for row in result_rows
-                                       if row["result"] == "fail"),
-            "error_test_ids": sorted(row["test_id"] for row in result_rows
-                                      if row["result"] == "error"),
+            "failed_test_ids": sorted({row["test_id"] for row in result_rows
+                                        if row["result"] == "fail"}
+                                       | {row["test_id"] for row in exception_rows
+                                          if row["result"] == "fail"}),
+            "error_test_ids": sorted({row["test_id"] for row in result_rows
+                                       if row["result"] == "error"}
+                                      | {row["test_id"] for row in exception_rows
+                                         if row["result"] == "error"}),
             "failure_types": sorted(exception_rows, key=lambda row: row["test_id"])}
 
 
@@ -334,6 +360,13 @@ def _stage_test_deploy_files(source_root: Path, installed_tests: Path) -> Path:
         if source.is_symlink() or not source.is_file():
             raise AcceptanceFailure("test-deploy-file-missing")
         shutil.copy2(source, installed_deploy / name)
+    installed_docs = installed_tests / "docs"
+    installed_docs.mkdir(mode=0o700, parents=True)
+    for name in INSTALLED_TEST_DOC_FILES:
+        source = source_root / "docs" / name
+        if source.is_symlink() or not source.is_file():
+            raise AcceptanceFailure("test-deploy-file-missing")
+        shutil.copy2(source, installed_docs / name)
     return installed_deploy
 
 

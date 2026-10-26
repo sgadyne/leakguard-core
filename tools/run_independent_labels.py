@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+from importlib import resources
 import json
 import os
 from pathlib import Path
@@ -83,6 +84,19 @@ def _catalog() -> tuple[dict, bytes]:
     return data, raw
 
 
+def _rules_path() -> Path:
+    """Find rules in the checkout or in the installed core package."""
+    if RULES.is_file() and not RULES.is_symlink():
+        return RULES
+    try:
+        installed = Path(os.fspath(resources.files("leakguard_core").joinpath("rules.toml")))
+    except (ImportError, ModuleNotFoundError, OSError, TypeError, ValueError):
+        raise ValueError("rules-invalid") from None
+    if installed.is_symlink() or not installed.is_file():
+        raise ValueError("rules-invalid")
+    return installed
+
+
 def run(backend: Path, timeout: float) -> dict:
     from leakguard_core import backends
 
@@ -93,8 +107,7 @@ def run(backend: Path, timeout: float) -> dict:
     backend_stat = backend.stat()
     if not stat.S_ISREG(backend_stat.st_mode) or not os.access(backend, os.X_OK):
         raise ValueError("backend-invalid")
-    if RULES.is_symlink() or not RULES.is_file():
-        raise ValueError("rules-invalid")
+    rules_path = _rules_path()
 
     started = time.monotonic()
     case_rows = []
@@ -103,10 +116,10 @@ def run(backend: Path, timeout: float) -> dict:
     for item in catalog["cases"]:
         # Keep each label boundary isolated. Concatenating unrelated cases lets
         # a keyword in one example satisfy a context-sensitive rule in another.
-        matches = backends.detect(item["text"], binary=backend, rules=RULES, timeout=timeout)
-        rules = sorted({match.rule for match in matches})
+        matches = backends.detect(item["text"], binary=backend, rules=rules_path, timeout=timeout)
+        observed_rules = sorted({match.rule for match in matches})
         expected = item["expected"]
-        predicted_positive = bool(rules)
+        predicted_positive = bool(observed_rules)
         expected_positive = expected == "finding"
         if predicted_positive and expected_positive:
             counts["true_positive"] += 1
@@ -117,14 +130,14 @@ def run(backend: Path, timeout: float) -> dict:
         else:
             counts["true_negative"] += 1
         expected_rule = item.get("expected_rule")
-        rule_matches = (expected_rule in rules) if expected_positive else not rules
+        rule_matches = (expected_rule in observed_rules) if expected_positive else not observed_rules
         passed = rule_matches
         failed += not passed
         case_rows.append({
             "case_id": item["case_id"], "category": item["category"],
             "boundary": "isolated-input",
             "expected": expected, "actual": "finding" if predicted_positive else "none",
-            "expected_rule": expected_rule, "observed_rules": rules,
+            "expected_rule": expected_rule, "observed_rules": observed_rules,
             "status": "passed" if passed else "failed",
             "fixture_sha256": _sha(item["text"].encode("utf-8")),
         })
