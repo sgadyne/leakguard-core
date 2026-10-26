@@ -103,6 +103,7 @@ class ErrorCode(StringEnum):
     WORKER_MEMORY_LIMIT = "worker-memory-limit"
     SUPERVISED_ALPHA_POLICY = "supervised-alpha-policy"
     OBSERVATIONS_EPHEMERAL = "observations-ephemeral"
+    WORK_IDENTITY_UNAVAILABLE = "work-identity-unavailable"
     DETECTOR_FAILED = "detector-failed"
     DETECTOR_TIMEOUT = "detector-timeout"
     DETECTOR_OUTPUT_INVALID = "detector-output-invalid"
