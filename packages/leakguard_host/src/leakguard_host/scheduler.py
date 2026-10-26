@@ -257,6 +257,11 @@ class HostService:
     def remove_source(self, source_id: str) -> dict:
         def action():
             self._source(source_id)
+            # Cancel is acknowledged before the scanner has necessarily
+            # returned. Keep its source/job available to cancellation and
+            # final checkpoint callbacks until that slice releases ownership.
+            if self._current is not None and self._job(self._current)["source_id"] == source_id:
+                raise HostError("source-busy")
             if any(job["source_id"] == source_id and job["state"] in _ACTIVE for job in self._state["jobs"].values()):
                 raise HostError("source-busy")
             del self._state["sources"][source_id]

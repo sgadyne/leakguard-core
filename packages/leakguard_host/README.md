@@ -34,6 +34,10 @@ identity restarts that job's work cycle and makes prior evidence unknown until
 it is verified under the new identity. A matching identity preserves resumable
 work. This requires the matching alpha core API; an older core fails visibly
 with `work-identity-unavailable` before source scanning.
+The continuation identity excludes slice scheduling and output budgets; the
+per-report policy identity still records that report's complete configuration.
+Cancelling a job can return while its bounded slice is unwinding. Removing the
+source returns `source-busy` until that slice has released store ownership.
 
 `roots()` lists home/common folders and native mount metadata. `browse(path,
 root=selected_root, cursor=..., limit=100)` pages at most 500 rows and inspects
@@ -77,7 +81,8 @@ symlinks, duplicate/encrypted members and oversized archives, extracts into a ne
 private directory, then invokes the bundled offline installer with an explicit
 private prefix and state directory. It returns a validated install receipt with
 `runtime_python` for a subsequent `run` call. Deployment requires a POSIX remote
-host with Python3.11+ and the offline release's supported dependencies. Installation
+host with the exact Python minor declared by the offline release's
+`target_python` and its supported dependencies. Installation
 does not enable services, mounts, hooks, or credential-vault access. SSH process
 output is bounded; stderr and arbitrary command output never enter the response.
 

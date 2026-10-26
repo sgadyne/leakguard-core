@@ -296,6 +296,31 @@ class HostTests(unittest.TestCase):
         self.assertEqual(host.job(job["id"])["state"], "cancelled")
         host.stop(timeout=1)
 
+    def test_cancelled_source_cannot_be_removed_until_its_slice_returns(self):
+        entered, release = threading.Event(), threading.Event()
+        def callback(scope, kw):
+            entered.set()
+            release.wait(2)
+            self.assertTrue(kw["cancel"]())
+            return report(False, ErrorCode.CANCELLED)
+        host = self.host(callback)
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        result = []
+        thread = threading.Thread(target=lambda: result.append(host.tick()))
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            host.cancel(job["id"])
+            with self.assertRaisesRegex(HostError, "source-busy"):
+                host.remove_source(source["id"])
+        finally:
+            release.set()
+            thread.join(2)
+        self.assertEqual(result[0]["status"], "cancelled")
+        self.assertTrue(host.remove_source(source["id"])["removed"])
+        self.assertEqual(host.sources(), [])
+
     def test_service_spec_is_fixed_argv_and_preserves_metacharacters(self):
         command = ["/private/path with spaces/buddy", "serve", "--label", "a;$HOME%"]
         mac = service_spec(command, self.root, platform="darwin")
