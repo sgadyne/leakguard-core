@@ -22,6 +22,15 @@ jobs:
         if: ${{ matrix.documents }}
         run: python -m pip install -e ".[documents]"
       - run: python tools/install_gitleaks.py .tools
+      - name: Check Windows execution boundary first
+        if: ${{ runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          printf '{}\n' > "$RUNNER_TEMP/leakguard-config.json"
+          export LEAKGUARD_CONFIG="$RUNNER_TEMP/leakguard-config.json"
+          export LEAKGUARD_STATE_DIR="$RUNNER_TEMP/leakguard-preflight-state"
+          export PATH="$PWD/.tools:$PATH"
+          python -m unittest discover -s tests -p test_execution.py -v
       - name: Test with isolated runtime state
         shell: bash
         run: |

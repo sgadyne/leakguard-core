@@ -157,7 +157,7 @@ def _bounded_file(path, maximum, *, boundary=None):
                 raise AcquisitionError('input-limit')
             data = stream.read(maximum + 1)
             after = os.fstat(stream.fileno())
-        observed = os.stat(path, follow_symlinks=False)
+        observed = _path_stat(path)
         if boundary is not None:
             boundary.check(path)
         if len(data) > maximum:
@@ -175,6 +175,32 @@ def _bounded_file(path, maximum, *, boundary=None):
 
 def _signature(value):
     return value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
+def _path_stat(path, *, follow_symlinks=False):
+    """Measure regular file change time through the same API as open readers.
+
+    On current Windows Python, path stat's ctime is birth time while fstat's
+    ctime can be change time (CPython #157671). Reopen only for metadata, retain
+    the descriptor change time, and bind it to no-follow path identity on both
+    sides. Do not discard ctime from the read/change validation contract.
+    """
+    named = os.stat(path, follow_symlinks=follow_symlinks)
+    if os.name != 'nt' or not stat.S_ISREG(named.st_mode):
+        return named
+    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NONBLOCK', 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        observed = os.stat(path, follow_symlinks=follow_symlinks)
+        def identity(value):
+            return (value.st_dev, value.st_ino, value.st_mode, value.st_size,
+                    value.st_mtime_ns, getattr(value, 'st_birthtime_ns', None))
+        if any(identity(value) != identity(opened) for value in (named, observed)):
+            raise AcquisitionError('input-changed')
+        return opened
+    finally:
+        os.close(descriptor)
 
 
 def _reference_names(data):
