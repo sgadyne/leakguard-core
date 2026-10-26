@@ -26,13 +26,19 @@ python -m build --wheel --outdir artifacts/wheelhouse plugins/sensitive_basics
 python -m build --wheel --outdir artifacts/wheelhouse templates/firm_plugin
 python -m pip download --only-binary=:all: --dest artifacts/wheelhouse \
   pip==26.2.2 cryptography==50.0.2 keyring==25.7.0 psutil==7.2.2 \
-  'packaging>=24,<27'
+  pypdf==6.21.2 olefile==0.47 'packaging>=24,<27'
 python -m pip download --only-binary=:all: --no-index \
   --find-links artifacts/wheelhouse --dest artifacts/wheelhouse \
-  leakguard-core==0.2.0 leakguard-host==0.2.0 leakguard-vault==0.1.0 \
+  'leakguard-core[documents]==0.2.0' leakguard-host==0.2.0 leakguard-vault==0.1.0 \
   leakguard-buddy==0.1.0a1 leakguard-sensitive-basics==0.1.0 \
   leakguard-firm-example==0.1.0
 ```
+
+The complete Buddy bundle pins the optional document parsers separately from
+the core package: `pypdf==6.21.2` and `olefile==0.47`. This keeps the documents
+extra optional for standalone core installs while preserving PDF and Outlook
+MSG extraction in the offline alpha runtime. The builder records each parser
+wheel's SHA-256 and the installer doctor checks both installed versions.
 
 The two plugin wheels are included as reviewed code but remain disabled until
 the user explicitly installs or enables a profile. Keep plugin artifacts in

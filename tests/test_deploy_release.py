@@ -107,5 +107,18 @@ class SupportManifestTests(unittest.TestCase):
             installer.read_manifest(path)
 
 
+class CompleteBundleDocumentsTests(unittest.TestCase):
+    def test_release_pins_optional_document_parsers_and_build_recipe(self):
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root / "deploy" / "release-manifest.json").read_text(encoding="utf-8"))
+        pins = {name.lower().replace("_", "-"): version
+                for name, version in manifest["pinned_distributions"].items()}
+        self.assertEqual(pins["pypdf"], "6.21.2")
+        self.assertEqual(pins["olefile"], "0.47")
+        recipe = (root / "docs" / "INSTALL.md").read_text(encoding="utf-8")
+        self.assertIn("pypdf==6.21.2 olefile==0.47", recipe)
+        self.assertIn("'leakguard-core[documents]==0.2.0'", recipe)
+
+
 if __name__ == "__main__":
     unittest.main()
