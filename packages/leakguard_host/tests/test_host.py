@@ -93,6 +93,15 @@ class HostTests(unittest.TestCase):
         with self.assertRaisesRegex(HostError, "outside-root"):
             browse(self.root.parent, root=self.root)
 
+    def test_common_location_can_be_added_using_its_root_kind(self):
+        from leakguard_host import roots
+        (self.root / "Documents").mkdir()
+        with patch("leakguard_host.navigation.Path.home", return_value=self.root), patch("leakguard_host.navigation._mounts", return_value=[]):
+            locations = roots()
+        self.assertTrue(all(item["kind"] == "local" for item in locations))
+        source = self.host().add_source(locations[1]["path"], kind=locations[1]["kind"])
+        self.assertEqual(source["kind"], "local")
+
     def test_one_active_job_pause_restart_resume_and_durable_success(self):
         host = self.host()
         source = host.add_source(self.root)

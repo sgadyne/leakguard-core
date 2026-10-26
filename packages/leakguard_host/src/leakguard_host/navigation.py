@@ -141,7 +141,8 @@ def roots(*, supplied_unc: tuple[str, ...] = ()) -> list[dict]:
         status = "unverified" if kind == "mounted" or kind == "unc" and os.name == "nt" else "available"
         if kind == "unc" and os.name != "nt":
             status = "platform-unavailable"
-        rows.append({"name": label, "path": value, "kind": kind, "status": status, "selectable": status != "platform-unavailable"})
+        rows.append({"name": label, "path": value, "kind": "local" if kind in {"home", "common"} else kind,
+                     "location_kind": kind, "status": status, "selectable": status != "platform-unavailable"})
     return rows
 
 
