@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -411,7 +412,23 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual(registry.apply({}, 'credentials')['script_checks'], [])
             registry.disable('firm-check')
             self.assertEqual(registry.apply({}, 'firm')['script_checks'], [])
-            self.assertEqual(registry.path.stat().st_mode & 0o777, 0o600)
+            if os.name == 'nt':
+                # POSIX mode bits do not describe Windows confidentiality.
+                # Check this private fixture's inherited DACL instead.
+                script = '''
+$ErrorActionPreference = 'Stop'
+$allowed = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+$bad = @((Get-Acl -LiteralPath $env:LEAKGUARD_TEST_REGISTRY).Access | Where-Object {
+    $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed
+})
+if ($bad.Count -ne 0) { exit 1 }
+'''
+                checked = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+                                         text=True, capture_output=True, timeout=15,
+                                         env=dict(os.environ, LEAKGUARD_TEST_REGISTRY=str(registry.path)))
+                self.assertEqual(checked.returncode, 0, 'registry fixture grants access beyond its owner, SYSTEM and administrators')
+            else:
+                self.assertEqual(registry.path.stat().st_mode & 0o777, 0o600)
             registry.path.unlink()
             with self.assertRaises(ExtensionError):
                 registry.apply({}, 'firm')

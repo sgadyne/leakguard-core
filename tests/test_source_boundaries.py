@@ -12,6 +12,14 @@ from leakguard_core.sources import AcquisitionError, FilesystemBoundary, acquire
 
 
 class RegularAcquisitionTests(unittest.TestCase):
+    def test_executable_suffix_has_a_verifiable_content_identity(self):
+        import hashlib
+        from leakguard_core import scan_policy
+        with tempfile.TemporaryDirectory(prefix='leakguard-executable-metadata-') as temporary:
+            path = Path(temporary) / 'synthetic.exe'
+            path.write_bytes(b'synthetic executable bytes')
+            self.assertEqual(scan_policy._file_identity(path), hashlib.sha256(path.read_bytes()).hexdigest())
+
     def test_windows_path_birthtime_and_descriptor_changetime_are_not_confused(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-stat-domain-') as temporary:
             path = Path(temporary) / 'synthetic.txt'

@@ -1,5 +1,6 @@
 """Private L1 correctness: no secret payloads, stale publication or shared cancellation."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -126,7 +127,10 @@ class NativeCacheIntegrationTests(unittest.TestCase):
                 detect()
                 self.assertEqual(worker.call_count, 6)
                 binary.chmod(0o600)
-                detect()
+                # Windows has ACL-based execute access; chmod cannot remove an
+                # execute bit. Exercise a denied access probe explicitly there.
+                with patch.object(backends.os, 'access', return_value=False) if os.name == 'nt' else nullcontext():
+                    detect()
                 self.assertEqual(worker.call_count, 7)
             OBSERVATIONS.close_scope(scope)
 

@@ -194,7 +194,9 @@ def _path_stat(path, *, follow_symlinks=False):
         opened = os.fstat(descriptor)
         observed = os.stat(path, follow_symlinks=follow_symlinks)
         def identity(value):
-            return (value.st_dev, value.st_ino, value.st_mode, value.st_size,
+            # Windows path stat invents execute bits from .exe/.bat/.cmd/.com
+            # suffixes; fstat has no filename. Read/write/type bits still bind.
+            return (value.st_dev, value.st_ino, value.st_mode & ~0o111, value.st_size,
                     value.st_mtime_ns, getattr(value, 'st_birthtime_ns', None))
         if any(identity(value) != identity(opened) for value in (named, observed)):
             raise AcquisitionError('input-changed')

@@ -1008,7 +1008,7 @@ class PublicApiTests(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(repo)
-                self.assertEqual(manage._repository_argument(None), str(repo.resolve()))
+                self.assertEqual(Path(manage._repository_argument(None)), repo.resolve())
             finally:
                 os.chdir(previous)
 
