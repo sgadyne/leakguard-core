@@ -745,7 +745,17 @@
       else if (action === "plugin-enable" || action === "plugin-disable") {
         await request(`/api/plugins/${action === "plugin-enable" ? "enable" : "disable"}`, "POST", { id, profile: byId("plugin-profile").value || "firm" }); await loadPlugins();
       }
-      else if (action === "plugin-conformance") { const result = await request("/api/plugins/conformance", "POST", { id }); notify(`Conformance: ${result.passed_cases || 0}/${result.total_cases || 0} cases passed${result.passed ? "." : "; review the conformance result."}`); }
+      else if (action === "plugin-conformance") {
+        const result = await request("/api/plugins/conformance", "POST", { id });
+        const conformance = result?.conformance || {};
+        const passed = conformance.passed_cases;
+        const total = conformance.total_cases;
+        if (!Number.isSafeInteger(passed) || !Number.isSafeInteger(total) || passed < 0 || total < 1 || passed > total) {
+          notify("Conformance check returned no valid case counts.", true);
+        } else {
+          notify(`Conformance: ${passed}/${total} cases passed${result.passed ? "." : "; review the conformance result."}`);
+        }
+      }
       else if (action === "git-hooks-install") {
         const repository = byId("git-repository").value.trim();
         if (!repository) throw new Error("Enter a repository folder first.");
