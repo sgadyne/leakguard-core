@@ -793,6 +793,11 @@ class SQLiteScanStore:
         try:
             if not hasattr(conn, 'serialize') or not hasattr(conn, 'deserialize'):
                 raise StateError('state-serialization-unavailable')
+            options = {row[0] for row in conn.execute('PRAGMA compile_options')}
+            if 'TEMP_STORE=0' in options:
+                # This build forces transient tables/indices onto disk even
+                # when temp_store=MEMORY is requested. Reject, never downgrade.
+                raise StateError('state-memory-storage-unavailable')
             if serialized is not None:
                 conn.deserialize(serialized)
                 if conn.execute('PRAGMA user_version').fetchone()[0] != 2:
@@ -800,6 +805,8 @@ class SQLiteScanStore:
             conn.execute('PRAGMA temp_store=MEMORY')
             conn.execute('PRAGMA journal_mode=MEMORY')
             conn.execute('PRAGMA trusted_schema=OFF')
+            if conn.execute('PRAGMA temp_store').fetchone()[0] != 2 or conn.execute('PRAGMA journal_mode').fetchone()[0] != 'memory':
+                raise StateError('state-memory-storage-unavailable')
             page_size = conn.execute('PRAGMA page_size').fetchone()[0]
             conn.execute('PRAGMA max_page_count=' + str(max_bytes // page_size))
             conn.executescript(_SCHEMA)
