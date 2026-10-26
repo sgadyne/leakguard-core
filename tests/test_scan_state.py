@@ -282,6 +282,7 @@ class QueueTests(unittest.TestCase):
                 corpus = root / 'corpus'; corpus.mkdir()
                 (corpus / 'one.txt').write_text('one')
                 (corpus / 'two.txt').write_text('two')
+                (corpus / 'three.txt').write_text('three')
                 config = {'audit_scopes': {'synthetic': str(corpus)}, 'gitleaks_executable': str(engine.EXE)}
                 store = store_type(root / 'store', config=config) if store_type is SQLiteScanStore else store_type(config=config)
                 service = engine.ScanService(config, state_dir=root / 'forbidden-mirror', store=store)
@@ -290,13 +291,20 @@ class QueueTests(unittest.TestCase):
                         partial_dir = service.audit('synthetic', limits=m.ScanLimits(30, 10, max_directory_entries=1))
                         self.assertEqual(partial_dir.decision.verdict, m.DecisionVerdict.INCOMPLETE)
                         self.assertGreater(partial_dir.coverage.pending_directories, 0)
+                        # Fair scheduling drains the first admitted file even
+                        # when directory enumeration needs another slice.
+                        self.assertEqual(len(partial_dir.results), 1)
                         partial_files = service.audit('synthetic', limits=m.ScanLimits(30, 1))
                         self.assertEqual(partial_files.decision.verdict, m.DecisionVerdict.INCOMPLETE)
+                        self.assertEqual(len(partial_files.results), 1)
                         final = service.audit('synthetic', limits=m.ScanLimits(30, 10))
                     self.assertTrue(final.coverage.enumeration_complete)
                     self.assertEqual(final.coverage.pending_files, 0)
                     self.assertEqual(final.coverage.pending_directories, 0)
                     self.assertEqual(final.decision.verdict, m.DecisionVerdict.ALLOW)
+                    scanned = [result.source.path for report in (partial_dir, partial_files, final) for result in report.results]
+                    self.assertEqual(len(scanned), 3)
+                    self.assertEqual(set(scanned), {str(path) for path in corpus.iterdir()})
                     self.assertFalse((root / 'forbidden-mirror').exists())
                 finally:
                     service.close(); store.close()
@@ -1144,6 +1152,8 @@ class DirectoryMutationTests(unittest.TestCase):
 
 class DirectoryValidationPagingTests(unittest.TestCase):
     def test_validation_pages_resume_across_sqlite_restart_and_memory_leases(self):
+        import hashlib
+        import json
         from leakguard_core import models as m, scan_policy
         from leakguard_core.sources import directory_signature
         from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
@@ -1156,7 +1166,18 @@ class DirectoryValidationPagingTests(unittest.TestCase):
                     path = corpus / str(index); path.mkdir(); paths.append(path)
                 state = root / 'state'
                 store = store_type(state) if store_type is SQLiteScanStore else store_type()
+                config = {'gitleaks_executable': str(engine.EXE), 'audit_scopes': {'synthetic': str(corpus)}}
+                limits = m.ScanLimits(30, 1, max_directory_entries=1)
+                prepared = engine.ScanService(config, store=store)
+                try:
+                    identity = prepared.work_identity(policy=m.ScanPolicy.inventory(), limits=limits)
+                finally:
+                    prepared.close()
                 lease = store.acquire_cycle('audit:synthetic', None, lease_seconds=60)
+                # Seed completed directories under the same durable semantic
+                # fence as real engine work; missing identity must restart.
+                digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                store.bind_cycle_identity(lease, digest, root=corpus)
                 store.enqueue_work(lease, tuple((str(path), 'directory', 0) for path in paths))
                 for _ in paths:
                     claim = store.claim_work(lease)
@@ -1167,10 +1188,11 @@ class DirectoryValidationPagingTests(unittest.TestCase):
                     for _ in paths:
                         if store_type is SQLiteScanStore:
                             store.close(); store = store_type(state)
-                        service = engine.ScanService({'gitleaks_executable': str(engine.EXE), 'audit_scopes': {'synthetic': str(corpus)}}, store=store)
+                        service = engine.ScanService(config, store=store)
                         try:
+                            self.assertEqual(service.work_identity(policy=m.ScanPolicy.inventory(), limits=limits), identity)
                             with patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)):
-                                report = service.audit('synthetic', limits=m.ScanLimits(30, 1, max_directory_entries=1))
+                                report = service.audit('synthetic', limits=limits)
                             counts.append(report.coverage.pending_directories)
                         finally:
                             service.close()
