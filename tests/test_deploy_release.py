@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from deploy import installer
+from deploy import build_bundle, installer
 
 
 class MacWorkerPolicyConfigTests(unittest.TestCase):
@@ -118,6 +118,9 @@ class CompleteBundleDocumentsTests(unittest.TestCase):
         recipe = (root / "docs" / "INSTALL.md").read_text(encoding="utf-8")
         self.assertIn("pypdf==6.21.2 olefile==0.47", recipe)
         self.assertIn("'leakguard-core[documents]==0.2.0'", recipe)
+
+    def test_alpha_audit_continuation_guide_is_explicit_hashed_support(self):
+        self.assertIn("docs/audit-continuation.md", build_bundle.SUPPORT_FILES)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SUPPORT_FILES = (
     "docs/INSTALL.md",
     "docs/ALPHA.md",
+    "docs/audit-continuation.md",
     "docs/alpha-worker-policy.md",
     "docs/firm-plugin-setup.md",
     "examples/script_checks/README.md",
