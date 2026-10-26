@@ -1,5 +1,6 @@
 """Compact regressions for boundaries the host adapter adds to core scanning."""
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import hashlib
@@ -29,6 +30,10 @@ class SessionStore(MemoryScanStore):
         self.host_state = {}
         self.checkpoints = 0
         self.fail = False
+        self.reset_calls = []
+
+    def reset_cycle(self, scope):
+        self.reset_calls.append(scope)
 
     def load_host_state(self):
         return deepcopy(self.host_state)
@@ -60,6 +65,9 @@ class StubScanner:
 
     def audit(self, scope, **kwargs):
         return self.callback(scope, kwargs)
+
+    def work_identity(self, **kwargs):
+        return {"policy_id": "synthetic-policy", "runtime_id": "synthetic-runtime"}
 
 
 class HostTests(unittest.TestCase):
@@ -127,6 +135,16 @@ class HostTests(unittest.TestCase):
         self.assertEqual(state["pending_files"], 3)
         self.assertIsNone(host.sources()[0]["last_success_at"])
 
+    def test_nonrequired_omission_does_not_fail_a_partial_slice(self):
+        partial = report(False)
+        partial = replace(partial, coverage=replace(partial.coverage, omission_count=1),
+            issues=partial.issues + (CoverageIssue(ErrorCode.POLICY_OMISSION, required=False, omission_id="operator-exclusion"),))
+        host = self.host(lambda scope, kw: partial)
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        self.assertEqual(host.tick()["status"], "queued")
+        self.assertIsNone(host.job(job["id"])["last_error"])
+
     def test_repeated_budget_without_progress_pauses_incomplete(self):
         host = self.host(lambda scope, kw: report(False))
         source = host.add_source(self.root)
@@ -138,6 +156,40 @@ class HostTests(unittest.TestCase):
         self.assertEqual(state["last_error"], "scan-progress-stalled")
         self.assertEqual(state["coverage"], "incomplete")
         self.assertIsNone(host.sources()[0]["last_success_at"])
+
+    def test_partial_work_is_reset_before_a_changed_policy_can_complete(self):
+        identity = {"policy_id": "first-policy", "runtime_id": "first-runtime"}
+        complete = False
+        def factory(**kwargs):
+            scanner = StubScanner(lambda scope, kw: report(complete))
+            scanner.work_identity = lambda **kw: dict(identity)
+            return scanner
+        host = HostService(config=ScanConfig.from_mapping({}), scan_store=self.store,
+            scanner_factory=factory, clock=lambda: self.now)
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        host.tick()
+        resets = len(self.store.reset_calls)
+        identity["runtime_id"] = "changed-plugin-runtime"
+        complete = True
+        self.assertEqual(host.tick()["status"], "completed")
+        self.assertEqual(len(self.store.reset_calls), resets + 1)
+        self.assertEqual(host.job(job["id"])["policy_resets"], 1)
+        self.assertEqual(host.job(job["id"])["work_identity"], identity)
+
+    def test_missing_identity_contract_fails_without_scanning(self):
+        scanned = []
+        def factory(**kwargs):
+            scanner = StubScanner(lambda scope, kw: scanned.append(True))
+            scanner.work_identity = None
+            return scanner
+        host = HostService(config=ScanConfig.from_mapping({}), scan_store=self.store, scanner_factory=factory)
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        result = host.tick()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(host.job(job["id"])["last_error"], "work-identity-unavailable")
+        self.assertEqual(scanned, [])
 
     def test_offline_backoff_then_reconnect(self):
         remote = self.root / "share"

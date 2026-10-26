@@ -14,7 +14,7 @@ from typing import Callable, Protocol
 import uuid
 
 from leakguard_core.api import ScanConfig, Scanner
-from leakguard_core.models import ScanLimits
+from leakguard_core.models import ScanLimits, ScanPolicy
 
 from .errors import HostError
 from . import navigation
@@ -315,6 +315,7 @@ class HostService:
         job = {"id": uuid.uuid4().hex, "source_id": source_id, "state": "queued", "created_at": now,
                "updated_at": now, "next_retry_at": None, "attempts": 0, "slices": 0, "files_scanned": 0,
                "stalled_slices": 0,
+               "work_identity": None, "policy_resets": 0,
                "pending_files": None, "pending_directories": None, "coverage": "incomplete", "last_error": None, "report_id": None}
         self._state["jobs"][job["id"]] = job
         return job
@@ -374,6 +375,32 @@ class HostService:
             return "offline"
         return "available"
 
+    def _fence_work(self, job_id, source, scope, scanner) -> bool:
+        method = getattr(scanner, "work_identity", None)
+        if not callable(method):
+            raise HostError("work-identity-unavailable")
+        identity = method(policy=ScanPolicy.inventory(), limits=self._limits)
+        if type(identity) is not dict or set(identity) != {"policy_id", "runtime_id"} or any(type(value) is not str or not 1 <= len(value) <= 256 for value in identity.values()):
+            raise HostError("work-identity-invalid")
+        with self._lock:
+            if self._cancelled(job_id):
+                return False
+            job = self._job(job_id)
+            if job.get("work_identity") != identity:
+                reset = getattr(self._store, "reset_cycle", None)
+                if not callable(reset):
+                    raise HostError("state-reset-unavailable")
+                try:
+                    reset("audit:" + scope)
+                    if job.get("work_identity") is not None or job["slices"]:
+                        self._store.invalidate_scope(source["root"], reason="source-unavailable")
+                        job["policy_resets"] = job.get("policy_resets", 0) + 1
+                except Exception as error:
+                    raise HostError("state-cycle-busy" if getattr(error, "code", None) == "state-cycle-busy" else "state-reset-failed") from None
+                job.update(work_identity=dict(identity), files_scanned=0, pending_files=None,
+                           pending_directories=None, stalled_slices=0, coverage="incomplete", report_id=None)
+            return True
+
     def tick(self) -> dict:
         """Run at most one bounded slice; concurrent callers never duplicate work."""
         if not self._slice_lock.acquire(blocking=False):
@@ -426,7 +453,10 @@ class HostService:
                 try:
                     config = ScanConfig.from_mapping(values)
                     with self._scanner_factory(config=config, store=slice_store) as scanner:
-                        report = scanner.audit(scope, limits=self._limits, use_cache=True, cancel=lambda: self._cancelled(job_id))
+                        if self._fence_work(job_id, source, scope, scanner):
+                            report = scanner.audit(scope, limits=self._limits, use_cache=True, cancel=lambda: self._cancelled(job_id))
+                except HostError as error:
+                    failure = error.code
                 except Exception:
                     failure = "scan-failed"
             with self._lock:
@@ -447,12 +477,15 @@ class HostService:
                         job.update(state="paused", last_error="service-stopped")
                         return job
                     if failure is not None:
-                        self._backoff(job, failure)
+                        if failure in {"work-identity-unavailable", "work-identity-invalid", "state-reset-unavailable"}:
+                            job.update(state="failed", last_error=failure, coverage="incomplete")
+                        else:
+                            self._backoff(job, failure)
                     elif report.coverage.enumeration_complete and report.coverage.required_complete:
                         job.update(state="completed", coverage="complete", attempts=0, last_error=None)
                         source_now["last_success_at"] = job["updated_at"]
                     else:
-                        codes = {issue.code.value for issue in report.issues}
+                        codes = {issue.code.value for issue in report.issues if issue.required}
                         codes.update(issue.code.value for result in report.results for issue in result.issues if issue.required)
                         if codes & {"source-unavailable", "enumeration-failed", "input-unreadable", "state-failed"}:
                             self._backoff(job, "source-unavailable")

@@ -28,6 +28,13 @@ enumeration and durable cursor advancement count as progress even when a slice
 contains no scanned files. Unexpected worker failures are visible in status and
 pause admitted work before shutdown.
 
+Each job persists the core's public `Scanner.work_identity(policy=...,limits=...)`
+before acknowledging a slice. A changed policy, plugin registry, or runtime
+identity restarts that job's work cycle and makes prior evidence unknown until
+it is verified under the new identity. A matching identity preserves resumable
+work. This requires the matching alpha core API; an older core fails visibly
+with `work-identity-unavailable` before source scanning.
+
 `roots()` lists home/common folders and native mount metadata. `browse(path,
 root=selected_root, cursor=..., limit=100)` pages at most 500 rows and inspects
 at most 20,000 entries per request. A changed directory invalidates its cursor.
