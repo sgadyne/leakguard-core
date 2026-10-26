@@ -100,6 +100,11 @@ not establish behavior on an external host or a real SMB/NFS share.
 `Scanner.open(config=..., store=...)` accepts an injected ScanStore as its sole
 observation sink; the caller owns an injected store's checkpoint/close lifecycle.
 `Scanner.capabilities()` probes the selected worker primitive.
+`Scanner.work_identity(policy=..., limits=...)` identifies resumable work using
+the effective configuration and runtime. Its policy digest excludes slice-only
+budgets and worker count, so it differs from the full per-report `policy_id`.
+Changes to detection, acquisition, extraction, or worker policy restart persisted
+work conservatively rather than combining results from different policies.
 `parse_report(str_or_bytes)` validates the strict value-free report wire schema,
 including counts and coverage, and rejects unknown fields and duplicate keys.
 
