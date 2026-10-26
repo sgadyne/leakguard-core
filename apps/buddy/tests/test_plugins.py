@@ -52,5 +52,29 @@ class ObservationStatusTests(unittest.TestCase):
         self.assertEqual(status["capacity_bytes"], 64 * 1024 * 1024)
 
 
+class CredentialUpdateTests(unittest.TestCase):
+    def test_combined_edit_uses_one_atomic_vault_operation(self):
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            def update_entry(self, entry_id, **fields):
+                self.calls.append((entry_id, fields))
+                return {"id": entry_id, "title": fields["title"]}
+
+            def update_secret(self, *args, **kwargs):
+                raise AssertionError("legacy two-write path must not run")
+
+            def update_metadata(self, *args, **kwargs):
+                raise AssertionError("legacy two-write path must not run")
+
+        session = Session()
+        backend = object.__new__(BuddyBackend)
+        backend._credential_session = session
+        result = backend.credential_update("entry_1", {"title": "Updated", "secret": "new-secret", "finding_id": None})
+        self.assertEqual(result, {"id": "entry_1", "title": "Updated"})
+        self.assertEqual(session.calls, [("entry_1", {"title": "Updated", "secret": "new-secret", "finding_id": None})])
+
+
 if __name__ == "__main__":
     unittest.main()

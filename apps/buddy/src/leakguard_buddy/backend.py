@@ -501,10 +501,8 @@ class BuddyBackend:
 
     def credential_update(self, entry_id: str, payload: dict[str, Any]):
         session = self._require_credential_session()
-        if "secret" in payload:
-            session.update_secret(entry_id, payload["secret"])
-        fields = {key: payload[key] for key in ("title", "username", "location", "notes", "finding_id") if key in payload}
-        return session.update_metadata(entry_id, **fields)
+        fields = {key: payload[key] for key in ("title", "secret", "username", "location", "notes", "finding_id") if key in payload}
+        return session.update_entry(entry_id, **fields)
 
     def credential_reveal(self, entry_id: str):
         return self._require_credential_session().reveal_entry(entry_id)
