@@ -63,7 +63,15 @@ def ordered_work(inputs, *, prepare, execute, workers, max_items, stop):
                     terminal = error
             if pending:
                 value = pending.popleft()
-                yield value.result() if pool else value
+                completed = value.result() if pool else value
+                value = None
+                try:
+                    yield completed
+                finally:
+                    # Release the delivered future/result before preparing the
+                    # next input; a completed Future otherwise retains raw bytes
+                    # while the next full window is being admitted.
+                    completed = None
             elif terminal is not None:
                 raise terminal
             else:
