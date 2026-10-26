@@ -97,6 +97,70 @@ class CycleDecisionTests(unittest.TestCase):
                 self.assertIsNone(stale['resolved_at'])
                 service.close(); store.close()
 
+    def test_current_excluded_file_and_directory_are_durable_omissions(self):
+        for kind in ('memory', 'sqlite'):
+            with self.subTest(store=kind), tempfile.TemporaryDirectory(prefix='leakguard-cycle-') as folder:
+                base = Path(folder); root = base / 'source'; root.mkdir()
+                excluded_file = root / 'excluded.txt'; excluded_file.write_text('SyntheticNeverReadExcluded42')
+                excluded_dir = root / 'private'; excluded_dir.mkdir()
+                (excluded_dir / 'nested.txt').write_text('SyntheticNeverReadExcluded42')
+                config = {'audit_scopes': {'synthetic': str(root)},
+                          'exclude_roots': [str(excluded_file), str(excluded_dir)]}
+                store = MemoryScanStore() if kind == 'memory' else SQLiteScanStore(base / 'state')
+                service = engine.ScanService(config, store=store)
+                from leakguard_core.sources import scoped_scandir
+                def guarded(path, boundary=None):
+                    self.assertNotEqual(Path(path), excluded_dir)
+                    return scoped_scandir(path, boundary)
+                with patch.object(backends, 'detect', return_value=()) as detect, patch('leakguard_core.sources.scoped_scandir', side_effect=guarded):
+                    report = service.audit('synthetic', limits=m.ScanLimits(5, 10))
+                self.assertTrue(report.coverage.required_complete)
+                self.assertEqual(report.results, ())
+                self.assertEqual(report.coverage.omission_count, 2)
+                self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW_WITH_OMISSIONS)
+                self.assertTrue(any(i.code is m.ErrorCode.AUDIT_CYCLE_EVIDENCE for i in report.issues))
+                detect.assert_not_called()
+                service.close(); store.close()
+
+    def test_prior_exclusion_survives_reopen_and_is_removed_by_policy_reset(self):
+        for kind in ('memory', 'sqlite'):
+            with self.subTest(store=kind), tempfile.TemporaryDirectory(prefix='leakguard-cycle-') as folder:
+                base = Path(folder); root = base / 'source'; root.mkdir()
+                excluded = root / 'excluded.txt'; excluded.write_text('SyntheticNeverReadExcluded42')
+                for name in ('a.txt', 'b.txt'):
+                    (root / name).write_text('clean fixture')
+                config = {'audit_scopes': {'synthetic': str(root)}, 'exclude_roots': [str(excluded)]}
+                store = MemoryScanStore() if kind == 'memory' else SQLiteScanStore(base / 'state')
+                service = engine.ScanService(config, store=store)
+                with patch.object(backends, 'detect', return_value=()):
+                    first = service.audit('synthetic', limits=m.ScanLimits(5, 1, max_directory_entries=1))
+                self.assertEqual(first.coverage.omission_count, 1)
+                self.assertFalse(first.coverage.required_complete)
+                service.close()
+                if kind == 'sqlite':
+                    store.close(); store = SQLiteScanStore(base / 'state')
+                service = engine.ScanService(config, store=store)
+                seen = []
+                with patch.object(backends, 'detect', return_value=()):
+                    for _ in range(5):
+                        report = service.audit('synthetic', limits=m.ScanLimits(5, 1, max_directory_entries=2))
+                        seen.extend(result.source.path for result in report.results)
+                        if report.coverage.required_complete:
+                            break
+                self.assertTrue(report.coverage.required_complete)
+                self.assertEqual(report.coverage.omission_count, 0)
+                self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW_WITH_OMISSIONS)
+                self.assertNotIn(str(excluded), seen)
+                self.assertTrue(any(i.code is m.ErrorCode.AUDIT_CYCLE_EVIDENCE for i in report.issues))
+                service.close()
+                service = engine.ScanService({**config, 'exclude_roots': []}, store=store)
+                with patch.object(backends, 'detect', return_value=()):
+                    reset = service.audit('synthetic', limits=m.ScanLimits(5, 10))
+                self.assertTrue(reset.coverage.required_complete)
+                self.assertEqual(reset.decision.verdict, m.DecisionVerdict.ALLOW)
+                self.assertEqual({result.source.path for result in reset.results}, {str(path) for path in root.iterdir()})
+                service.close(); store.close()
+
     def test_prior_required_failure_cannot_complete_after_later_clean_file(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-cycle-') as folder:
             root, config, store = self.make(Path(folder))

@@ -850,9 +850,13 @@ class ScanService:
                                 kind = 'directory' if entry.is_dir(follow_symlinks=False) else 'file'
                                 prefix.update(json.dumps([entry.name, kind], ensure_ascii=True, separators=(',', ':')).encode() + b'\n')
                                 if self._excluded(child):
-                                    issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, m.SourceRef(m.SourceKind.FILESYSTEM, str(child)), omission_id='operator-exclusion'))
-                                    continue
-                                entries_batch.append((str(child.absolute()), kind, 100 if kind == 'file' else 101))
+                                    # A synthetic directory row records an
+                                    # exclusion durably, including excluded
+                                    # files. Its claim is finished as omitted
+                                    # above, without acquiring or enumerating it.
+                                    entries_batch.append((str(child.absolute()), 'directory', 101))
+                                else:
+                                    entries_batch.append((str(child.absolute()), kind, 100 if kind == 'file' else 101))
                                 if len(entries_batch) >= 256:
                                     self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'directory'))
                                     self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'file'), refresh=True)
@@ -1230,7 +1234,8 @@ class ScanService:
             if not any(issue.code is m.ErrorCode.SOURCE_UNAVAILABLE and issue.required for issue in run_issues):
                 run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
         cycle_evidence = metadata.get('cycle_evidence')
-        if cycle_evidence is not None and cycle_evidence['files'] > len({result.source.path for result in results}):
+        if cycle_evidence is not None and (cycle_evidence['files'] > len({result.source.path for result in results})
+                                           or cycle_evidence['has_omissions']):
             run_issues.append(m.CoverageIssue(m.ErrorCode.AUDIT_CYCLE_EVIDENCE))
         enumeration_complete = enumeration_complete and not run_issues.truncated
         coverage, decision = scan_policy.evaluate(tuple(results), policy=policy, policy_id=policy_id, enumeration_complete=enumeration_complete, issues=tuple(run_issues), pending_files=metadata.get('pending_files'), pending_directories=metadata.get('pending_directories'), cycle_id=metadata.get('cycle_id'))
@@ -1239,7 +1244,7 @@ class ScanService:
             # counts and typed omission_count remain scoped to this report slice.
             blocking = {severity.value for severity in policy.block_severities}
             verdict = (m.DecisionVerdict.BLOCK if blocking.intersection(cycle_evidence['severities'])
-                       else m.DecisionVerdict.ALLOW_WITH_OMISSIONS if cycle_evidence['has_omissions']
+                       else m.DecisionVerdict.ALLOW_WITH_OMISSIONS if cycle_evidence['has_omissions'] or decision.verdict is m.DecisionVerdict.ALLOW_WITH_OMISSIONS
                        else m.DecisionVerdict.ALLOW)
             decision = m.PolicyDecision(verdict, (), policy_id)
         report = m.ScanReport(1, uuid.uuid4().hex, started, dt.datetime.now(dt.timezone.utc), policy_id, tuple(results), coverage, decision, tuple(run_issues))

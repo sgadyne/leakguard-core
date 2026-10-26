@@ -23,3 +23,13 @@ observations unknown and requeues the root. A reference failure or change during
 a slice leaves coverage incomplete, including a slice with no file results.
 The store's persistent material key makes this identity stable across process
 restarts. This adds no report schema, storage schema or runtime provenance change.
+
+Report results, finding counts and `coverage.omission_count` describe the current
+slice. A completed audit's verdict uses accepted evidence from its exact cycle:
+earlier blocking findings retain `BLOCK`, and earlier file omissions or operator
+exclusions retain `ALLOW_WITH_OMISSIONS`. Exclusions use durable omitted queue
+markers and never authorize reading an excluded path. `audit-cycle-evidence`
+explains when the completed decision includes aggregate evidence; the text
+renderer labels counts as belonging to this slice. CLI `--fail-on block` exits
+1 for a completed blocking cycle even when this slice has zero blocking findings;
+incomplete coverage continues to exit 2.

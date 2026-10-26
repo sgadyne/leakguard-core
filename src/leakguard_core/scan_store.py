@@ -446,14 +446,19 @@ class MemoryScanStore:
 
     @_synchronized
     def cycle_decision_evidence(self, lease):
-        """Summarize this completed cycle's accepted results, not global history."""
+        """Summarize accepted results and exclusion markers in this exact cycle."""
         if not self.lease_valid(lease) or not self.cycle_status(lease)['complete']:
             raise StateError()
         severities = set()
         omissions = False
         files = 0
         for key, row in self.work.items():
-            if key[:2] != (lease.scope, lease.generation) or key[3] != 'file':
+            if key[:2] != (lease.scope, lease.generation):
+                continue
+            if key[3] == 'directory':
+                omissions |= row['done'] and row.get('directory_signature') == 'omitted'
+                continue
+            if key[3] != 'file':
                 continue
             result = self.results.get(row.get('result_scan_id'))
             if (not row['done'] or result is None or result.source.path != key[2]
@@ -1275,7 +1280,7 @@ class SQLiteScanStore:
 
     @_bounded_sql
     def cycle_decision_evidence(self, lease):
-        """Aggregate exact accepted work results; stale/unknown policy rows do not vote."""
+        """Aggregate exact results/exclusion markers; stale policy rows do not vote."""
         if not self._lease_valid(lease) or not self.cycle_status(lease)['complete']:
             raise StateError()
         parameters = (lease.scope, lease.generation)
@@ -1287,7 +1292,7 @@ class SQLiteScanStore:
         severities = tuple(sorted(row[0] for row in rows))
         if any(value not in {'block', 'review', 'info'} for value in severities):
             raise StateError()
-        omissions = self.conn.execute("SELECT 1 FROM audit_work w JOIN input_scans s ON s.scan_id=w.result_scan_id WHERE w.scope=? AND w.generation=? AND w.kind='file' AND (s.coverage='omitted' OR EXISTS(SELECT 1 FROM json_each(s.payload,'$.issues') i WHERE json_extract(i.value,'$.required')=0 AND json_extract(i.value,'$.omission_id') IS NOT NULL)) LIMIT 1", parameters).fetchone() is not None
+        omissions = self.conn.execute("SELECT 1 FROM audit_work w LEFT JOIN input_scans s ON s.scan_id=w.result_scan_id WHERE w.scope=? AND w.generation=? AND ((w.kind='directory' AND w.done=1 AND w.directory_signature='omitted') OR (w.kind='file' AND (s.coverage='omitted' OR EXISTS(SELECT 1 FROM json_each(s.payload,'$.issues') i WHERE json_extract(i.value,'$.required')=0 AND json_extract(i.value,'$.omission_id') IS NOT NULL)))) LIMIT 1", parameters).fetchone() is not None
         return {'severities': severities, 'has_omissions': omissions, 'files': files}
 
     def _finish_work(self, work, result, *, scan_id):
