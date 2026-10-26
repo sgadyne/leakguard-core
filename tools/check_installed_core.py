@@ -258,8 +258,11 @@ def _execute(args, evidence: dict) -> dict:
     fixture_directory = _directory(args.fixture_wheels, "fixture-directory-invalid")
     evidence["worker_policy"] = WORKER_POLICY
 
-    work = Path(args.work).resolve()
-    if work.is_symlink() or work.exists():
+    work = Path(args.work).absolute()
+    if work.is_symlink():
+        raise DriverFailure("work-directory-not-new")
+    work = work.resolve()
+    if work.exists():
         raise DriverFailure("work-directory-not-new")
     protected_dirs = [SOURCE_ROOT, wheelhouse, fixture_directory]
     protected_files = [config_input, gitleaks_input]
