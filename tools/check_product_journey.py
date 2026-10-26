@@ -39,11 +39,13 @@ _TOKEN = re.compile(r"[A-Za-z0-9_-]{20,128}\Z")
 _MAX_HTTP_BODY = 2_000_000
 _MAX_LOG_BYTES = 256_000
 _PACKAGES = ("leakguard-core", "leakguard-host", "leakguard-vault", "leakguard-buddy")
+_VAULT_LIST_METADATA = (b"Synthetic manually saved credential", b"synthetic-only")
 
 
 class JourneyFailure(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, diagnostic: str | None = None):
         self.code = code
+        self.diagnostic = diagnostic
         super().__init__(code)
 
 
@@ -488,8 +490,17 @@ def _artifact_review(product: Path, logs: bytes, bodies: list[tuple[str, bytes, 
     for path, body, protected in bodies:
         if protected:
             continue
-        if any(value and value in body for value in sensitive_values):
-            raise JourneyFailure("synthetic-value-in-http-response")
+        matches = [value for value in sensitive_values if value and value in body]
+        if path.split("?", 1)[0] == "/api/vault/entries":
+            # The list API intentionally returns only display title/location
+            # metadata; secret, username, notes and passphrases remain private.
+            matches = [value for value in matches if value not in _VAULT_LIST_METADATA]
+        if matches:
+            endpoint = path.split("?", 1)[0]
+            endpoint = re.sub(r"(/entries)/[^/]+", r"\1/{id}", endpoint)
+            if not re.fullmatch(r"/[A-Za-z0-9_./{}-]+", endpoint):
+                endpoint = "/unknown"
+            raise JourneyFailure("synthetic-value-in-http-response", diagnostic=endpoint)
     rows = []
     encrypted = {"observations.lgo", "credentials.lgv"}
     total = 0
@@ -578,7 +589,7 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
         fixture.encode("utf-8"), credentials, observation_phrase.encode("utf-8"),
         backup_phrase.encode("utf-8"), restored_phrase.encode("utf-8"),
         b"Synthetic initial vault passphrase 2026!",
-        b"synthetic-user", b"synthetic-only", b"manual save",
+        b"synthetic-user", b"manual save", *_VAULT_LIST_METADATA,
     ]
     checks: dict[str, bool] = {}
     details: dict = {"synthetic_case_id": fixture_id, "expected_rule": expected_rule,
@@ -976,6 +987,8 @@ def main(argv=None) -> int:
                  "machine": platform.machine(), "started_utc": started.isoformat(),
                  "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
                  "release_provenance": release_provenance}
+        if error.diagnostic is not None:
+            value["diagnostic"] = {"endpoint": error.diagnostic}
         exit_code = 1
     except Exception:
         value = {"schema_version": 1, "lane": "evidence", "outcome": "failed",

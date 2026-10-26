@@ -171,6 +171,20 @@ class ProductJourneyArtifactTests(unittest.TestCase):
                     fixture, (b"synthetic labeled source line", b"synthetic vault value"),
                 )
             self.assertEqual(caught.exception.code, "synthetic-value-in-http-response")
+            metadata = b'{"title":"Synthetic manually saved credential","location":"synthetic-only"}'
+            rows = check_product_journey._artifact_review(
+                product, b"ready\n", [("/api/vault/entries", metadata, False)], fixture,
+                (b"synthetic labeled source line", b"synthetic credential",
+                 b"Synthetic manually saved credential", b"synthetic-only", b"synthetic-user"),
+            )
+            self.assertEqual(len(rows["files"]), 2)
+            with self.assertRaises(check_product_journey.JourneyFailure) as caught:
+                check_product_journey._artifact_review(
+                    product, b"ready\n",
+                    [("/api/vault/entries", b'{"username":"synthetic-user"}', False)],
+                    fixture, (b"synthetic-user", b"synthetic credential"),
+                )
+            self.assertEqual(caught.exception.code, "synthetic-value-in-http-response")
 
     def test_credential_backup_must_not_contain_synthetic_plaintext(self):
         check_product_journey._check_backup_ciphertext(
