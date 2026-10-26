@@ -221,11 +221,17 @@ except subprocess.TimeoutExpired:
 
 
 class SSHRunner:
-    def __init__(self, *, executable: str | None = None, port: int = 22):
+    def __init__(self, *, executable: str | None = None, port: int = 22,
+                 identity_file: Path | None = None, known_hosts_file: Path | None = None):
         self.executable = executable or shutil.which("ssh") or "ssh"
         if type(port) is not int or not 1 <= port <= 65535:
             raise HostError("ssh-port-invalid")
         self.port = port
+        for path in (identity_file, known_hosts_file):
+            if path is not None and (not isinstance(path, Path) or not path.is_absolute() or not path.is_file() or any(char in str(path) for char in "\x00\r\n")):
+                raise HostError("ssh-file-invalid")
+        self.identity_file = identity_file
+        self.known_hosts_file = known_hosts_file
 
     def _command(self, target: str, python: str, script: str, args=()) -> list[str]:
         target = _target(target)
@@ -233,9 +239,15 @@ class SSHRunner:
             python = _remote_path(python)
         # OpenSSH's remote command uses a POSIX shell; quote each fixed argument.
         command = shlex.join([python, "-c", script, *args])
-        return [self.executable, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+        argv = [self.executable, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                 "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
-                "-p", str(self.port), "--", target, command]
+                "-p", str(self.port)]
+        if self.identity_file is not None:
+            argv += ["-i", str(self.identity_file), "-o", "IdentitiesOnly=yes"]
+        if self.known_hosts_file is not None:
+            value = str(self.known_hosts_file).replace("\\", "\\\\").replace('"', '\\"')
+            argv += ["-o", 'UserKnownHostsFile="' + value + '"']
+        return [*argv, "--", target, command]
 
     def run(self, target: str, root: str, *, python: str, config_path: str | None = None,
             max_seconds: int = 30, max_files: int = 100, cancel=None) -> dict:
@@ -248,8 +260,21 @@ class SSHRunner:
         output = _exchange(self._command(target, python, _SCAN_SUPERVISOR), json.dumps(request).encode(),
                            timeout=max_seconds + 45, maximum=4_500_000, cancel=cancel)
         try:
-            from leakguard_core.scan_store import _report_from
-            report = _report_from(json.loads(output))
+            try:
+                from leakguard_core.api import parse_report
+            except ImportError:
+                # Compatibility during the alpha's coordinated core rollout.
+                from leakguard_core.scan_store import _report_from
+                def unique(pairs):
+                    value = {}
+                    for key, item in pairs:
+                        if key in value:
+                            raise ValueError()
+                        value[key] = item
+                    return value
+                report = _report_from(json.loads(output, object_pairs_hook=unique))
+            else:
+                report = parse_report(output, max_bytes=4_500_000)
             return {"target": _target(target), "root": root, "report": report.to_dict(),
                     "coverage": "complete" if report.coverage.required_complete and report.coverage.enumeration_complete else "incomplete"}
         except Exception:

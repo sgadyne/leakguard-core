@@ -32,6 +32,8 @@ def main(argv=None) -> int:
     remote.add_argument("--python", required=True)
     remote.add_argument("--config-path")
     remote.add_argument("--port", type=int, default=22)
+    remote.add_argument("--identity-file", type=Path)
+    remote.add_argument("--known-hosts-file", type=Path)
     remote.add_argument("--max-seconds", type=int, default=30)
     remote.add_argument("--max-files", type=int, default=100)
     for name in ("ssh-upload", "ssh-deploy"):
@@ -42,6 +44,8 @@ def main(argv=None) -> int:
         upload.add_argument("--sha256", required=True)
         upload.add_argument("--python", default="python3")
         upload.add_argument("--port", type=int, default=22)
+        upload.add_argument("--identity-file", type=Path)
+        upload.add_argument("--known-hosts-file", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "capabilities":
@@ -54,10 +58,10 @@ def main(argv=None) -> int:
             command = args.argv[1:] if args.argv and args.argv[0] == "--" else args.argv
             result = service_spec(command, args.state_dir, platform=args.platform)
         elif args.command == "ssh-scan":
-            result = SSHRunner(port=args.port).run(args.target, args.root, python=args.python,
+            result = SSHRunner(port=args.port, identity_file=args.identity_file, known_hosts_file=args.known_hosts_file).run(args.target, args.root, python=args.python,
                 config_path=args.config_path, max_seconds=args.max_seconds, max_files=args.max_files)
         else:
-            runner = SSHRunner(port=args.port)
+            runner = SSHRunner(port=args.port, identity_file=args.identity_file, known_hosts_file=args.known_hosts_file)
             action = runner.deploy if args.command == "ssh-deploy" else runner.upload
             result = action(args.target, args.artifact, args.remote_directory,
                 sha256=args.sha256, python=args.python)
