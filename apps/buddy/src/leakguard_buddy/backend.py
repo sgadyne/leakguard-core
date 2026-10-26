@@ -149,9 +149,9 @@ class BuddyBackend:
     def prepare_close(self) -> None:
         """Stop owned workers and stores; a failed stop retains every owner."""
         with self._lock:
-            self._stop_host()
             self._vault.lock()
             self._credential_session = None
+            self._stop_host()
 
     def release_ownership(self) -> None:
         ownership = getattr(self, "_ownership", None)

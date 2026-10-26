@@ -67,8 +67,11 @@ def run(backend, *, input_stream, output_stream) -> int:
     parent_gone = threading.Event()
 
     def emit(value):
-        output_stream.write(json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n")
-        output_stream.flush()
+        try:
+            output_stream.write(json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n")
+            output_stream.flush()
+        except (BrokenPipeError, OSError):
+            parent_gone.set()
 
     def read():
         # A daemon thread must not hold BufferedReader's lock at interpreter
@@ -76,7 +79,11 @@ def run(backend, *, input_stream, output_stream) -> int:
         buffered = bytearray()
         discarding = False
         while True:
-            chunk = os.read(input_stream.fileno(), _LIMIT)
+            try:
+                chunk = os.read(input_stream.fileno(), _LIMIT)
+            except OSError:
+                parent_gone.set()
+                return
             if not chunk:
                 parent_gone.set()
                 return

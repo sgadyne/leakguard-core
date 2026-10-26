@@ -20,7 +20,7 @@ let firstCloseExplained=false;
 let quitAllowed=false;
 let quitting=false;
 let startup:Promise<void>|undefined;
-let startupDialog=false;
+let recovering=false;
 let lockInFlight:Promise<void>|undefined;
 const clipboardOwner=new ClipboardOwner({readText:()=>clipboard.readText(),writeText:text=>clipboard.writeText(text),clear:()=>clipboard.clear()});
 let statusTimer:NodeJS.Timeout|undefined;
@@ -53,6 +53,7 @@ function updateMenus(){
     {type:'separator' as const},
     {label:'Quit Password Buddy',click:()=>{void requestQuit();}},
   ];
+  app.dock?.setBadge(status?'':'…');
   tray?.setContextMenu(Menu.buildFromTemplate(menu));
   tray?.setToolTip('Password Buddy — '+(control?.hasExited?'Unavailable':scan));
   const applicationMenu:Electron.MenuItemConstructorOptions[]=[
@@ -255,38 +256,53 @@ async function startBackend(){
   if(statusTimer)clearInterval(statusTimer);
   statusTimer=setInterval(()=>{void refreshStatus();},5000);
 }
-async function recover(code:string){
-  if(startupDialog||quitting)return;
-  startupDialog=true;
-  const result=await dialog.showMessageBox({type:'error',title:'Password Buddy backend unavailable',
-    message:'The local backend is unavailable.',detail:'Your workspace is retained. Details: '+code,buttons:['Retry','Quit'],defaultId:0,cancelId:1});
-  startupDialog=false;
-  if(result.response===1){await requestQuit();return;}
-  if(control && !control.hasExited){
-    const retry=await dialog.showMessageBox({type:'info',message:'Waiting for the owned process to stop safely.',
-      buttons:['Retry','Keep open'],defaultId:0,cancelId:1});
-    if(retry.response===0)await requestQuit();
-    return;
-  }
-  startup=startBackend();
-  try{await startup;}catch(error){await recover(errorCode(error));}
+function messageBox(options:Electron.MessageBoxOptions){
+  return window && !window.isDestroyed()?dialog.showMessageBox(window,options):dialog.showMessageBox(options);
+}
+async function stopOwnedBackend(){
+  const current=control;
+  if(!current || current.hasExited)return;
+  const result=await current.request('shutdown',120_000);
+  if(result?.stopped!==true)throw failure('backend-stop-unconfirmed');
+  await current.exited;
+}
+async function recover(initialCode:string){
+  if(recovering||quitting)return;
+  recovering=true;
+  let code=initialCode;
+  try{
+    while(!quitting){
+      const blocked=['worker-still-running','requests-still-running','backend-control-timeout'].includes(code);
+      const result=await messageBox({type:blocked?'warning':'error',title:'Password Buddy backend unavailable',
+        message:blocked?'Waiting for the current scan to stop.':'The local backend is unavailable.',
+        detail:'Your workspace and owned process are retained. Details: '+code,
+        buttons:blocked?['Retry','Keep open']:['Retry','Quit'],defaultId:0,cancelId:1});
+      if(result.response===1){
+        if(!blocked)await requestQuit();
+        return;
+      }
+      try{
+        emit({type:'backend-state',state:'stopping'});
+        await stopOwnedBackend();
+        startup=startBackend();
+        await startup;
+        return;
+      }catch(error){code=errorCode(error);}
+    }
+  }finally{recovering=false;}
 }
 async function requestQuit(){
   if(quitting||quitAllowed)return;
   quitting=true;clearSensitive('quit');emit({type:'backend-state',state:'stopping'});stage='Stopping safely…';updateMenus();
   try{
     if(startup)await startup.catch(()=>{});
-    if(control && !control.hasExited){
-      const result=await control.request('shutdown',120_000);
-      if(result?.stopped!==true)throw failure('backend-stop-unconfirmed');
-      await control.exited;
-    }
+    await stopOwnedBackend();
     if(statusTimer)clearInterval(statusTimer);if(idleTimer)clearInterval(idleTimer);
     await clearClipboard();quitAllowed=true;tray?.destroy();app.quit();
   }catch(error){
     quitting=false;stage='Waiting for the current scan to stop';updateMenus();show();
     emit({type:'backend-state',state:'unavailable',code:errorCode(error)});
-    const result=await dialog.showMessageBox(window!,{type:'warning',title:'Waiting for safe shutdown',
+    const result=await messageBox({type:'warning',title:'Waiting for safe shutdown',
       message:'Waiting for the current scan to stop.',detail:'The owned process and encrypted storage remain open. Details: '+errorCode(error),
       buttons:['Retry','Keep open'],defaultId:0,cancelId:1});
     if(result.response===0)await requestQuit();
@@ -294,6 +310,7 @@ async function requestQuit(){
 }
 async function main(){
   app.setName('Password Buddy');
+  app.setAppUserModelId('org.leakguard.passwordbuddy');
   const index=process.argv.indexOf('--buddy-data-dir');
   const input=index>=0?process.argv[index+1]:path.join(app.getPath('appData'),'Password Buddy');
   if(!input || (index>=0 && input.startsWith('--')))throw failure('profile-path-invalid');

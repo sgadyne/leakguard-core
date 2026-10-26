@@ -7,7 +7,7 @@ import { failure, inside } from './policy.ts';
 export type Runtime = {python:string; stateDir:string; config:string; runtimeId:string};
 type Manifest = {
   schemaVersion:number; protocolVersion:number; target:string; runtimeId:string;
-  pythonExecutable:string; files:{path:string;sha256:string;mode:number}[];
+  pythonExecutable:string; files:{path:string;sha256:string;mode:number;linkTarget?:string}[];
 };
 export function cleanEnvironment(stateDir?:string,config?:string):NodeJS.ProcessEnv {
   const env:NodeJS.ProcessEnv={};
@@ -41,26 +41,38 @@ async function resourcePath(root:string,relative:string):Promise<string> {
   if(!inside(root,candidate))throw failure('resource-path-invalid');
   return candidate;
 }
-async function verifiedExecutable(root:string,relative:string,manifest:Manifest):Promise<string> {
+export async function verifiedResource(root:string,relative:string,manifest:Pick<Manifest,'files'>):Promise<string> {
   const file=await resourcePath(root,relative);
   const entry=manifest.files.find(entry=>entry.path===relative);
   if(!entry || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw failure('resource-manifest-invalid');
-  const bytes=await fs.readFile(file);
-  if(createHash('sha256').update(bytes).digest('hex')!==entry.sha256) throw failure('resource-integrity-failed');
-  return file;
+  const original=path.join(root,relative);
+  const info=await fs.lstat(original);
+  if(info.isSymbolicLink()){
+    const target=await fs.readlink(original);
+    if(target!==entry.linkTarget || path.isAbsolute(target) ||
+       createHash('sha256').update(target).digest('hex')!==entry.sha256)throw failure('resource-integrity-failed');
+    const resolvedRelative=path.relative(root,file).split(path.sep).join('/');
+    const resolved=manifest.files.find(candidate=>candidate.path===resolvedRelative);
+    if(!resolved || resolved.linkTarget || !/^[a-f0-9]{64}$/.test(resolved.sha256) ||
+       createHash('sha256').update(await fs.readFile(file)).digest('hex')!==resolved.sha256)throw failure('resource-integrity-failed');
+  }else{
+    if(!info.isFile() || entry.linkTarget ||
+       createHash('sha256').update(await fs.readFile(file)).digest('hex')!==entry.sha256)throw failure('resource-integrity-failed');
+  }
+  return original;
 }
 export async function prepareRuntime(resourcesInput:string,dataDir:string,onProgress:(stage:string)=>void):Promise<Runtime> {
   const resources=await fs.realpath(resourcesInput);
   const raw=await fs.readFile(path.join(resources,'desktop-manifest.json'));
-  if(raw.length>8*1024*1024)throw failure('resource-manifest-invalid');
+  if(raw.length>16*1024*1024)throw failure('resource-manifest-invalid');
   const manifest=JSON.parse(raw.toString('utf8')) as Manifest;
   const expectedTarget=process.platform==='darwin' && process.arch==='arm64'?'macos-arm64':
     process.platform==='win32' && process.arch==='x64'?'windows-x86_64':
     process.platform==='linux' && process.arch==='x64'?'linux-x86_64':'unsupported';
   if(manifest.schemaVersion!==1 || manifest.protocolVersion!==1 || manifest.target!==expectedTarget ||
      !/^[a-f0-9]{64}$/.test(manifest.runtimeId) || !Array.isArray(manifest.files)) throw failure('resource-manifest-invalid');
-  const python=await verifiedExecutable(resources,manifest.pythonExecutable,manifest);
-  const bootstrap=await verifiedExecutable(resources,'bootstrap.py',manifest);
+  const python=await verifiedResource(resources,manifest.pythonExecutable,manifest);
+  const bootstrap=await verifiedResource(resources,'bootstrap.py',manifest);
   return new Promise((resolve,reject)=>{
     const child=spawn(python,['-I','-B','-X','utf8',bootstrap,'--resources',resources,'--data-dir',dataDir],
       {cwd:dataDir,env:cleanEnvironment(),stdio:['ignore','pipe','pipe'],windowsHide:true,shell:false});

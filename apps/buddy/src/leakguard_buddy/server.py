@@ -645,7 +645,14 @@ def serve_forever(backend: object, *, open_browser: bool = True, bootstrap_file:
     try:
         stopping.wait()
     finally:
-        app.close()
+        # SIGTERM/EOF is not authority to discard an encrypted store still
+        # owned by a scan worker. Retain the service and lock until safe.
+        while True:
+            try:
+                app.close()
+                break
+            except Exception:
+                time.sleep(1)
         for signum, handler in prior_handlers.items():
             try: signal.signal(signum, handler)
             except (ValueError, OSError): pass

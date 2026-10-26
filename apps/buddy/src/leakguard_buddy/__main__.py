@@ -26,7 +26,12 @@ def main(argv: list[str] | None = None) -> int:
     from .backend import BuddyBackend
     from .server import serve_forever
 
-    backend = BuddyBackend(state_dir=args.state_dir, config_path=args.config)
+    from .ownership import ProfileInUse
+    try:
+        backend = BuddyBackend(state_dir=args.state_dir, config_path=args.config)
+    except ProfileInUse:
+        print("Password Buddy cannot start: profile-in-use.")
+        return 1
     bootstrap_file = backend.state_dir / "buddy-launch.url"
     serve_forever(backend, open_browser=not args.no_browser, bootstrap_file=bootstrap_file)
     return 0
