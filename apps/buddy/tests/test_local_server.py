@@ -22,7 +22,6 @@ class StubBackend:
     def plugin_install(self, payload):
         return {"filename": payload["filename"]}
 
-
 class LocalServerTests(unittest.TestCase):
     def test_bootstrap_rotates_after_exchange_and_next_open_works(self):
         with tempfile.TemporaryDirectory(prefix="buddy-http-test-") as name:
@@ -102,6 +101,59 @@ class LocalServerTests(unittest.TestCase):
             self.assertEqual(json.loads(response._buddy_body), {"filename": filename})
         finally:
             app.close()
+
+    def test_extension_registration_errors_are_safe_client_errors(self):
+        codes = (
+            "extension-conflict",
+            "extension-runtime-inspection-failed",
+            "extension-startup-artifact",
+            "extension-wheel-invalid",
+        )
+
+        class CodedError(Exception):
+            def __init__(self, code):
+                self.code = code
+                super().__init__("private detail must not reach the response")
+
+        class FailingBackend(StubBackend):
+            error_code = ""
+
+            def plugin_conformance(self, _payload):
+                raise CodedError(self.error_code)
+
+        app = LocalBuddy(FailingBackend())
+        app.start()
+        try:
+            exchange = self._exchange(app, app.bootstrap)
+            cookie = exchange.getheader("Set-Cookie").split(";", 1)[0]
+            csrf = json.loads(exchange._buddy_body)["csrf"]
+            for code in codes:
+                with self.subTest(code=code):
+                    app.backend.error_code = code
+                    status, response = self._request(
+                        app, "POST", "/api/plugins/conformance", cookie=cookie,
+                        payload={"id": "sample"},
+                        origin=app.server.origin, csrf=csrf,
+                    )
+                    self.assertEqual(status, 400)
+                    self.assertEqual(json.loads(response._buddy_body), {"error": code})
+                    self.assertNotIn(b"private detail", response._buddy_body)
+        finally:
+            app.close()
+
+    def test_extension_registration_errors_have_plain_language_ui_messages(self):
+        source = Path(__file__).parents[1] / "src" / "leakguard_buddy" / "static" / "app.js"
+        client = source.read_text(encoding="utf-8")
+        messages = {
+            "extension-conflict": "Use a unique package name.",
+            "extension-runtime-inspection-failed": "Buddy's private runtime is unavailable.",
+            "extension-startup-artifact": "Review the plugin startup artifact before installing it.",
+            "extension-wheel-invalid": "Review the plugin wheel artifact before installing it.",
+        }
+        for code, message in messages.items():
+            with self.subTest(code=code):
+                self.assertIn(f'"{code}": "', client)
+                self.assertIn(message, client)
 
     @staticmethod
     def _request(app, method, path, *, token=None, cookie=None, payload=None, origin=None, csrf=None):
