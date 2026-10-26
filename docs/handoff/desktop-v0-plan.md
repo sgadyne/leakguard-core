@@ -191,3 +191,25 @@ limits and owned-process cleanup. Do not mark complete at plan or mockup alone.
 - https://dockview.dev/docs/
 - https://www.electronjs.org/docs/latest/api/tray
 - https://www.electronjs.org/docs/latest/tutorial/security
+
+## Phase 1 decision — frozen 2026-10-26
+
+The product design in [desktop-v0/README.md](../design/desktop-v0/README.md),
+[tokens.json](../design/desktop-v0/tokens.json) and the self-contained
+[clickable prototype](../design/desktop-v0/wireframe.html) supersedes the
+tentative UX choices above. Prototype fixtures are synthetic and never ship
+in normal application mode.
+
+- React 19 + MUI 9/Emotion + AG Grid Community 36. No Dockview, chart dependency,
+  second widget family or commercial grid feature in v0.
+- Fixed sidebar and list/detail workbench. Native titlebar; six main routes.
+- Findings use explicit API filters and bounded cursor pages. No invented total,
+  global sorting, exposure score or scan percentage. Latest source coverage is
+  labeled separately from evidence and review state.
+- Credential list is metadata-only, including hidden username/notes until
+  explicit reveal. Both stores have independent gates and visible status.
+- Existing source scope is read-only; enabled/schedule can be changed.
+  SSH stays CLI-only. Git guards are a Sources subview and remain per-repository.
+- Tray opens Sources; no fictitious global Pause schedules action.
+- Phase 2 must resolve direct finding lookup/page-row detail, native lifecycle,
+  standalone resources, session/CSP bootstrap and honest capability gates.
