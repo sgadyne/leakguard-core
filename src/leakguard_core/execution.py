@@ -57,6 +57,8 @@ def ordered_work(inputs, *, prepare, execute, workers, max_items, stop):
                     count += 1
                     # The serial reference path runs in the caller thread.
                     pending.append(pool.submit(execute, work) if pool else execute(work))
+                    work = None
+                    item = None
                 except StopIteration:
                     exhausted = True
                 except Exception as error:

@@ -272,8 +272,9 @@ class ExtensionRegistry:
     def list(self):
         return [self._public(entry) for _, entry in sorted(self._load()['extensions'].items())]
 
-    def install_wheel(self, wheel, *, python_executable=None, options=None):
-        metadata, cases, digest = inspect_wheel(wheel)
+    def install_wheel(self, wheel, *, python_executable=None, options=None, cases=None):
+        metadata, bundled_cases, digest = inspect_wheel(wheel)
+        cases = bundled_cases if cases is None else copy.deepcopy(cases)
         selected = _private_python(python_executable or sys.executable)
         spec = {'module': metadata['module'], 'options': {} if options is None else options}
         if 'component' in metadata:

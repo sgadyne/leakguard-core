@@ -24,6 +24,7 @@ def main(argv=None):
     install = commands.add_parser('install', help='install reviewed wheel into this private runtime, disabled initially')
     install.add_argument('wheel', type=Path)
     install.add_argument('--options', type=Path, help='optional JSON options file')
+    install.add_argument('--cases', type=Path, help='reviewed option-specific conformance JSON; defaults to bundled cases')
     register = commands.add_parser('register-script', help='register a reviewed fixed-argv script, disabled initially')
     register.add_argument('spec', type=Path)
     register.add_argument('--cases', type=Path)
@@ -46,7 +47,7 @@ def main(argv=None):
             result = {'metadata': metadata, 'sha256': digest, 'has_conformance': cases is not None}
         elif args.command == 'install':
             options = _json(_read(args.options)) if args.options else {}
-            result = registry.install_wheel(args.wheel, options=options)
+            result = registry.install_wheel(args.wheel, options=options, cases=_json(_read(args.cases)) if args.cases else None)
         elif args.command == 'register-script':
             result = registry.register_script(_json(_read(args.spec)), cases=_json(_read(args.cases)) if args.cases else None)
         elif args.command == 'list':
