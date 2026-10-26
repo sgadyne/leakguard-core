@@ -217,6 +217,11 @@ class SensitiveBasicsDetector:
             prefix = re.escape(self.prefixes[kind])
             if re.fullmatch(prefix + r"[-_ ]?[A-Z0-9]{4,16}", value, re.IGNORECASE):
                 return "pii-identifier-" + kind
+            # Explicit employee/customer/account labels also commonly carry
+            # numeric-only IDs. Keep this fallback narrow and contextual;
+            # repeated-digit placeholders and short quantities are controls.
+            if re.fullmatch(r"[0-9]{4,18}", value) and len(set(value)) > 1:
+                return "pii-identifier-" + kind
         return None
 
 

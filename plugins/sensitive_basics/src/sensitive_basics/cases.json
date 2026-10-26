@@ -123,8 +123,24 @@
       "expected_findings": [{"rule": "pii-identifier-employee", "start_line": 1, "end_line": 1, "severity": "review"}]
     },
     {
+      "case_id": "numeric-employee-identifier",
+      "text": "employee_id=784213",
+      "logical_path": "fixtures/identifiers.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [{"rule": "pii-identifier-employee", "start_line": 1, "end_line": 1, "severity": "review"}]
+    },
+    {
       "case_id": "customer-identifier",
       "text": "customer_id=CUS-884120",
+      "logical_path": "fixtures/identifiers.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [{"rule": "pii-identifier-customer", "start_line": 1, "end_line": 1, "severity": "review"}]
+    },
+    {
+      "case_id": "numeric-customer-identifier",
+      "text": "customer_id=905177",
       "logical_path": "fixtures/identifiers.txt",
       "format_id": "text",
       "part_id": "text",
@@ -146,15 +162,30 @@
       "part_id": "text"
     },
     {
-      "case_id": "short-employee-code-control",
-      "text": "employee_id: E42",
+      "case_id": "employee-placeholder-control",
+      "text": "employee_id: TBD",
       "logical_path": "fixtures/identifiers.txt",
       "format_id": "text",
       "part_id": "text"
     },
     {
-      "case_id": "small-numeric-account-control",
+      "case_id": "numeric-account-identifier",
       "text": "account_number: 12345",
+      "logical_path": "fixtures/identifiers.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [{"rule": "pii-identifier-account", "start_line": 1, "end_line": 1, "severity": "review"}]
+    },
+    {
+      "case_id": "short-numeric-account-control",
+      "text": "account_number: 12",
+      "logical_path": "fixtures/identifiers.txt",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
+      "case_id": "zero-placeholder-account-control",
+      "text": "account_number: 00000000",
       "logical_path": "fixtures/identifiers.txt",
       "format_id": "text",
       "part_id": "text"

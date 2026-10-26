@@ -15,19 +15,21 @@ guide.
 
 The rules cover labeled email, phone and street-address fields; Luhn-valid card
 candidates, ABA routing candidates and mod-97 IBAN candidates; and configurable
-employee, customer and account identifier prefixes. Unlabeled values and
-checksum failures are controls. CSV rows are checked only when the file has a
-recognized contextual header. This is a modest format-level check, not broad
-document understanding or a medical/legal classifier.
+employee, customer and account identifier prefixes. Explicit identifier
+fields also recognize numeric-only IDs with 4–18 digits, excluding repeated-
+digit placeholders and short quantities. Unlabeled values and checksum failures
+are controls. CSV rows are checked only when the file has a recognized
+contextual header. This is a modest format-level check, not broad document
+understanding or a medical/legal classifier.
 
 Rule ID prefixes encode category because the stable v2 result schema contains
 only `{rule, line, severity}`. A value-free UI can map `pii-contact-*` to
 contact, `pii-financial-*` to financial identifier, and `pii-identifier-*` to
 organization identifier; the suffix names the specific check. Findings carry
-no match, source text, fingerprint or category value copied from the file. The labeled examples in
-`src/sensitive_basics/cases.json` are synthetic and independently specify the
-expected rule and severity for each case. Registry `check` uses that same
-conformance file.
+no match, source text, fingerprint or category value copied from the file. The
+labeled examples in `src/sensitive_basics/cases.json` are synthetic and
+independently specify the expected rule and severity for each case. Registry
+`check` uses that same conformance file.
 
 Example firm option for promoting one identifier rule with the default
 prefixes:
