@@ -101,12 +101,15 @@ version recorded in that bundle). On Linux, add `~/.local/bin` to `PATH` if
 needed.
 The Buddy shortcut is also written to the user's application menu.
 
-For a native macOS alpha install, the new default config selects the explicit
-`supervised-alpha` worker policy. The installer also selects that policy in an
-existing macOS config, and doctor reports the choice. On every platform, the
-installer preserves other existing settings while selecting the encrypted
-observation backend at `state/observations.lgo`; an unavailable key keeps
-observations ephemeral rather than falling back to a plaintext database.
+For a native macOS alpha install, new configs use the explicit
+`supervised-alpha` worker policy. When migrating an existing macOS config, the
+installer adds that policy only if `worker_policy` is absent. It preserves an
+existing valid `strict` or `supervised-alpha` choice during updates and
+rollback, and rejects an invalid value instead of silently replacing it.
+Doctor reports the selected policy. On every platform, the installer preserves
+other existing settings while selecting the encrypted observation backend at
+`state/observations.lgo`; an unavailable key keeps observations ephemeral
+rather than falling back to a plaintext database.
 
 ## Windows
 
