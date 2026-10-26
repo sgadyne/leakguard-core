@@ -42,6 +42,12 @@ and registers it; host rendering changes no OS state. A service launches Buddy
 and can schedule unattended work only with a verified observation-key backend.
 The credential vault stays locked.
 
+The macOS mount reader uses the no-argument command documented in Apple's
+[mount source](https://github.com/apple-oss-distributions/diskdev_cmds/blob/main/mount.tproj/mount.c).
+Windows task XML binds the current user's logon trigger and principal using
+[UserId with InteractiveToken](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-logontype-principaltype-element).
+Windows specifications remain unverified until a native runner executes them.
+
 `SSHRunner.run(target, root, python=absolute_runtime_python, config_path=None,
 max_seconds=30, max_files=100)` executes an installed remote host package with
 an ephemeral memory ScanStore. It returns only a validated redacted core report.

@@ -218,6 +218,10 @@ class HostService:
                 source["next_run_at"] = _timestamp(self._clock() + schedule_seconds) if schedule_seconds is not None else None
             if enabled is not None:
                 source["enabled"] = enabled
+                if not enabled:
+                    for job in self._state["jobs"].values():
+                        if job["source_id"] == source_id and job["state"] in _ACTIVE:
+                            job.update(state="paused", updated_at=_timestamp(self._clock()), next_retry_at=None)
             return source
         result = self._mutate(action)
         self._wake.set()
@@ -299,6 +303,8 @@ class HostService:
                 if job["state"] == state:
                     return job
                 raise HostError("job-finished")
+            if state == "queued" and not self._source(job["source_id"])["enabled"]:
+                raise HostError("source-disabled")
             job.update(state=state, updated_at=_timestamp(self._clock()), next_retry_at=None)
             return job
         result = self._mutate(action)

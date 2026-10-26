@@ -154,6 +154,39 @@ class HostTests(unittest.TestCase):
         self.now += 61
         self.assertEqual(host.tick()["status"], "idle")
 
+    def test_disabling_source_pauses_admitted_work_and_rejects_resume(self):
+        host = self.host()
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        host.update_source(source["id"], enabled=False)
+        self.assertEqual(host.job(job["id"])["state"], "paused")
+        with self.assertRaisesRegex(HostError, "source-disabled"):
+            host.resume(job["id"])
+        self.assertEqual(host.tick()["status"], "idle")
+
+    def test_mount_fallback_is_offline_but_same_endpoint_reconnects(self):
+        host = self.host()
+        with patch("leakguard_host.scheduler.navigation.mount_marker", return_value="same-share"):
+            source = host.add_source(self.root, kind="mounted")
+        job = host.submit(source["id"])
+        # The endpoint identity, rather than a transient inode/device, governs
+        # reconnect for a mounted share. A local fallback must never scan.
+        host._state["sources"][source["id"]]["root_identity"] = [0, 0]
+        with patch("leakguard_host.scheduler.navigation.mount_marker", return_value="local-fallback"):
+            self.assertEqual(host.tick()["status"], "backoff")
+        self.now += 6
+        with patch("leakguard_host.scheduler.navigation.mount_marker", return_value="same-share"):
+            self.assertEqual(host.tick()["status"], "completed")
+
+    def test_macos_mount_metadata_uses_supported_no_argument_command(self):
+        from leakguard_host.navigation import _mounts
+        completed = subprocess.CompletedProcess([], 0, b"/dev/disk1 on / (apfs, local, read-only)\n//server/share on /Volumes/Team Files (smbfs, nodev, mounted by user)\n")
+        with patch("leakguard_host.navigation.platform.system", return_value="Darwin"), patch("leakguard_host.navigation.subprocess.run", return_value=completed) as run:
+            mounts = _mounts()
+        self.assertEqual(run.call_args.args[0], ["/sbin/mount"])
+        self.assertEqual(mounts[1]["path"], "/Volumes/Team Files")
+        self.assertEqual(mounts[1]["filesystem"], "smbfs")
+
     def test_cancel_during_slice_wins_and_concurrent_tick_is_busy(self):
         entered, release = threading.Event(), threading.Event()
         def callback(scope, kw):
@@ -184,6 +217,9 @@ class HostTests(unittest.TestCase):
         self.assertIn("$$HOME%%", linux["content"])
         self.assertIn("LEAKGUARD_STATE_DIR=", linux["content"])
         self.assertFalse(mac["native_verified"])
+        windows = service_spec(command, self.root, platform="windows")
+        self.assertIn("<UserId>", windows["content"])
+        self.assertIn("<LogonType>InteractiveToken</LogonType>", windows["content"])
 
     def test_ssh_rejects_options_and_never_returns_arbitrary_output(self):
         runner = SSHRunner()

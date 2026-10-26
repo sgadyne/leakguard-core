@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -81,15 +82,15 @@ def _mounts() -> list[dict]:
     elif platform.system() == "Darwin":
         try:
             # Native mount output is metadata only, bounded and never a shell.
-            result = subprocess.run(["/sbin/mount", "-p"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, check=False)
+            result = subprocess.run(["/sbin/mount"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2, check=False)
             if len(result.stdout) <= 1_000_000:
                 for line in result.stdout.decode("utf-8", "replace").splitlines():
-                    fields = line.split()
-                    if len(fields) >= 3:
-                        target = fields[1].replace("\\040", " ")
+                    match = re.fullmatch(r"(.+?) on (/.*) \(([^,()]+)(?:, .*)?\)", line)
+                    if match:
+                        endpoint, target, filesystem = match.groups()
                         if target == "/" or target.startswith("/Volumes/"):
-                            marker = hashlib.sha256((fields[0] + "|" + target + "|" + fields[2]).encode()).hexdigest()
-                            values.append({"path": target, "filesystem": fields[2], "marker": marker})
+                            marker = hashlib.sha256((endpoint + "|" + target + "|" + filesystem).encode()).hexdigest()
+                            values.append({"path": target, "filesystem": filesystem, "marker": marker})
         except (OSError, subprocess.SubprocessError):
             pass
     elif os.name == "nt":
