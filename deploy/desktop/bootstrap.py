@@ -102,9 +102,10 @@ def verify_resources(root):
     seen = set()
     for item in expected:
         relative_path(item.get("path"))
-        if item["path"].casefold() in seen or not re.fullmatch(r"[a-f0-9]{64}", item.get("sha256", "")):
+        key = item["path"] if manifest["target"] == "linux-x86_64" else item["path"].casefold()
+        if key in seen or not re.fullmatch(r"[a-f0-9]{64}", item.get("sha256", "")):
             fail("manifest-invalid")
-        seen.add(item["path"].casefold())
+        seen.add(key)
     actual = records(root)
     # Windows does not preserve POSIX permission bits. Native modes are checked on POSIX.
     compared = actual if os.name != "nt" else [{k: v for k, v in x.items() if k != "mode"} for x in actual]
