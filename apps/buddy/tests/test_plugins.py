@@ -76,5 +76,43 @@ class CredentialUpdateTests(unittest.TestCase):
         self.assertEqual(session.calls, [("entry_1", {"title": "Updated", "secret": "new-secret", "finding_id": None})])
 
 
+class ScanConfigRefreshTests(unittest.TestCase):
+    def test_config_change_restarts_host_without_closing_observation_store(self):
+        class Host:
+            def __init__(self):
+                self.stopped = False
+
+            def stop(self):
+                self.stopped = True
+
+        old_host = Host()
+        store = object()
+        backend = object.__new__(BuddyBackend)
+        backend._host = old_host
+        backend._observation_store = store
+        backend._config_values = {"detection_profile": "credentials"}
+        backend._config = "old-config"
+        backend._startup_observation_error = "old-error"
+        writes = []
+
+        def start_host(candidate_store):
+            self.assertIs(candidate_store, store)
+            backend._host = Host()
+            backend._observation_store = candidate_store
+
+        backend._write_config = lambda values: writes.append(dict(values))
+        backend._start_host = start_host
+        values = {"detection_profile": "firm"}
+        restarted = backend._replace_scan_config(values, "new-config")
+        self.assertTrue(restarted)
+        self.assertTrue(old_host.stopped)
+        self.assertIsNot(backend._host, old_host)
+        self.assertIs(backend._observation_store, store)
+        self.assertEqual(backend._config_values, values)
+        self.assertEqual(backend._config, "new-config")
+        self.assertIsNone(backend._startup_observation_error)
+        self.assertEqual(writes, [values])
+
+
 if __name__ == "__main__":
     unittest.main()

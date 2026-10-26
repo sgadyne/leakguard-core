@@ -593,12 +593,40 @@ class BuddyBackend:
             raise ValueError("settings-invalid")
         values["scan_workers"] = scan_workers
         checked = self._ScanConfig.from_mapping(values)
-        was_open = self._observation_store is not None
-        if was_open:
-            self._stop_host()
-        self._write_config(values)
-        self._config_values, self._config = values, checked
-        return {"settings": self.settings(), "observations_locked": was_open}
+        host_restarted = self._replace_scan_config(values, checked)
+        return {"settings": self.settings(), "observations_locked": False, "host_restarted": host_restarted}
+
+    def _replace_scan_config(self, values: dict[str, Any], checked: object) -> bool:
+        """Swap host configuration while retaining the unlocked encrypted store."""
+        old_values, old_config = self._config_values, self._config
+        store = self._observation_store
+        host = self._host
+        # stop() waits for the current bounded slice. Keep ownership references
+        # until it succeeds; in particular, never close the store here.
+        if host is not None:
+            host.stop()
+            self._host = None
+        try:
+            self._write_config(values)
+            self._config_values, self._config = values, checked
+            if store is not None:
+                self._start_host(store)
+            self._startup_observation_error = None
+            return store is not None
+        except BaseException:
+            self._config_values, self._config = old_values, old_config
+            try:
+                self._write_config(old_values)
+            except Exception:
+                pass
+            if store is not None and self._host is None:
+                try:
+                    # Reopen from the durable store to avoid reusing a stale
+                    # scheduler snapshot if candidate construction checkpointed.
+                    self._start_host(store)
+                except Exception as error:
+                    self._startup_observation_error = _safe_code(error) or "scheduler-failed"
+            raise
 
     def _write_config(self, values: dict[str, Any] | None = None):
         from leakguard_core import settings as core_settings
