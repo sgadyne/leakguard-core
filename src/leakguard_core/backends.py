@@ -88,7 +88,8 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
                              worker_policy=worker_policy)
     except WorkerError as error:
         code = {'worker-timeout': 'detector-timeout', 'worker-output-limit': 'detector-output-limit',
-                'cancelled': 'cancelled', 'resource-bound-unavailable': 'resource-bound-unavailable'}.get(error.code, 'detector-failed')
+                'cancelled': 'cancelled', 'resource-bound-unavailable': 'resource-bound-unavailable',
+                'worker-memory-limit': 'worker-memory-limit'}.get(error.code, 'detector-failed')
         raise BackendError(code) from None
     if process.returncode not in (0, 1):
         raise BackendError('detector-failed')

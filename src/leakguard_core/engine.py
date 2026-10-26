@@ -484,6 +484,9 @@ class ScanService:
         from .scan_store import MemoryScanStore, SQLiteScanStore
         from .settings import validate
         self.config = validate(config.to_mapping() if hasattr(config, 'to_mapping') else dict(config))
+        if self.config.get('extension_registry'):
+            from .extensions import ExtensionRegistry
+            self.config = ExtensionRegistry(self.config['extension_registry']).apply(self.config, self.config.get('detection_profile', 'credentials'))
         self.binary = self.config.get('gitleaks_executable') or shutil.which('gitleaks') or 'gitleaks'
         self.rules = self.config.get('gitleaks_config') or ROOT / 'rules.toml'
         self.state_dir = pathlib.Path(state_dir) if state_dir is not None else None
@@ -491,7 +494,7 @@ class ScanService:
         self._owns_store = store is None
         self._closed = False
         try:
-            self._plugins = plugins.load(self.config.get('plugins', []))
+            self._plugins = plugins.load(self.config.get('plugins', []), worker_policy=self.config.get('worker_policy', 'strict'))
             if self.config.get('script_checks'):
                 self._plugins.extend(plugins.load_scripts(self.config['script_checks']))
             self._runtime, self._cache_eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins))
@@ -891,6 +894,8 @@ class ScanService:
         policy = scan_policy.effective_policy(policy, self.config)
         policy_id = scan_policy.policy_identity(config=self.config, policy=policy, limits=limits)
         issues = (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)
+        if self.config.get('worker_policy') == 'supervised-alpha':
+            issues += (m.CoverageIssue(m.ErrorCode.SUPERVISED_ALPHA_POLICY),)
         coverage, decision = scan_policy.evaluate((), policy=policy, policy_id=policy_id, enumeration_complete=False, issues=issues)
         now = dt.datetime.now(dt.timezone.utc)
         return _cap_report(m.ScanReport(1, uuid.uuid4().hex, now, now, policy_id, (), coverage, decision, issues), limits.max_report_bytes)
@@ -901,6 +906,9 @@ class ScanService:
             raise StateError('state-closed')
         if limits.max_report_bytes < 2048:
             raise ValueError('max_report_bytes')
+        from .execution import Cancellation
+        if not isinstance(cancel, Cancellation):
+            cancel = Cancellation(cancel)
         deadline = _deadline if _deadline is not None else time.monotonic() + limits.deadline_seconds
         if hasattr(self.store, 'set_deadline'):
             try:
@@ -933,6 +941,8 @@ class ScanService:
         snapshots = []
         anchors = []
         run_issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
+        if self.config.get('worker_policy') == 'supervised-alpha':
+            run_issues.append(m.CoverageIssue(m.ErrorCode.SUPERVISED_ALPHA_POLICY))
         enumeration_complete = True
         finding_count = 0
         report_bytes = 0
