@@ -1,4 +1,4 @@
-import packager from '@electron/packager';
+import { packager } from '@electron/packager';
 import { parseArgs } from 'node:util';
 import { mkdtemp, mkdir, readFile, cp, rm, writeFile, access } from 'node:fs/promises';
 import path from 'node:path';
