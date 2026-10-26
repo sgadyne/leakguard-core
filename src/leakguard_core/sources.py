@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -21,12 +22,131 @@ def content_identity(data):
     return m.ContentIdentity('sha256', hashlib.sha256(data).hexdigest(), len(data))
 
 
-def _bounded_file(path, maximum):
+class FilesystemBoundary:
+    """A selected directory identity with no linked descendants.
+
+    Aliases above the selected root (including macOS /var) remain usable. POSIX
+    descriptor-relative opens prevent a renamed ancestor from redirecting reads
+    between persisted work slices or during acquisition.
+    """
+
+    def __init__(self, root):
+        self.root = Path(os.path.abspath(root))
+        self.physical_root = self.root.resolve(strict=True)
+        self.identity = _directory_identity(self.root)
+        self.check(self.root, directory=True)
+
+    def check(self, path, *, directory=False):
+        path = Path(os.path.abspath(path))
+        try:
+            relative = path.relative_to(self.root)
+            if '..' in relative.parts or len(relative.parts) > 128 or _directory_identity(self.root) != self.identity:
+                raise AcquisitionError('source-unavailable')
+            current = self.root
+            for index, part in enumerate(('', *relative.parts)):
+                if part:
+                    current = current / part
+                value = os.stat(current, follow_symlinks=False)
+                if stat.S_ISLNK(value.st_mode) or getattr(value, 'st_file_attributes', 0) & 0x400:
+                    raise AcquisitionError('input-nonregular')
+                if (directory or index < len(relative.parts)) and not stat.S_ISDIR(value.st_mode):
+                    raise AcquisitionError('input-nonregular')
+            if self.root.resolve(strict=True) != self.physical_root:
+                raise AcquisitionError('source-unavailable')
+            return relative
+        except (ValueError, OSError, RuntimeError):
+            raise AcquisitionError('source-unavailable') from None
+
+    def directory_fd(self, path):
+        relative = self.check(path, directory=True)
+        if os.open not in os.supports_dir_fd:
+            return None
+        flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        descriptor = None
+        try:
+            descriptor = os.open(self.root, flags)
+            root = os.fstat(descriptor)
+            if (root.st_dev, root.st_ino, root.st_mode) != (self.identity.device, self.identity.inode, self.identity.mode):
+                raise AcquisitionError('source-unavailable')
+            for part in relative.parts:
+                child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            return descriptor
+        except (OSError, ValueError):
+            if descriptor is not None:
+                os.close(descriptor)
+            raise AcquisitionError('source-unavailable') from None
+        except BaseException:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise
+
+    def open_file(self, path, flags):
+        self.check(path)
+        parent = self.directory_fd(Path(path).parent)
+        if parent is not None:
+            try:
+                return os.open(Path(path).name, flags, dir_fd=parent)
+            finally:
+                os.close(parent)
+        descriptor = os.open(path, flags)
+        try:
+            self.check(path)
+            if os.name == 'nt':
+                # Windows lacks openat(). Verify the actual opened file before
+                # reading; a replaced ancestor cannot redirect bytes outside
+                # the selected physical root. Native validation is separate.
+                import ctypes
+                from ctypes import wintypes
+                import msvcrt
+                function = ctypes.WinDLL('kernel32', use_last_error=True).GetFinalPathNameByHandleW
+                function.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+                function.restype = wintypes.DWORD
+                buffer = ctypes.create_unicode_buffer(32768)
+                length = function(msvcrt.get_osfhandle(descriptor), buffer, len(buffer), 0)
+                if not 0 < length < len(buffer):
+                    raise AcquisitionError('source-unavailable')
+                actual = buffer.value
+                if actual.startswith('\\\\?\\UNC\\'):
+                    actual = '\\\\' + actual[8:]
+                elif actual.startswith('\\\\?\\'):
+                    actual = actual[4:]
+                if not Path(actual).is_relative_to(self.physical_root):
+                    raise AcquisitionError('source-unavailable')
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+
+@dataclass(frozen=True, slots=True)
+class ScopedFileInput(m.FileInput):
+    boundary: FilesystemBoundary
+
+
+@contextmanager
+def scoped_scandir(path, boundary=None):
+    descriptor = boundary.directory_fd(path) if boundary is not None else None
     try:
+        with os.scandir(descriptor if descriptor is not None else path) as entries:
+            yield entries
+        if boundary is not None:
+            boundary.check(path, directory=True)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _bounded_file(path, maximum, *, boundary=None):
+    try:
+        if boundary is not None:
+            boundary.check(path)
         if not stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
             raise AcquisitionError('input-nonregular')
         flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
-        with os.fdopen(os.open(path, flags), 'rb') as stream:
+        descriptor = boundary.open_file(path, flags) if boundary is not None else os.open(path, flags)
+        with os.fdopen(descriptor, 'rb') as stream:
             before = os.fstat(stream.fileno())
             if not stat.S_ISREG(before.st_mode):
                 raise AcquisitionError('input-nonregular')
@@ -35,6 +155,8 @@ def _bounded_file(path, maximum):
             data = stream.read(maximum + 1)
             after = os.fstat(stream.fileno())
         observed = os.stat(path, follow_symlinks=False)
+        if boundary is not None:
+            boundary.check(path)
         if len(data) > maximum:
             raise AcquisitionError('input-limit')
         if _signature(before) != _signature(after) or _signature(after) != _signature(observed):
@@ -172,19 +294,24 @@ class SnapshotInput:
         return self.detach_validator()()
 
 
-def acquire_file(path: Path, *, max_bytes: int):
+def acquire_file(path: Path, *, max_bytes: int, boundary=None):
     path = path.absolute()
     source = m.SourceRef(m.SourceKind.FILESYSTEM, str(path))
     if path.is_symlink():
         raise AcquisitionError('input-nonregular')
-    data = _bounded_file(path, max_bytes)
+    boundary = boundary or FilesystemBoundary(path.parent)
+    boundary.check(path)
+    anchor = capture_anchor(path)
+    data = _bounded_file(path, max_bytes, boundary=boundary)
+    if not anchor.valid():
+        raise AcquisitionError('input-changed')
     root = path.parent.resolve()
 
     def sibling(name):
         candidate = path.parent / name
         if candidate.is_symlink() or not candidate.resolve().is_relative_to(root):
             return None
-        return _bounded_file(candidate, 1_000_000)
+        return _bounded_file(candidate, 1_000_000, boundary=boundary)
 
     context = ProofContext(sibling, validator=sibling)
     context.prepare(data, str(path))
@@ -192,16 +319,10 @@ def acquire_file(path: Path, *, max_bytes: int):
     expected_digest = hashlib.sha256(data).digest()
     def valid():
         try:
-            return hashlib.sha256(_bounded_file(path, max_bytes)).digest() == expected_digest
+            return anchor.valid() and hashlib.sha256(_bounded_file(path, max_bytes, boundary=boundary)).digest() == expected_digest
         except AcquisitionError:
             return False
 
-    try:
-        anchor = capture_anchor(path)
-        if anchor.source_path != str(path):
-            anchor = None
-    except AcquisitionError:
-        anchor = None
     return SnapshotInput(source, data, context, valid, anchor)
 
 
@@ -212,10 +333,15 @@ def acquire_bytes(data, logical_path, *, max_bytes):
     return SnapshotInput(m.SourceRef(m.SourceKind.BYTES, logical_path), data, ProofContext(lambda name: None))
 
 
-def directory_signature(path):
+def directory_signature(path, boundary=None):
     """A change detector for one traversal, never an atomic tree snapshot."""
     try:
-        value = os.stat(path, follow_symlinks=False)
+        descriptor = boundary.directory_fd(path) if boundary is not None else None
+        try:
+            value = os.fstat(descriptor) if descriptor is not None else os.stat(path, follow_symlinks=False)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         if not stat.S_ISDIR(value.st_mode) or getattr(value, 'st_file_attributes', 0) & 0x400 or not value.st_ino:
             raise AcquisitionError('source-unavailable')
         signature = (value.st_dev, value.st_ino, value.st_mode, value.st_mtime_ns, value.st_ctime_ns)
