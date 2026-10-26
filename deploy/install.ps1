@@ -6,11 +6,21 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $installer = Join-Path $PSScriptRoot 'installer.py'
-& $PythonLauncher -3 -c 'import sys; assert sys.version_info >= (3, 11), "LeakGuard requires Python 3.11 or newer"'
-if ($LASTEXITCODE -ne 0) {
-    throw 'Python 3.11 or newer is required. Install a per-user Python runtime and retry.'
+$manifestPath = Join-Path $BundleDirectory 'release.json'
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw 'The extracted bundle is missing release.json.'
 }
-& $PythonLauncher -3 $installer install $BundleDirectory
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$targetPython = [string]$manifest.target_python
+if ($targetPython -notmatch '^3\.[0-9]{1,2}$') {
+    throw 'The bundle has no valid target Python version.'
+}
+$pythonSelector = "-$targetPython"
+& $PythonLauncher $pythonSelector -c "import sys; assert f'{sys.version_info.major}.{sys.version_info.minor}' == '$targetPython', 'Bundle requires Python $targetPython'"
+if ($LASTEXITCODE -ne 0) {
+    throw "Python $targetPython is required. Install a per-user matching runtime, then retry."
+}
+& $PythonLauncher $pythonSelector $installer install $BundleDirectory
 if ($LASTEXITCODE -ne 0) {
     throw 'LeakGuard installation failed; existing active release was left in place.'
 }

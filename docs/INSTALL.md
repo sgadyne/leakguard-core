@@ -84,7 +84,11 @@ cd LeakGuard
 The script uses `python3`. If Python's `venv` module has no `ensurepip`, install
 `uv` for the current user or use a Python build that includes `ensurepip`. The
 runtime is created directly at its final versioned path and all wheel
-installation runs offline. On Linux, add `~/.local/bin` to `PATH` if needed.
+installation runs offline. The selected interpreter's minor version must match
+the bundle metadata; if `python3` selects a different minor, choose one
+explicitly with `PYTHON=/path/to/python3.11 ./deploy/install.sh` (use the
+version recorded in that bundle). On Linux, add `~/.local/bin` to `PATH` if
+needed.
 The Buddy shortcut is also written to the user's application menu.
 
 For a native macOS alpha install, the new default config selects the explicit
@@ -100,10 +104,12 @@ Extract the archive, then run PowerShell as the current user:
 
 ```powershell
 Expand-Archive .\LeakGuard-0.2.0-alpha.1-windows-x86_64.zip .\LeakGuardBundle
-& .\LeakGuardBundle\LeakGuard\deploy\install.ps1
+& .\LeakGuardBundle\LeakGuard\deploy\install.ps1 `
+  -BundleDirectory .\LeakGuardBundle\LeakGuard
 ```
 
-The bootstrap uses the Python launcher (`py -3`) and installs under
+The bootstrap reads the bundle's target Python version and uses the matching
+Python launcher selector (for example `py -3.11`); it installs under
 `%LOCALAPPDATA%\LeakGuard`. It adds Buddy, Buddy Open, Doctor, and Manage
 commands to the user's Start Menu. From PowerShell, service actions are also
 available through
