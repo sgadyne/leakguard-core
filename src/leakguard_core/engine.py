@@ -682,7 +682,7 @@ class ScanService:
 
     def _work_batch(self, scope, root, *, limits, use_cache, cancel, ingest=False):
         from . import models as m
-        from .scan_store import StateError
+        from .scan_store import StateError, DirectoryProgress
         from .sources import (directory_signature, AcquisitionError, FilesystemBoundary,
                               ScopedFileInput, scoped_scandir)
         issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
@@ -690,6 +690,9 @@ class ScanService:
         claims = {}
         deadline = time.monotonic() + limits.deadline_seconds
         enumerated = 0
+        replayed = 0
+        progress_supported = all(hasattr(self.store, name) for name in (
+            'get_directory_progress', 'set_directory_progress'))
         completed = False
         def failure(code, source=None):
             try:
@@ -734,7 +737,7 @@ class ScanService:
                 self.store.enqueue_work(lease, ((str(pathlib.Path(path).absolute()), 'directory', 0) for path in preferred[:1000]))
 
             def work_inputs():
-                nonlocal enumerated
+                nonlocal enumerated, replayed
                 while time.monotonic() < deadline and not (cancel and cancel()):
                     claim = self.store.claim_work(lease)
                     if claim is None:
@@ -748,21 +751,61 @@ class ScanService:
                         claims[str(path.absolute())] = claim
                         yield ScopedFileInput(path, boundary) if boundary is not None else m.FileInput(path)
                         continue
+                    if enumerated >= limits.max_directory_entries:
+                        issues.append(m.CoverageIssue(m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+                        return
                     entries_batch = []
                     exhausted = True
+                    position = 0
+                    prefix = hashlib.sha256()
+                    def changed_cursor():
+                        if progress_supported:
+                            self.store.set_directory_progress(claim, None)
+                        self.store.finish_directory(claim, success=None)
+                        self.store.invalidate_scope(path)
+                        issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
                     try:
                         before = directory_signature(path, boundary)
+                        progress = self.store.get_directory_progress(claim) if progress_supported else None
+                        if progress is not None and progress.signature != before:
+                            self.store.set_directory_progress(claim, None)
+                            self.store.invalidate_scope(path)
+                            issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
+                            progress = None
+                        resume = progress.entries if progress is not None else 0
                         with scoped_scandir(path, boundary) as entries:
                             for entry in entries:
-                                if time.monotonic() >= deadline or enumerated >= limits.max_directory_entries or (cancel and cancel()):
+                                if time.monotonic() >= deadline or (cancel and cancel()):
+                                    exhausted = False
+                                    break
+                                if position < resume:
+                                    if replayed >= 100_000:
+                                        self.store.finish_directory(claim, success=False)
+                                        issues.append(m.CoverageIssue(m.ErrorCode.INPUT_LIMIT, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
+                                        return
+                                    kind = 'directory' if entry.is_dir(follow_symlinks=False) else 'file'
+                                    prefix.update(json.dumps([entry.name, kind], ensure_ascii=True, separators=(',', ':')).encode() + b'\n')
+                                    position += 1
+                                    replayed += 1
+                                    if position == resume and prefix.hexdigest() != progress.prefix_sha256:
+                                        changed_cursor()
+                                        return
+                                    continue
+                                if position >= 100_000:
+                                    self.store.finish_directory(claim, success=False)
+                                    issues.append(m.CoverageIssue(m.ErrorCode.INPUT_LIMIT, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
+                                    return
+                                if enumerated >= limits.max_directory_entries:
                                     exhausted = False
                                     break
                                 enumerated += 1
+                                position += 1
                                 child = path / entry.name
+                                kind = 'directory' if entry.is_dir(follow_symlinks=False) else 'file'
+                                prefix.update(json.dumps([entry.name, kind], ensure_ascii=True, separators=(',', ':')).encode() + b'\n')
                                 if self._excluded(child):
                                     issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION, m.SourceRef(m.SourceKind.FILESYSTEM, str(child)), omission_id='operator-exclusion'))
                                     continue
-                                kind = 'directory' if entry.is_dir(follow_symlinks=False) else 'file'
                                 entries_batch.append((str(child.absolute()), kind, 100 if kind == 'file' else 101))
                                 if len(entries_batch) >= 256:
                                     self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'directory'))
@@ -772,13 +815,25 @@ class ScanService:
                             self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'directory'))
                             self.store.enqueue_work(lease, tuple(entry for entry in entries_batch if entry[1] == 'file'), refresh=True)
                         stable = directory_signature(path, boundary) == before
-                        self.store.finish_directory(claim, success=True if exhausted and stable else None, signature=before if exhausted and stable else None)
-                        if not stable:
-                            issues.append(m.CoverageIssue(m.ErrorCode.INPUT_CHANGED, m.SourceRef(m.SourceKind.FILESYSTEM, str(path)), required=True))
+                        if not stable or position < resume and exhausted:
+                            changed_cursor()
                             return
-                        if not exhausted:
+                        if position < resume:
+                            # Budget/cancellation during prefix verification does
+                            # not invalidate the previously durable cursor.
+                            self.store.finish_directory(claim, success=None)
                             issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
                             return
+                        if progress_supported and not exhausted:
+                            self.store.set_directory_progress(claim, DirectoryProgress(before, position, prefix.hexdigest()))
+                        self.store.finish_directory(claim, success=True if exhausted else None, signature=before if exhausted else None)
+                        if not exhausted:
+                            issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+                            if cancel and cancel():
+                                return
+                            # Drain the newly queued files before this partial
+                            # directory is eligible for a retry on the next slice.
+                            continue
                     except (OSError, AcquisitionError):
                         self.store.finish_directory(claim, success=False)
                         self.store.invalidate_scope(path)
