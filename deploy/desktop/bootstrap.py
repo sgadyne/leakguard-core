@@ -2,6 +2,9 @@
 """Prepare only Password Buddy's explicit private desktop runtime (stdlib only)."""
 from __future__ import annotations
 
+import sys
+sys.dont_write_bytecode = True
+
 import argparse
 import hashlib
 import json
@@ -12,7 +15,6 @@ import re
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -156,27 +158,34 @@ def atomic_json(path, value):
 
 
 class PreparationLock:
-    def __init__(self, path):
-        if path.is_symlink():
-            fail("profile-symlink-refused")
-        self.stream = path.open("a+b")
+    def __init__(self, path, code="runtime-preparation-in-use"):
+        self.descriptor = None
+        descriptor = None
         try:
+            if path.is_symlink():
+                fail("profile-symlink-refused")
+            descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+                fail("profile-path-invalid")
             if os.name == "nt":
                 import msvcrt
-                self.stream.seek(0)
-                self.stream.write(b"\0")
-                self.stream.flush()
-                self.stream.seek(0)
-                msvcrt.locking(self.stream.fileno(), msvcrt.LK_NBLCK, 1)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(self.stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.descriptor, descriptor = descriptor, None
         except OSError:
-            self.stream.close()
-            fail("runtime-preparation-in-use")
+            fail(code)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def close(self):
-        self.stream.close()
+        if self.descriptor is not None:
+            os.close(self.descriptor)
+            self.descriptor = None
 
 
 def clean_environment(base_python, state):
@@ -224,7 +233,7 @@ def check_runtime(receipt, manifest, root, state, environment, deadline):
         "'base':sys.base_prefix,'buddy':m.version('leakguard-buddy'),"
         "'pip':m.version('pip'),'sqlite':hasattr(sqlite3.Connection,'serialize')}))"
     )
-    checked = run_json([str(interpreter), "-I", "-X", "utf8", "-c", code], environment, deadline, "private-runtime-check-failed")
+    checked = run_json([str(interpreter), "-I", "-B", "-X", "utf8", "-c", code], environment, deadline, "private-runtime-check-failed")
     if (checked.get("private") is not True or checked.get("buddy") != "0.1.0a2"
             or not checked.get("pip") or checked.get("sqlite") is not True):
         fail("private-runtime-check-failed")
@@ -242,6 +251,7 @@ def prepare(resources, data):
     if os.name != "nt":
         data.chmod(0o700)
     lock = PreparationLock(data / ".desktop-prepare.lock")
+    ownership = None
     try:
         profile = data / "profile"
         private_directory(profile, data)
@@ -251,10 +261,14 @@ def prepare(resources, data):
         previous = json.loads(marker.read_text()) if marker.exists() else None
         if previous is not None and previous.get("runtimeId") != manifest["runtimeId"]:
             fail("runtime-migration-required")
+        if (profile / "state").is_symlink():
+            fail("profile-symlink-refused")
         if previous is None and (profile / "state").exists() and any((profile / "state").iterdir()):
             fail("unclaimed-profile-state")
         state = profile / "state"
         private_directory(state, data)
+        # Same flock/msvcrt byte-zero lock as BuddyBackend, even with both stores locked.
+        ownership = PreparationLock(state / ".buddy-owner.lock", "profile-in-use")
         identity = {"schemaVersion": 1, "runtimeId": manifest["runtimeId"], "target": manifest["target"],
                     "sourceCommit": manifest["sourceCommit"], "status": "preparing"}
         if previous is None:
@@ -295,7 +309,7 @@ def prepare(resources, data):
             emit("progress", stage="installing-backend")
             private_directory(runtime / "engine", data)
             bundle = resources / manifest["backendBundle"]
-            installed = run_json([str(base_python), "-I", "-X", "utf8", str(bundle / "deploy" / "installer.py"),
+            installed = run_json([str(base_python), "-I", "-B", "-X", "utf8", str(bundle / "deploy" / "installer.py"),
                                   "install", str(bundle), "--root", str(runtime / "engine"),
                                   "--state-dir", str(state)], environment, deadline, "backend-install-failed")
             if installed.get("release_version") != manifest["backendRelease"] or installed.get("state_dir") != str(state):
@@ -309,6 +323,8 @@ def prepare(resources, data):
         atomic_json(marker, {**identity, "status": "ready"})
         emit("runtime-ready", **{key: receipt[key] for key in ("protocol", "runtimeId", "python", "stateDir", "config")})
     finally:
+        if ownership is not None:
+            ownership.close()
         lock.close()
 
 

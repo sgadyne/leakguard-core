@@ -49,8 +49,7 @@ def run(command, cwd=SOURCE):
 def clean_copy(source, destination):
     # Enumeration validates links before copytree follows no symlink at all.
     bootstrap.records(source)
-    shutil.copytree(source, destination, symlinks=True,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
+    shutil.copytree(source, destination, symlinks=True)
 
 
 def make_buddy_wheel(source, destination):
@@ -69,6 +68,12 @@ def make_buddy_wheel(source, destination):
     assets = package / "static"
     if {path.name for path in assets.iterdir() if path.is_file()} != {"index.html", "app.js", "app.css"}:
         raise ValueError("Production UI must contain exactly index.html/app.js/app.css")
+    generated = source / "apps/buddy-ui/dist"
+    if {path.name for path in generated.iterdir()} != {"index.html", "app.js", "app.css"}:
+        raise ValueError("UI dist must contain exactly index.html/app.js/app.css")
+    if any((generated / name).read_bytes() != (assets / name).read_bytes()
+           for name in ("index.html", "app.js", "app.css")):
+        raise ValueError("Packaged static files differ from the built UI; regenerate before packaging")
     html = (assets / "index.html").read_text()
     if html.count("__BUDDY_STYLE_NONCE__") != 1:
         raise ValueError("Production UI nonce sentinel is absent or repeated")
@@ -117,6 +122,7 @@ def assemble(args):
             run(["npm", "ci", "--no-audit", "--no-fund"], project)
             run(["npm", "run", "build"], project)
     source_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True).strip()
+    source_time = subprocess.check_output(["git", "show", "-s", "--format=%cI", "HEAD"], cwd=SOURCE, text=True).strip()
     # Generated output may be ignored by Git. Input file hashes below identify every byte.
     if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=SOURCE, text=True).strip():
         raise ValueError("Commit integrated inputs before packaging (working tree is dirty)")
@@ -148,6 +154,7 @@ def assemble(args):
         manifest["release_version"] = BACKEND_RELEASE
         manifest["source_commit"] = source_commit
         manifest["pinned_distributions"]["leakguard-buddy"] = "0.1.0a2"
+    release["created_utc"] = source_time
     write_json(bundle / "deploy/release-manifest.json", source_release)
     release["source_manifest_sha256"] = bootstrap.digest(bundle / "deploy/release-manifest.json")
     write_json(bundle / "release.json", release)
@@ -168,7 +175,11 @@ def assemble(args):
                   "backendInput": {"directory": str(backend_input), "files": input_backend_files,
                                    "releaseManifest": original_manifest},
                   "wheelBuild": {"method": "fresh-stdlib-pep427", "version": "0.1.0a2",
-                                 "sha256": bootstrap.digest(wheel)},
+                                 "sha256": bootstrap.digest(wheel),
+                                 "sourceFiles": [{"path": path.relative_to(SOURCE).as_posix(), "sha256": bootstrap.digest(path)}
+                                                 for path in sorted((SOURCE / "apps/buddy").rglob("*"))
+                                                 if path.is_file() and path.suffix in {".py", ".toml", ".html", ".js", ".css"}
+                                                 and not any(part in {"build", "dist", "__pycache__", ".egg-info"} for part in path.parts)]},
                   "upstreamArchiveProvenance": None}
     if args.provenance:
         provenance["upstreamArchiveProvenance"] = json.loads(args.provenance.read_text())
@@ -192,8 +203,12 @@ def assemble(args):
             raise ValueError("Packager returned an unexpected app directory set")
         app = app_paths[0]
         artifact = output / f"Password-Buddy-{DESKTOP_VERSION}-{args.target}.zip"
-        zip_tree(app, artifact)
-        receipt.update(appDirectory=str(app), artifact=str(artifact), artifactSha256=bootstrap.digest(artifact),
+        app_bundle = app / "Password Buddy.app" if args.target == "macos-arm64" else app
+        zip_tree(app_bundle, artifact)
+        app_files = {"sourceCommit": source_commit, "runtimeId": manifest["runtimeId"], "files": bootstrap.records(app_bundle)}
+        write_json(output / "artifact-files.json", app_files)
+        receipt.update(appDirectory=str(app_bundle), artifact=str(artifact), artifactSha256=bootstrap.digest(artifact),
+                       appFilesSha256=bootstrap.digest(output / "artifact-files.json"),
                        artifactBytes=artifact.stat().st_size)
         if args.target == "windows-x86_64":
             receipt["nativeAcceptance"] = "native Windows unverified"
