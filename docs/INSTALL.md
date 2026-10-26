@@ -63,11 +63,11 @@ installation runs offline. On Linux, add `~/.local/bin` to `PATH` if needed.
 The Buddy shortcut is also written to the user's application menu.
 
 For a native macOS alpha install, the new default config selects the explicit
-`supervised-alpha` worker policy. This policy is visible to doctor and remains
-in the private config file. The installer preserves the rest of an existing
-config while selecting the encrypted observation backend at
-`state/observations.lgo`; an unavailable key keeps observations ephemeral rather
-than falling back to a plaintext database.
+`supervised-alpha` worker policy. The installer also selects that policy in an
+existing macOS config, and doctor reports the choice. On every platform, the
+installer preserves other existing settings while selecting the encrypted
+observation backend at `state/observations.lgo`; an unavailable key keeps
+observations ephemeral rather than falling back to a plaintext database.
 
 ## Windows
 
