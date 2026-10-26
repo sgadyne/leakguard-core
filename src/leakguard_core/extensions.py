@@ -266,6 +266,17 @@ class ExtensionRegistry:
                  'profiles': [], 'sha256': digest, 'cases': cases}
         self._validate_entry(entry)
         with self._mutation() as value:
+            for existing in value['extensions'].values():
+                if (existing['kind'] == 'wheel' and existing['id'] != entry['id']
+                        and existing['spec']['module'] == spec['module']):
+                    raise ExtensionError('extension-conflict')
+            # Disable a prior version durably before replacing its installed
+            # code. Failed install/state publication cannot reactivate new code
+            # under an earlier enabled registry entry.
+            previous = value['extensions'].get(entry['id'])
+            if previous is not None and previous['profiles']:
+                previous['profiles'] = []
+                _atomic(self.path, json.dumps(value, sort_keys=True, ensure_ascii=True).encode())
             # Installation is explicit and offline; dependency wheels must already
             # be installed by the release/private-runtime owner.
             verified = _read(Path(wheel), 64_000_000)
@@ -309,7 +320,8 @@ class ExtensionRegistry:
         try:
             if entry['kind'] == 'wheel':
                 handle = plugins.load([entry['spec']], worker_policy=worker_policy)[0]
-                if handle.api_version != entry['metadata']['api_version']:
+                if (handle.api_version != entry['metadata']['api_version']
+                        or handle.manifest is not None and handle.manifest.id != entry['metadata'].get('component', entry['id'])):
                     raise ExtensionError('extension-api-incompatible')
             else:
                 handle = plugins.load_scripts([entry['spec']])[0]
