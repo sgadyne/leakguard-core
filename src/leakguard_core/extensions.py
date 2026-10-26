@@ -5,11 +5,14 @@ private virtual environment; simply listing/discovering extensions imports none.
 """
 from __future__ import annotations
 
+import base64
+import csv
 from contextlib import contextmanager
 import copy
 import email.parser
 import email.policy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -156,12 +159,75 @@ def _member(value):
     return path
 
 
+def _validate_wheel_record(wheel, members, info_dir):
+    """Validate wheel RECORD paths and digests using archive bytes only."""
+    record_name = f'{info_dir}/RECORD'
+    records = [item for item in members if item.filename.endswith('.dist-info/RECORD')]
+    if len(records) != 1 or records[0].filename != record_name:
+        raise ExtensionError('extension-wheel-invalid')
+    if any(item.filename.casefold().endswith((f'{info_dir.casefold()}/record.jws',
+                                               f'{info_dir.casefold()}/record.p7s'))
+           for item in members):
+        raise ExtensionError('extension-wheel-invalid')
+    record = records[0]
+    if record.file_size > 2_000_000:
+        raise ExtensionError('extension-capacity-limit')
+    try:
+        text = wheel.read(record).decode('utf-8')
+        reader = csv.reader(io.StringIO(text, newline=''), strict=True)
+        rows = []
+        for row in reader:
+            if len(rows) >= 10_000:
+                raise ExtensionError('extension-wheel-invalid')
+            rows.append(row)
+    except Exception:
+        raise ExtensionError('extension-wheel-invalid') from None
+    if not 1 <= len(rows) <= 10_000:
+        raise ExtensionError('extension-wheel-invalid')
+
+    files = {item.filename: item for item in members if not item.is_dir()}
+    seen = set()
+    for row in rows:
+        if len(row) != 3:
+            raise ExtensionError('extension-wheel-invalid')
+        name, digest, size = row
+        try:
+            normalized = _member(name)
+        except ExtensionError:
+            raise ExtensionError('extension-wheel-invalid') from None
+        if (name.endswith('/') or normalized.as_posix() != name or name in seen
+                or name not in files):
+            raise ExtensionError('extension-wheel-invalid')
+        seen.add(name)
+        if name == record_name:
+            if digest or size:
+                raise ExtensionError('extension-wheel-invalid')
+            continue
+        if not re.fullmatch(r'(?:sha256|sha384|sha512)=[A-Za-z0-9_-]+', digest, re.ASCII):
+            raise ExtensionError('extension-wheel-invalid')
+        algorithm, encoded = digest.split('=', 1)
+        if len(encoded) != {'sha256': 43, 'sha384': 64, 'sha512': 86}[algorithm]:
+            raise ExtensionError('extension-wheel-invalid')
+        try:
+            decoded = base64.b64decode(encoded + '=' * (-len(encoded) % 4),
+                                       altchars=b'-_', validate=True)
+        except Exception:
+            raise ExtensionError('extension-wheel-invalid') from None
+        content = wheel.read(files[name])
+        actual_digest = hashlib.new(algorithm, content).digest()
+        expected = base64.urlsafe_b64encode(actual_digest).decode('ascii').rstrip('=')
+        if (encoded != expected or not re.fullmatch(r'(?:0|[1-9][0-9]*)', size, re.ASCII)
+                or size != str(len(content)) or decoded != actual_digest):
+            raise ExtensionError('extension-wheel-invalid')
+    if seen != set(files) or rows.count([record_name, '', '']) != 1:
+        raise ExtensionError('extension-wheel-invalid')
+
+
 def _wheel_details(path):
     """Read inert wheel members and map them to standard installation schemes."""
     raw = _read(Path(path), 64_000_000)
     if Path(path).suffix != '.whl':
         raise ExtensionError('extension-wheel-invalid')
-    import io
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as wheel:
             members = wheel.infolist()
@@ -203,6 +269,7 @@ def _wheel_details(path):
             if (not info_dir.endswith('.dist-info') or info_dir.count('/') != 0
                     or wheel_metadata[0].filename.rsplit('/', 1)[0] != info_dir):
                 raise ExtensionError('extension-wheel-invalid')
+            _validate_wheel_record(wheel, members, info_dir)
             distribution = email.parser.BytesParser(policy=email.policy.compat32).parsebytes(
                 wheel.read(dist_metadata[0]))
             if distribution.defects:
@@ -241,6 +308,7 @@ def _wheel_details(path):
             module_roots = set()
             install_targets = set()
             script_names = set()
+            script_name_keys = set()
             has_entrypoints = False
             for item in members:
                 if item.is_dir():
@@ -273,13 +341,18 @@ def _wheel_details(path):
                     try:
                         import configparser
                         parser = configparser.ConfigParser(interpolation=None, strict=True)
+                        parser.optionxform = str
                         parser.read_string(wheel.read(item).decode('utf-8'))
                         for section in ('console_scripts', 'gui_scripts'):
                             if parser.has_section(section):
                                 for name in parser[section]:
                                     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,199}', name):
                                         raise ExtensionError('extension-wheel-invalid')
-                                    script_names.add(name.casefold())
+                                    name_key = name.casefold()
+                                    if name_key in script_name_keys:
+                                        raise ExtensionError('extension-wheel-invalid')
+                                    script_name_keys.add(name_key)
+                                    script_names.add(name)
                     except ExtensionError:
                         raise
                     except Exception:

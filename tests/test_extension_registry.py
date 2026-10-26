@@ -1,5 +1,7 @@
 """Registry discovery is inert; explicit activation is checked and profile scoped."""
 import hashlib
+import base64
+import csv
 import contextlib
 import io
 import json
@@ -16,7 +18,7 @@ from leakguard_core.extensions import ExtensionError, ExtensionRegistry, inspect
 
 
 def _write_wheel(path, *, extension_id='example', module='example', distribution='leakguard-example',
-                 version='1.0', extra_files=None, component=None):
+                 version='1.0', extra_files=None, component=None, record_mutation=None):
     metadata = {'schema_version': 1, 'id': extension_id, 'api_version': 2,
                 'module': module, 'version': version}
     if component is not None:
@@ -28,6 +30,17 @@ def _write_wheel(path, *, extension_id='example', module='example', distribution
              f'{info}/METADATA': f'Metadata-Version: 2.1\nName: {distribution}\nVersion: {version}\n\n',
              f'{info}/WHEEL': 'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n\n'}
     files.update(extra_files or {})
+    rows = []
+    for name, value in sorted(files.items()):
+        content = value.encode('utf-8')
+        digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode('ascii').rstrip('=')
+        rows.append([name, f'sha256={digest}', str(len(content))])
+    if record_mutation is not None:
+        rows = record_mutation(rows)
+    rows.append([f'{info}/RECORD', '', ''])
+    record_stream = io.StringIO(newline='')
+    csv.writer(record_stream, lineterminator='\n').writerows(rows)
+    files[f'{info}/RECORD'] = record_stream.getvalue()
     with zipfile.ZipFile(path, 'w') as archive:
         for name, value in files.items():
             archive.writestr(name, value)
@@ -107,6 +120,65 @@ class RegistryTests(unittest.TestCase):
                 archive.writestr('../escape.py', '')
             with self.assertRaises(ExtensionError):
                 inspect_wheel(wheel)
+
+    def test_wheel_record_rejects_paths_duplicates_missing_payload_and_bad_digests(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-record-') as folder:
+            root = Path(folder)
+            scenarios = (
+                ('record-traversal.whl', lambda rows: rows + [['../../outside', '', '']]),
+                ('record-duplicate.whl', lambda rows: rows + [rows[0]]),
+                ('record-missing.whl', lambda rows: [row for row in rows
+                                                     if row[0] != 'example/__init__.py']),
+                ('record-digest.whl', lambda rows: [
+                    [row[0], 'sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', row[2]]
+                    if row[0] == 'example/__init__.py' else row for row in rows]),
+                ('record-size.whl', lambda rows: [
+                    [row[0], row[1], str(int(row[2]) + 1)]
+                    if row[0] == 'example/__init__.py' else row for row in rows]),
+            )
+            for filename, mutation in scenarios:
+                with self.subTest(filename=filename):
+                    wheel = root / filename
+                    _write_wheel(wheel, record_mutation=mutation)
+                    with self.assertRaises(ExtensionError) as failure:
+                        inspect_wheel(wheel)
+                    self.assertEqual(failure.exception.code, 'extension-wheel-invalid')
+
+            signed = root / 'record-signed.whl'
+            _write_wheel(signed, extra_files={
+                'leakguard_example-1.0.dist-info/RECORD.jws': 'signature',
+            })
+            with self.assertRaises(ExtensionError) as failure:
+                inspect_wheel(signed)
+            self.assertEqual(failure.exception.code, 'extension-wheel-invalid')
+
+    def test_capitalized_console_script_preserves_name_and_detects_casefold_collision(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-script-case-') as folder:
+            wheel = Path(folder) / 'example.whl'
+            _write_wheel(wheel, extra_files={
+                'leakguard_example-1.0.dist-info/entry_points.txt':
+                    '[console_scripts]\nHello=example:main\n',
+            })
+            details = extensions._wheel_details(wheel)
+            self.assertEqual(details['script_names'], ['Hello'])
+            inventory = _empty_inventory(details)
+            for name in details['script_names']:
+                for script in (name, name + '.exe', name + '-script.py'):
+                    path = f"/private/runtime/scripts/{script}"
+                    inventory['destinations'].append({
+                        'scheme': 'scripts', 'relative': script, 'path': path,
+                        'path_key': extensions._path_key(path), 'exists': False,
+                        'symlink': False, 'regular': False, 'sha256': None, 'owners': [],
+                    })
+            lower_path = '/private/runtime/scripts/hello'
+            inventory['destinations'].append({
+                'scheme': 'scripts', 'relative': 'hello', 'path': lower_path,
+                'path_key': extensions._path_key(lower_path), 'exists': False,
+                'symlink': False, 'regular': False, 'sha256': None, 'owners': [],
+            })
+            with self.assertRaises(ExtensionError) as failure:
+                extensions._guard_wheel_collisions(details, inventory)
+            self.assertEqual(failure.exception.code, 'extension-wheel-invalid')
 
     def test_wheel_startup_hooks_are_rejected_without_import_or_install(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
