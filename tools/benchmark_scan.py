@@ -38,9 +38,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 if __package__:
-    from ._safe_inputs import read_empty_json_object, source_identity
+    from ._safe_inputs import read_json_object, source_identity
 else:
-    from _safe_inputs import read_empty_json_object, source_identity
+    from _safe_inputs import read_json_object, source_identity
 BENCHMARK_DEADLINE_SECONDS = 420
 DEFAULT_FILE_COUNTS = (1, 10, 50, 200)
 WORKER_COUNTS = (1, 2)
@@ -296,13 +296,40 @@ def _measure(service, sources, *, use_cache: bool) -> tuple[dict, tuple, object]
     return row, _normalized(report), report
 
 
-def _validate_config(path: Path) -> Path:
+def _validate_config(path: Path) -> tuple[Path, str]:
     try:
-        read_empty_json_object(path)
+        config = read_json_object(path)
         resolved = path.resolve(strict=True)
     except (OSError, ValueError, RuntimeError):
         raise BenchmarkFailure("config-invalid")
-    return resolved
+    if (set(config) - {"worker_policy"}
+            or ("worker_policy" in config
+                and (type(config["worker_policy"]) is not str
+                     or config["worker_policy"] not in {"strict", "supervised-alpha"}))):
+        raise BenchmarkFailure("config-invalid")
+    return resolved, config.get("worker_policy", "strict")
+
+
+def _scan_service_config(*, gitleaks: Path, rules: Path, workers: int,
+                         worker_policy: str) -> dict[str, object]:
+    return {
+        "gitleaks_executable": str(gitleaks),
+        "gitleaks_config": str(rules),
+        "scan_workers": workers,
+        "worker_policy": worker_policy,
+    }
+
+
+def _write_worker_policy_config(root: Path, worker_policy: str) -> Path:
+    if worker_policy not in {"strict", "supervised-alpha"}:
+        raise BenchmarkFailure("worker-policy-invalid")
+    path = root / "benchmark-worker-config.json"
+    try:
+        _exclusive_write(path, (json.dumps({"worker_policy": worker_policy},
+                                           sort_keys=True) + "\n").encode("utf-8"))
+    except OSError:
+        raise BenchmarkFailure("config-invalid") from None
+    return path
 
 
 def _part_curve_coverage(report) -> dict:
@@ -470,7 +497,8 @@ def _file_curve_cases(repetitions: int, counts=DEFAULT_FILE_COUNTS):
 
 def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                   repetitions: int, seed: int, input_root: Path,
-                  file_counts=DEFAULT_FILE_COUNTS, hook_repetitions=None) -> dict:
+                  file_counts=DEFAULT_FILE_COUNTS, hook_repetitions=None,
+                  worker_policy: str = "strict") -> dict:
     from leakguard_core import engine, models
 
     if hook_repetitions is None:
@@ -480,6 +508,8 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
             or tuple(sorted(set(file_counts))) != tuple(file_counts)
             or type(hook_repetitions) is not int or not 1 <= hook_repetitions <= 5):
         raise BenchmarkFailure("benchmark-shape-invalid")
+    if type(worker_policy) is not str or worker_policy not in {"strict", "supervised-alpha"}:
+        raise BenchmarkFailure("worker-policy-invalid")
 
     if state.is_symlink() or state.exists() and (not state.is_dir() or any(state.iterdir())):
         raise BenchmarkFailure("state-not-empty")
@@ -493,11 +523,10 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
         worker_state = state / f"scan-workers-{workers}"
         worker_state.mkdir(mode=0o700)
         service_open_started = time.perf_counter()
-        services[workers] = engine.ScanService({
-            "gitleaks_executable": str(gitleaks.resolve(strict=True)),
-            "gitleaks_config": str(rules),
-            "scan_workers": workers,
-        }, state_dir=worker_state)
+        services[workers] = engine.ScanService(_scan_service_config(
+            gitleaks=gitleaks.resolve(strict=True), rules=rules,
+            workers=workers, worker_policy=worker_policy,
+        ), state_dir=worker_state)
         service_open_seconds_by_workers[str(workers)] = round(
             time.perf_counter() - service_open_started, 6
         )
@@ -576,8 +605,9 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                 )
                 row["input_sha256"] = _sha(data)
                 part_curve.append({"parts": count, "repetition": repetition, **row})
+        hook_config = _write_worker_policy_config(input_root, worker_policy)
         hook_rows = _hook_latency_benchmark(
-            root=input_root, config=config, backend=gitleaks,
+            root=input_root, config=hook_config, backend=gitleaks,
             repetitions=hook_repetitions, marker=marker,
         )
     finally:
@@ -591,13 +621,14 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
     version_match = re.search(r"\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b", version_text)
     backend_version = version_match.group(0) if version_match else "unavailable"
     dependencies = {}
-    for package in ("packaging", "pypdf", "olefile"):
+    for package in ("packaging", "pypdf", "olefile", "psutil"):
         try:
             dependencies[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
             dependencies[package] = "unavailable"
     return {
         "seed": seed, "repetitions": repetitions,
+        "worker_policy": worker_policy,
         "file_counts": list(file_counts), "hook_repetitions": hook_repetitions,
         "file_curve": benchmarks,
         "part_curve": part_curve, "hook_latency": hook_rows,
@@ -621,6 +652,7 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
             "sampled_process_tree_peak_bytes": "Approximate peak sum of VmRSS for the benchmark process and observed descendants, sampled every 20ms on Linux. It can miss shorter-lived children and double-count shared pages.",
             "hook_latency_summary": "Median and nearest-rank p95 for repeated installed clean and blocked synthetic commits; no optimization or speedup claim is implied.",
             "service_open_seconds": "ScanService constructor time, recorded separately from scan calls.",
+            "worker_policy": "Explicit worker policy selected from the bounded config; empty config means strict.",
         },
         "known_measurement_gaps": {
             "sqlite_lock_time": "unavailable: lock acquisition/hold time is not instrumented",
@@ -645,6 +677,7 @@ def main(argv=None) -> int:
     output = Path(args.output).absolute()
     result = {"outcome": "setup-failed", "failed_stage": "preflight"}
     backend_digest = None
+    worker_policy = None
     try:
         if type(args.repetitions) is not int or not 1 <= args.repetitions <= 5:
             raise BenchmarkFailure("repetitions-invalid")
@@ -656,7 +689,7 @@ def main(argv=None) -> int:
                             else args.hook_repetitions)
         if type(hook_repetitions) is not int or not 1 <= hook_repetitions <= 5:
             raise BenchmarkFailure("hook-repetitions-invalid")
-        config = _validate_config(Path(args.config))
+        config, worker_policy = _validate_config(Path(args.config))
         backend = Path(args.gitleaks)
         if backend.is_symlink():
             raise BenchmarkFailure("backend-invalid")
@@ -672,7 +705,8 @@ def main(argv=None) -> int:
             details = run_benchmark(config=config, state=state, gitleaks=backend,
                                     repetitions=args.repetitions, seed=args.seed,
                                     input_root=input_root, file_counts=tuple(args.file_counts),
-                                    hook_repetitions=hook_repetitions)
+                                    hook_repetitions=hook_repetitions,
+                                    worker_policy=worker_policy)
         finally:
             shutil.rmtree(input_root)
         failures = sum(details["checks"].values())
@@ -683,6 +717,7 @@ def main(argv=None) -> int:
             failures = 1
         result = {"outcome": "passed" if failures == 0 else "failed",
                   "failed_stage": None if failures == 0 else "benchmark-checks",
+                  "worker_policy": worker_policy,
                   "source_commit": source_commit, "source_digest": source_digest,
                   "config_sha256": _sha(config.read_bytes()),
                   "backend_sha256_after": backend_digest_after,
@@ -713,6 +748,7 @@ def main(argv=None) -> int:
         "source_commit_after": source_commit_after,
         "source_digest_after": source_digest_after,
         "source_stable": source_stable,
+        "worker_policy": worker_policy,
         **result,
     }
     try:

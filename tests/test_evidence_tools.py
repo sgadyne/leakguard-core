@@ -307,6 +307,36 @@ class BenchmarkAggregationTests(unittest.TestCase):
             for count in (50, 500) for content_kind in ("clean", "positive")
         ])
 
+    def test_benchmark_worker_policy_is_bounded_and_explicit_in_runtime_configs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "config.json"
+            config.write_text("{}\n", encoding="utf-8")
+            self.assertEqual(benchmark_scan._validate_config(config),
+                             (config.resolve(), "strict"))
+
+            config.write_text('{"worker_policy":"supervised-alpha"}\n', encoding="utf-8")
+            self.assertEqual(benchmark_scan._validate_config(config),
+                             (config.resolve(), "supervised-alpha"))
+
+            for body in ('{"worker_policy":"implicit"}', '{"extra":true}',
+                         '{"worker_policy":null}'):
+                config.write_text(body, encoding="utf-8")
+                with self.subTest(body=body), self.assertRaises(benchmark_scan.BenchmarkFailure):
+                    benchmark_scan._validate_config(config)
+
+            for workers in (1, 2):
+                service_config = benchmark_scan._scan_service_config(
+                    gitleaks=root / "gitleaks", rules=root / "rules.toml",
+                    workers=workers, worker_policy="supervised-alpha",
+                )
+                self.assertEqual(service_config["scan_workers"], workers)
+                self.assertEqual(service_config["worker_policy"], "supervised-alpha")
+
+            hook_config = benchmark_scan._write_worker_policy_config(root, "supervised-alpha")
+            self.assertEqual(json.loads(hook_config.read_text(encoding="utf-8")),
+                             {"worker_policy": "supervised-alpha"})
+
     def test_benchmark_module_uses_its_copied_tool_root(self):
         self.assertEqual(Path(benchmark_scan.__file__).resolve(), BENCHMARK.resolve())
         self.assertEqual(benchmark_scan.ROOT.resolve(), ROOT.resolve())
@@ -448,18 +478,19 @@ class BenchmarkAggregationTests(unittest.TestCase):
             "positive_output_redacted": True,
         }])
         details = {"checks": checks, "scan_identity_cases": identities,
+                   "worker_policy": "supervised-alpha",
                    "scan_identities_consistent": True}
 
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            config = root / "empty.json"
-            config.write_text("{}\n", encoding="utf-8")
+            config = root / "alpha.json"
+            config.write_text('{"worker_policy":"supervised-alpha"}\n', encoding="utf-8")
             backend = root / "backend"
             backend.write_text("synthetic backend placeholder\n", encoding="ascii")
             backend.chmod(0o700)
             output = root / "receipt.json"
             source = ("a" * 40, "b" * 64)
-            with patch.object(benchmark_scan, "run_benchmark", return_value=details), \
+            with patch.object(benchmark_scan, "run_benchmark", return_value=details) as run_benchmark, \
                     patch.object(benchmark_scan, "source_identity", return_value=source):
                 status = benchmark_scan.main([
                     "--output", str(output), "--state", str(root / "state"),
@@ -467,8 +498,11 @@ class BenchmarkAggregationTests(unittest.TestCase):
                     "--repetitions", "3",
                 ])
             self.assertEqual(status, 0)
+            run_benchmark.assert_called_once()
+            self.assertEqual(run_benchmark.call_args.kwargs["worker_policy"], "supervised-alpha")
             receipt = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(receipt["outcome"], "passed")
+            self.assertEqual(receipt["worker_policy"], "supervised-alpha")
             self.assertEqual(receipt["details"]["checks"]["cache_reuse_failures"], 0)
             self.assertEqual(receipt["details"]["scan_identity_cases"][0]["policy_ids"]["warm"],
                              "policy-limit-10")
