@@ -22,13 +22,21 @@ python -m build --wheel --no-deps --outdir artifacts/wheelhouse .
 python -m build --wheel --no-deps --outdir artifacts/wheelhouse packages/leakguard_host
 python -m build --wheel --no-deps --outdir artifacts/wheelhouse packages/leakguard_vault
 python -m build --wheel --no-deps --outdir artifacts/wheelhouse apps/buddy
+python -m build --wheel --no-deps --outdir artifacts/wheelhouse plugins/sensitive_basics
+python -m build --wheel --no-deps --outdir artifacts/wheelhouse templates/firm_plugin
 python -m pip download --only-binary=:all: --dest artifacts/wheelhouse \
-  pip==26.2.2 cryptography==50.0.2 keyring==25.7.0 psutil==7.2.2
+  pip==26.2.2 cryptography==50.0.2 keyring==25.7.0 psutil==7.2.2 \
+  'packaging>=24,<27'
 python -m pip download --only-binary=:all: --no-index \
   --find-links artifacts/wheelhouse --dest artifacts/wheelhouse \
   leakguard-core==0.2.0 leakguard-host==0.2.0 leakguard-vault==0.1.0 \
-  leakguard-buddy==0.1.0a1
+  leakguard-buddy==0.1.0a1 leakguard-sensitive-basics==0.1.0 \
+  leakguard-firm-example==0.1.0
 ```
+
+The two plugin wheels are included as reviewed code but remain disabled until
+the user explicitly installs or enables a profile. Keep plugin artifacts in
+the same wheelhouse so their metadata and hashes are recorded in the bundle.
 
 The release needs the native Gitleaks executable for each complete target. The
 builder records its SHA-256 and exact version. The installer runs the backend's
