@@ -217,6 +217,16 @@ class CredentialSession:
                                    notes=old["notes"] if notes is None else notes,
                                    finding_id=old["finding_id"] if finding_id is _OMITTED else finding_id)
 
+    def update_secret(self, entry_id, secret):
+        with self._vault._mutex:
+            self._ensure_active()
+            if type(entry_id) is not str or entry_id not in self._entries:
+                raise VaultError("vault-entry-not-found")
+            old = self._entries[entry_id]
+            return self.save_entry(entry_id=entry_id, title=old["title"], secret=secret,
+                                   username=old["username"], location=old["location"],
+                                   notes=old["notes"], finding_id=old["finding_id"])
+
     def reveal_entry(self, entry_id):
         with self._vault._mutex:
             self._ensure_active()

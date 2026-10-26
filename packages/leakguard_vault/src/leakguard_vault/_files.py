@@ -23,7 +23,7 @@ def _parent(path: Path) -> None:
 def read_bounded(path: Path, maximum: int) -> bytes:
     descriptor = None
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
             raise VaultError("vault-format-invalid")
@@ -49,7 +49,7 @@ def atomic_write(path: Path, value: bytes, *, replace: bool = True) -> None:
     try:
         if not replace and path.exists():
             raise VaultError("vault-already-created")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             descriptor = None
             stream.write(value)
