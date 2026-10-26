@@ -518,6 +518,42 @@ class ScanService:
             if self._owns_store:
                 self.store.close()
 
+    def _material_snapshot(self, limits):
+        try:
+            return self.store.material_snapshot(max_bytes=min(limits.max_file_bytes, 1_000_000), max_sources=100)
+        except Exception:
+            return catalog.MaterialSnapshot((), 'unavailable', ('source-unavailable',))
+
+    def _work_context(self, *, policy, limits):
+        """Capture one transient material capability for identity and execution.
+
+        Only the bounded keyed snapshot identity enters the continuation digest.
+        This reads registered references, never the separate credential vault.
+        """
+        from . import models as m, scan_policy
+        from .execution import work_identity
+        from .sources import AcquisitionError
+        materials = None
+        if scan_policy.effective_policy(policy, self.config).mode is m.ScanMode.INVENTORY:
+            materials = self._material_snapshot(limits)
+            if materials.issues:
+                raise AcquisitionError(materials.issues[0])
+            try:
+                valid = materials.valid()
+            except Exception:
+                valid = False
+            if not valid:
+                raise AcquisitionError('source-unavailable')
+        identity = work_identity(config=self.config, runtime=self._runtime, policy=policy, limits=limits,
+                                 material_identity=materials.identity if materials is not None else None)
+        return identity, materials
+
+    def work_identity(self, *, policy, limits):
+        from .scan_store import StateError
+        if self._closed:
+            raise StateError('state-closed')
+        return self._work_context(policy=policy, limits=limits)[0]
+
     def scan(self, inputs, *, policy, limits, use_cache=True, cancel=None):
         return self._run(inputs, policy=policy, limits=limits, use_cache=use_cache, cancel=cancel)
 
@@ -732,10 +768,12 @@ class ScanService:
         if lease is None:
             return failure(m.ErrorCode.STATE_FAILED)
         try:
+            materials = None
             if root is not None:
-                from .execution import work_identity
-                identity = work_identity(config=self.config, runtime=self._runtime,
-                                         policy=m.ScanPolicy.inventory(), limits=limits)
+                try:
+                    identity, materials = self._work_context(policy=m.ScanPolicy.inventory(), limits=limits)
+                except AcquisitionError as error:
+                    return failure(self._error_code(error.code, 'source-unavailable'))
                 digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
                 self.store.bind_cycle_identity(lease, digest, root=root)
             if ingest:
@@ -898,7 +936,7 @@ class ScanService:
                             or type(evidence['files']) is not int or evidence['files'] < 0):
                         raise StateError()
                 return {**metadata, 'complete': complete, 'issues': tuple(issues), 'cycle_evidence': evidence}
-            report = self._run(work_inputs(), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=use_cache, cancel=cancel, enumeration=status, final_check=lambda: self.store.lease_valid(lease), work_claims=claims, _deadline=deadline)
+            report = self._run(work_inputs(), policy=m.ScanPolicy.inventory(), limits=limits, use_cache=use_cache, cancel=cancel, enumeration=status, final_check=lambda: self.store.lease_valid(lease), work_claims=claims, _deadline=deadline, _materials=materials)
             if report.coverage.enumeration_complete and report.coverage.required_complete:
                 try:
                     if time.monotonic() >= deadline or cancel is not None and cancel():
@@ -1007,7 +1045,7 @@ class ScanService:
         now = dt.datetime.now(dt.timezone.utc)
         return _cap_report(m.ScanReport(1, uuid.uuid4().hex, now, now, policy_id, (), coverage, decision, issues), limits.max_report_bytes)
 
-    def _run(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None, _deadline=None, repository=None, _clear_deadline=False):
+    def _run(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None, _deadline=None, repository=None, _clear_deadline=False, _materials=None):
         from .scan_store import StateError
         if self._closed:
             raise StateError('state-closed')
@@ -1023,7 +1061,7 @@ class ScanService:
             except Exception:
                 return self._state_failure_report(policy, limits)
         try:
-            return self._run_inner(inputs, policy=policy, limits=limits, use_cache=use_cache, cancel=cancel, enumeration=enumeration, final_check=final_check, work_claims=work_claims, _deadline=deadline, repository=repository)
+            return self._run_inner(inputs, policy=policy, limits=limits, use_cache=use_cache, cancel=cancel, enumeration=enumeration, final_check=final_check, work_claims=work_claims, _deadline=deadline, repository=repository, _materials=_materials)
         finally:
             if (_deadline is None or _clear_deadline) and hasattr(self.store, 'set_deadline'):
                 try:
@@ -1031,7 +1069,7 @@ class ScanService:
                 except Exception:
                     pass
 
-    def _run_inner(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None, _deadline=None, repository=None):
+    def _run_inner(self, inputs, *, policy, limits, use_cache, cancel, enumeration=None, final_check=None, work_claims=None, _deadline=None, repository=None, _materials=None):
         from dataclasses import replace
         from . import models as m, scan_policy
         from .sources import SnapshotInput, acquire_file, acquire_bytes, AcquisitionError
@@ -1068,12 +1106,13 @@ class ScanService:
         if identity_failure is not None:
             run_issues.append(m.CoverageIssue(identity_failure, required=True))
             enumeration_complete = False
-        materials = None
+        materials = _materials
         if runtime_valid and policy.mode is m.ScanMode.INVENTORY:
-            try:
-                materials = self.store.material_snapshot(max_bytes=min(limits.max_file_bytes, 1_000_000), max_sources=100)
-            except Exception:
-                materials = catalog.MaterialSnapshot((), 'unavailable', ('source-unavailable',))
+            if materials is None:
+                materials = self._material_snapshot(limits)
+            if materials.issues:
+                enumeration_complete = False
+                run_issues.extend(m.CoverageIssue(self._error_code(code), required=True) for code in materials.issues)
         iterator = self._iter_scanned(inputs, policy=policy, policy_id=policy_id, limits=limits,
                                       deadline=deadline, use_cache=use_cache, cancel=cancel, materials=materials)
         while runtime_valid:
@@ -1152,6 +1191,8 @@ class ScanService:
         except Exception:
             materials_valid = False
         if not materials_valid:
+            enumeration_complete = False
+            run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
             results = [replace(r, outcome=m.ScanOutcome.ERROR if r.outcome is m.ScanOutcome.REUSED else r.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=r.issues + (m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True),)) for r in results]
         for index, validate_snapshot in enumerate(snapshots):
             if validate_snapshot is not None and (time.monotonic() >= deadline or not validate_snapshot()):
@@ -1177,6 +1218,17 @@ class ScanService:
             metadata = {'complete': False, 'issues': (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)}
         enumeration_complete = enumeration_complete and metadata.get('complete', True)
         run_issues.extend(metadata.get('issues', ()))
+        # Enumeration and store publication can outlast file work, including a
+        # final slice with no files. Never complete under a changed reference
+        # capability merely because the per-file validation loop was empty.
+        try:
+            materials_valid = materials is None or materials.valid()
+        except Exception:
+            materials_valid = False
+        if not materials_valid:
+            enumeration_complete = False
+            if not any(issue.code is m.ErrorCode.SOURCE_UNAVAILABLE and issue.required for issue in run_issues):
+                run_issues.append(m.CoverageIssue(m.ErrorCode.SOURCE_UNAVAILABLE, required=True))
         cycle_evidence = metadata.get('cycle_evidence')
         if cycle_evidence is not None and cycle_evidence['files'] > len({result.source.path for result in results}):
             run_issues.append(m.CoverageIssue(m.ErrorCode.AUDIT_CYCLE_EVIDENCE))

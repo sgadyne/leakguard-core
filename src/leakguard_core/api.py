@@ -171,14 +171,14 @@ class Scanner:
 
         A host compares this value before resuming persisted jobs. Its policy
         digest excludes slice-only budgets and worker count; a report's policy_id
-        still identifies its full limits. Scans revalidate artifacts themselves.
+        still identifies its full limits. Inventory identity also includes the
+        bounded registered-reference snapshot, and fails if it cannot be read
+        and validated. Scans capture and revalidate their own reference snapshot.
         """
         self._ensure_open()
         if type(policy) is not ScanPolicy or type(limits) is not ScanLimits:
             raise TypeError('policy and limits must be ScanPolicy and ScanLimits')
-        from .execution import work_identity
-        return work_identity(config=self._service.config, runtime=self._service._runtime,
-                             policy=policy, limits=limits)
+        return self._service.work_identity(policy=policy, limits=limits)
 
     def scan(
         self,

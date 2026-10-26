@@ -88,12 +88,14 @@ def ordered_work(inputs, *, prepare, execute, workers, max_items, stop):
             iterator.close()
 
 
-def work_identity(*, config, runtime, policy, limits):
+def work_identity(*, config, runtime, policy, limits, material_identity=None):
     """Semantic audit identity, independent of scheduling/output slice budgets.
 
     Acquisition, extraction, detector timeout and worker bounds still participate.
     A shorter scheduling slice or a different file worker count can resume the
-    same work; changed rules/runtime/profile must establish a fresh audit cycle.
+    same work; changed rules/runtime/profile or registered reference snapshots
+    must establish a fresh audit cycle. Material identities are keyed digests;
+    reference values never enter this descriptor or the report runtime identity.
     """
     from dataclasses import replace
     from . import scan_policy
@@ -103,5 +105,10 @@ def work_identity(*, config, runtime, policy, limits):
                               max_directory_entries=1, max_report_bytes=2048,
                               max_findings=1)
     effective = scan_policy.effective_policy(policy, normalized)
-    return {'policy_id': scan_policy.policy_identity(config=normalized, policy=effective, limits=semantic_limits),
-            'runtime_id': runtime}
+    policy_id = scan_policy.policy_identity(config=normalized, policy=effective, limits=semantic_limits)
+    if material_identity is not None:
+        import hashlib
+        import json
+        policy_id = hashlib.sha256(json.dumps(['work-materials-v1', policy_id, material_identity],
+                                               separators=(',', ':')).encode()).hexdigest()
+    return {'policy_id': policy_id, 'runtime_id': runtime}
