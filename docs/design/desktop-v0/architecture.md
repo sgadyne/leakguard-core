@@ -57,7 +57,7 @@ Package the app as `Password Buddy`, Electron version `0.1.0-alpha.1`, app id `o
 The release agent owns `bootstrap.py`. The shell launches the manifest-selected bundled interpreter with argument array, never a shell:
 
 ```text
-<resources>/buddy/<pythonExecutable> -I -X utf8
+<resources>/buddy/<pythonExecutable> -I -B -X utf8
   <resources>/buddy/bootstrap.py
   --resources <resources>/buddy
   --data-dir <desktop-data>
@@ -106,9 +106,11 @@ Confirm actual directories before use; do not download replacements unnecessaril
 After runtime-ready, shell spawns:
 
 ```text
-<venv-python> -I -X utf8 -m leakguard_buddy.desktop
+<venv-python> -I -B -X utf8 -m leakguard_buddy.desktop
   --state-dir <receipt.stateDir> --config <receipt.config>
 ```
+
+Both interpreter launches include `-B`: isolated mode ignores the bytecode environment flag, and the bundled resource tree must remain immutable.
 
 Explicitly set LEAKGUARD_STATE_DIR/LEAKGUARD_CONFIG to the same values. Remove inherited PYTHONHOME/PYTHONPATH and developer injection variables; no passphrase/token in env. Working directory is the private profile, not a scanned folder. Inherit only required OS/home/temp/locale/PATH state; backend code controls subprocess commands without shell execution.
 
