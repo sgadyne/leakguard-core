@@ -860,6 +860,9 @@ class SQLiteScanStore:
             work_columns = {row[1] for row in conn.execute('PRAGMA table_info(audit_work)')}
             if 'directory_progress' not in work_columns:
                 conn.execute('ALTER TABLE audit_work ADD COLUMN directory_progress TEXT')
+            cycle_columns = {row[1] for row in conn.execute('PRAGMA table_info(audit_cycles)')}
+            if 'work_identity' not in cycle_columns:
+                conn.execute('ALTER TABLE audit_cycles ADD COLUMN work_identity TEXT')
             conn.execute('CREATE INDEX IF NOT EXISTS audit_directory_checks ON audit_work(scope,generation,kind,directory_checked,done,path)')
             conn.execute('PRAGMA user_version=2')
             conn.commit()
