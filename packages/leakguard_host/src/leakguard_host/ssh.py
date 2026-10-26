@@ -279,6 +279,7 @@ class SSHRunner:
             else:
                 report = parse_report(output, max_bytes=4_500_000)
             return {"target": _target(target), "root": root, "report": report.to_dict(),
+                    "persistence": "memory-only",
                     "coverage": "complete" if report.coverage.required_complete and report.coverage.enumeration_complete else "incomplete"}
         except Exception:
             raise HostError("remote-report-invalid") from None
@@ -333,7 +334,22 @@ class SSHRunner:
         return {"target": _target(target), "remote_directory": remote_directory, "installed": True,
                 "sha256": sha256, "receipt": value}
 
-    def deploy(self, target: str, artifact: Path, remote_directory: str, *, sha256: str, python: str = "python3", cancel=None) -> dict:
+    def deploy(self, target: str, artifact: Path, remote_directory: str, *, sha256: str, python: str = "python3",
+               scan_root: str | None = None, max_seconds: int = 30, max_files: int = 100, cancel=None) -> dict:
         """Upload AND install only after this explicit deploy action."""
+        if scan_root is not None:
+            scan_root = _remote_path(scan_root, allow_root=True)
+            if type(max_seconds) is not int or not 1 <= max_seconds <= 120 or type(max_files) is not int or not 1 <= max_files <= 1000:
+                raise HostError("remote-limit-invalid")
         self.upload(target, artifact, remote_directory, sha256=sha256, python=python, cancel=cancel)
-        return self.install(target, remote_directory, sha256=sha256, python=python, cancel=cancel)
+        result = self.install(target, remote_directory, sha256=sha256, python=python, cancel=cancel)
+        if scan_root is not None:
+            receipt = result["receipt"]
+            try:
+                result["scan"] = self.run(target, scan_root, python=receipt["runtime_python"],
+                    config_path=receipt["state_dir"] + "/config.json", max_seconds=max_seconds, max_files=max_files, cancel=cancel)
+            except HostError as error:
+                # Installation has already succeeded; retain its reviewable
+                # receipt even if the subsequent bounded scan cannot run.
+                result["scan"] = {"coverage": "incomplete", "error": error.code, "persistence": "memory-only"}
+        return result

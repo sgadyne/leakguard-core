@@ -68,3 +68,10 @@ private prefix and state directory. It returns a validated install receipt with
 host with Python3.11+ and the offline release's supported dependencies. Installation
 does not enable services, mounts, hooks, or credential-vault access. SSH process
 output is bounded; stderr and arbitrary command output never enter the response.
+
+For one explicit deploy-and-scan journey, pass `--scan-root /chosen/remote/root`
+to `leakguard-host ssh-deploy TARGET bundle.zip /new/private/deployment --sha256
+HASH`. The scan uses the installed receipt's runtime and configuration, including
+the pinned bundled backend. Python callers pass `scan_root=...` to `deploy`.
+If installation succeeds but the scan fails, its install receipt is retained and
+scan coverage is incomplete. SSH CLI commands return exit2 for incomplete work.

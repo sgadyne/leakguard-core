@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import hashlib
+import io
 import os
 from pathlib import Path
 import plistlib
@@ -265,6 +266,22 @@ class HostTests(unittest.TestCase):
             self.assertNotIn("SYNTHETIC_VALUE", str(raised.exception))
         with patch("leakguard_host.ssh._exchange", return_value=report().to_json().encode()):
             self.assertEqual(runner.run("chosen-host", "/chosen", python="/private/python")["coverage"], "complete")
+
+    def test_explicit_deploy_scan_uses_installed_runtime_and_retains_receipt_on_failure(self):
+        runner = SSHRunner()
+        receipt = {"installed": True, "receipt": {"runtime_python": "/private/runtime/releases/test/venv/bin/python", "state_dir": "/private/state"}}
+        with patch.object(runner, "upload"), patch.object(runner, "install", return_value=receipt), patch.object(runner, "run", side_effect=HostError("ssh-timeout")) as run:
+            result = runner.deploy("chosen-host", self.root / "selected.zip", "/private", sha256="a" * 64, scan_root="/chosen")
+        self.assertTrue(result["installed"])
+        self.assertEqual(result["scan"]["coverage"], "incomplete")
+        self.assertEqual(run.call_args.kwargs["python"], receipt["receipt"]["runtime_python"])
+        self.assertEqual(run.call_args.kwargs["config_path"], "/private/state/config.json")
+
+    def test_ssh_cli_incomplete_report_exits_two(self):
+        from leakguard_host.cli import main
+        with patch("leakguard_host.cli.SSHRunner") as runner, patch("sys.stdout", new_callable=io.StringIO):
+            runner.return_value.run.return_value = {"coverage": "incomplete", "report": {}}
+            self.assertEqual(main(["ssh-scan", "chosen-host", "/chosen", "--python", "/private/python"]), 2)
 
     def test_subprocess_output_limit_and_stderr_redaction(self):
         with self.assertRaisesRegex(HostError, "ssh-output-limit"):

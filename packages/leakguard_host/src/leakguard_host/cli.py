@@ -46,6 +46,10 @@ def main(argv=None) -> int:
         upload.add_argument("--port", type=int, default=22)
         upload.add_argument("--identity-file", type=Path)
         upload.add_argument("--known-hosts-file", type=Path)
+        if name == "ssh-deploy":
+            upload.add_argument("--scan-root")
+            upload.add_argument("--max-seconds", type=int, default=30)
+            upload.add_argument("--max-files", type=int, default=100)
     args = parser.parse_args(argv)
     try:
         if args.command == "capabilities":
@@ -63,9 +67,12 @@ def main(argv=None) -> int:
         else:
             runner = SSHRunner(port=args.port, identity_file=args.identity_file, known_hosts_file=args.known_hosts_file)
             action = runner.deploy if args.command == "ssh-deploy" else runner.upload
+            scan_options = {"scan_root": args.scan_root, "max_seconds": args.max_seconds, "max_files": args.max_files} if args.command == "ssh-deploy" else {}
             result = action(args.target, args.artifact, args.remote_directory,
-                sha256=args.sha256, python=args.python)
+                sha256=args.sha256, python=args.python, **scan_options)
         sys.stdout.write(json.dumps(result, ensure_ascii=True, sort_keys=True) + "\n")
+        if isinstance(result, dict) and (result.get("coverage") == "incomplete" or result.get("scan", {}).get("coverage") == "incomplete"):
+            return 2
         return 0
     except HostError as error:
         sys.stderr.write("LeakGuard host: " + error.code + "\n")
