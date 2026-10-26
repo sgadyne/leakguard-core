@@ -159,6 +159,7 @@ class ScanStore(Protocol):
     def confirm_absent(self, proof, *, generation: int) -> bool: ...
     def material_snapshot(self, *, max_bytes: int = 1_000_000, max_sources: int = 100): ...
     def acquire_cycle(self, scope: str, root, *, lease_seconds: float) -> WorkLease | None: ...
+    def reset_cycle(self, scope: str) -> None: ...
     def lease_valid(self, lease: WorkLease) -> bool: ...
     def enqueue_work(self, lease: WorkLease, entries, *, refresh: bool = False) -> None: ...
     def claim_work(self, lease: WorkLease) -> WorkClaim | None: ...
@@ -428,6 +429,18 @@ class MemoryScanStore:
         for key, row in self.work.items():
             if key[:2] == (lease.scope, lease.generation):
                 row['claimed'] = None
+
+    @_synchronized
+    def reset_cycle(self, scope):
+        """Abandon inactive enumeration only; retain all exposure evidence."""
+        import time
+        if type(scope) is not str or not scope:
+            raise StateError()
+        cycle = self.cycles.get(scope)
+        if cycle and cycle.get('owner') and cycle.get('lease_until', 0) > time.time():
+            raise StateError('state-cycle-busy')
+        self.cycles.pop(scope, None)
+        self.work = {key: value for key, value in self.work.items() if key[0] != scope}
 
     @_synchronized
     def reconcile_cycle(self, lease, root):
@@ -762,6 +775,70 @@ class SQLiteScanStore:
         self._deadline = None
 
     @classmethod
+    def from_memory(cls, serialized=None, *, config=None, max_bytes=64 * 1024 * 1024,
+                    material_key=None):
+        """Application-owned SQLite state with no filesystem database or key.
+
+        The caller serializes access and encrypts ``serialize()`` before writing.
+        Material identity keys must be supplied again when reopening a checkpoint.
+        """
+        import sqlite3
+        import secrets
+        if type(max_bytes) is not int or not 1024 * 1024 <= max_bytes <= 64 * 1024 * 1024:
+            raise StateError('state-capacity-invalid')
+        if serialized is not None and (type(serialized) is not bytes or len(serialized) > max_bytes):
+            raise StateError('state-capacity-limit')
+        if material_key is not None and (type(material_key) is not bytes or len(material_key) != 32):
+            raise StateError()
+        conn = sqlite3.connect(':memory:', check_same_thread=False)
+        try:
+            if not hasattr(conn, 'serialize') or not hasattr(conn, 'deserialize'):
+                raise StateError('state-serialization-unavailable')
+            if serialized is not None:
+                conn.deserialize(serialized)
+                if conn.execute('PRAGMA user_version').fetchone()[0] != 2:
+                    raise StateError('state-schema-unsupported')
+            conn.execute('PRAGMA temp_store=MEMORY')
+            conn.execute('PRAGMA journal_mode=MEMORY')
+            conn.execute('PRAGMA trusted_schema=OFF')
+            page_size = conn.execute('PRAGMA page_size').fetchone()[0]
+            conn.execute('PRAGMA max_page_count=' + str(max_bytes // page_size))
+            conn.executescript(_SCHEMA)
+            conn.execute('CREATE INDEX IF NOT EXISTS audit_directory_checks ON audit_work(scope,generation,kind,directory_checked,done,path)')
+            conn.execute('PRAGMA user_version=2')
+            conn.commit()
+            instance = object.__new__(cls)
+            instance.conn = conn
+            instance.config = config or {}
+            instance.state_dir = None
+            instance._deadline = None
+            instance._memory_material_key = material_key or secrets.token_bytes(32)
+            return instance
+        except Exception as error:
+            conn.close()
+            if isinstance(error, StateError):
+                raise
+            raise StateError() from None
+
+    def serialize(self, *, max_bytes=64 * 1024 * 1024):
+        """Return a committed in-memory checkpoint; never write an implicit mirror."""
+        if self.state_dir is not None:
+            raise StateError('state-not-memory')
+        try:
+            size = self.conn.execute('PRAGMA page_count').fetchone()[0] * self.conn.execute('PRAGMA page_size').fetchone()[0]
+            if size > max_bytes:
+                raise StateError('state-capacity-limit')
+            self.conn.commit()
+            value = self.conn.serialize()
+            if len(value) > max_bytes:
+                raise StateError('state-capacity-limit')
+            return value
+        except Exception as error:
+            if isinstance(error, StateError):
+                raise
+            raise StateError() from None
+
+    @classmethod
     def from_connection(cls, conn, *, state_dir, config=None):
         """Deprecated wrapper adapter; caller retains connection ownership."""
         instance = object.__new__(cls)
@@ -913,6 +990,24 @@ class SQLiteScanStore:
 
     def close(self):
         self.conn.close()
+
+    @_bounded_sql
+    def reset_cycle(self, scope):
+        """Retry failed work with a fresh cycle, without deleting any evidence."""
+        import time
+        if type(scope) is not str or not scope:
+            raise StateError()
+        try:
+            self.conn.execute('BEGIN IMMEDIATE')
+            row = self.conn.execute('SELECT owner,lease_until FROM audit_cycles WHERE scope=?', (scope,)).fetchone()
+            if row and row[0] and row[1] > time.time():
+                raise StateError('state-cycle-busy')
+            self.conn.execute('DELETE FROM audit_work WHERE scope=?', (scope,))
+            self.conn.execute('DELETE FROM audit_cycles WHERE scope=?', (scope,))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def _lease_valid(self, lease):
         import time
@@ -1102,16 +1197,19 @@ class SQLiteScanStore:
         rows = self.conn.execute('SELECT name,source,format,field,kind FROM material_sources ORDER BY name LIMIT ?', (max_sources + 1,)).fetchall()
         if not rows:
             return MaterialSnapshot((), 'no-materials', validate=lambda: self.conn.execute('SELECT 1 FROM material_sources LIMIT 1').fetchone() is None)
-        key_path = self.state_dir / 'material-key.bin'
-        try:
-            descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            pass
+        if self.state_dir is None:
+            key = self._memory_material_key
         else:
-            with os.fdopen(descriptor, 'wb') as stream:
-                stream.write(__import__('secrets').token_bytes(32))
-        from .sources import _bounded_file
-        key = _bounded_file(key_path, 32)
+            key_path = self.state_dir / 'material-key.bin'
+            try:
+                descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                with os.fdopen(descriptor, 'wb') as stream:
+                    stream.write(__import__('secrets').token_bytes(32))
+            from .sources import _bounded_file
+            key = _bounded_file(key_path, 32)
         if len(key) != 32:
             raise StateError()
         snapshot = snapshot_materials(rows, key, max_bytes=max_bytes, max_sources=max_sources)
