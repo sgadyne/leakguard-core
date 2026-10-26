@@ -13,6 +13,9 @@ keywords = ["secret"]
   [[rules.allowlists]]
   regexTarget = "secret"
   regexes = ['''(?i)^["']?(?:client[_-]?secret(?:[_-]?value)?|clientsecret|app[_-]?secret|application[_-]?secret|api[_-]?secret|oauth[_-]?client[_-]?secret)["']?\s*[:=]\s*["']?(?:your-client-secret|example-client-secret|placeholder-value|test-secret-placeholder|\$\{[a-z_][a-z0-9_]*\}?|%[a-z_][a-z0-9_]*%)["']?$''']
+  [[rules.allowlists]]
+  regexTarget = "secret"
+  regexes = ['''(?i)^["']?(?:client[_-]?secret(?:[_-]?value)?|clientsecret|app[_-]?secret|application[_-]?secret|api[_-]?secret|oauth[_-]?client[_-]?secret)["']?\s*[:=]\s*(?:os\.environ\s*\[\s*["']|process\.env\.[a-z_][a-z0-9_]*|get_secret\s*\(\))["']?$''']
 
 [[rules]]
 id = "literal-password"
