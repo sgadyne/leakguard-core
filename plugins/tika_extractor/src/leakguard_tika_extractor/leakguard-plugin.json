@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "tika-extractor",
+  "api_version": 2,
+  "module": "leakguard_tika_extractor.plugin",
+  "component": "tika-extractor",
+  "version": "0.1.0a1"
+}
