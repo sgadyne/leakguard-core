@@ -20,6 +20,7 @@ documents = ["pypdf>=6,<7", "olefile>=0.47,<1"]
 leakguard = "leakguard_core.cli:main"
 leakguard-manage = "leakguard_core.manage:main"
 leakguard-install-hooks = "leakguard_core.hooks:main"
+leakguard-extensions = "leakguard_core.extension_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

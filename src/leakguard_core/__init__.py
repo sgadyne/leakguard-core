@@ -1,5 +1,5 @@
 """Offline, extensible secret scanning and local file inventory."""
-from .api import ConfigurationError, ScanConfig, Scanner
+from .api import ConfigurationError, ReportError, ScanConfig, Scanner, parse_report
 from .models import (
     BytesInput,
     ContentIdentity,
@@ -24,5 +24,5 @@ __all__ = [
     "BytesInput", "ConfigurationError", "ContentIdentity", "CoverageIssue", "CoverageSummary",
     "FileInput", "FindingRecord", "GitRequest", "PolicyDecision", "RefUpdate",
     "RuntimeIdentity", "ScanConfig", "ScanLimits", "ScanPolicy", "ScanReport",
-    "ScanResult", "Scanner", "SourceRef", "__version__",
+    "ScanResult", "Scanner", "SourceRef", "__version__", "ReportError", "parse_report",
 ]

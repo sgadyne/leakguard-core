@@ -102,6 +102,7 @@ class ErrorCode(StringEnum):
     RESOURCE_BOUND_UNAVAILABLE = "resource-bound-unavailable"
     WORKER_MEMORY_LIMIT = "worker-memory-limit"
     SUPERVISED_ALPHA_POLICY = "supervised-alpha-policy"
+    OBSERVATIONS_EPHEMERAL = "observations-ephemeral"
     DETECTOR_FAILED = "detector-failed"
     DETECTOR_TIMEOUT = "detector-timeout"
     DETECTOR_OUTPUT_INVALID = "detector-output-invalid"

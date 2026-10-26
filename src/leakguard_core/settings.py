@@ -30,6 +30,8 @@ DEFAULTS = {
     'scan_workers': 2,
     'detection_profile': 'credentials',
     'extension_registry': None,
+    'observation_backend': 'legacy',
+    'observation_path': None,
 }
 
 
@@ -100,6 +102,11 @@ def validate(mapping):
         fail('scan_workers')
     if type(result['detection_profile']) is not str or result['detection_profile'] not in {'credentials', 'sensitive', 'firm'}:
         fail('detection_profile')
+    if type(result['observation_backend']) is not str or result['observation_backend'] not in {'legacy', 'encrypted'}:
+        fail('observation_backend')
+    observation_path = result['observation_path']
+    if observation_path is not None and (not text(observation_path) or not pathlib.Path(observation_path).is_absolute()):
+        fail('observation_path')
     registry = result['extension_registry']
     if registry is not None and (not text(registry) or not pathlib.Path(registry).is_absolute()):
         fail('extension_registry')

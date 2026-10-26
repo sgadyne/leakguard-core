@@ -31,6 +31,45 @@ class ConfigurationError(ValueError):
         super().__init__(f"Invalid LeakGuard configuration at {self.field}")
 
 
+class ReportError(ValueError):
+    """An invalid or oversized external report, without echoing its content."""
+
+    code = 'report-invalid'
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+def parse_report(data: str | bytes, *, max_bytes: int = 64_000_000) -> ScanReport:
+    """Validate the public redacted wire schema using the store's strict parser.
+
+    Duplicate keys, unknown fields, non-finite numbers, invalid counts and
+    inconsistent coverage all fail closed. This does not authenticate a sender.
+    """
+    if type(data) not in {str, bytes} or type(max_bytes) is not int or not 1 <= max_bytes <= 64_000_000:
+        raise ReportError()
+    try:
+        if len(data) > max_bytes or type(data) is str and len(data.encode('utf-8')) > max_bytes:
+            raise ReportError()
+
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ReportError()
+                result[key] = value
+            return result
+
+        def reject_constant(value):
+            raise ReportError()
+
+        value = json.loads(data, object_pairs_hook=unique, parse_constant=reject_constant)
+        from .scan_store import _report_from
+        return _report_from(value)
+    except Exception:
+        raise ReportError() from None
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class ScanConfig:
     """Validated immutable snapshot of operator configuration.
@@ -284,11 +323,11 @@ _SAFE_CONFIG_FIELDS = frozenset({
     "exclude_components", "plugins", "credential_store", "gitleaks_executable",
     "gitleaks_config", "script_checks", "required_formats", "omissions",
     "extractor_overrides", "worker_policy", "scan_workers", "detection_profile",
-    "extension_registry", "configuration",
+    "extension_registry", "observation_backend", "observation_path", "configuration",
 })
 
 
 __all__ = [
     "BytesInput", "ConfigurationError", "FileInput", "GitRequest", "ScanConfig",
-    "ScanLimits", "ScanPolicy", "ScanReport", "Scanner",
+    "ScanLimits", "ScanPolicy", "ScanReport", "Scanner", "ReportError", "parse_report",
 ]

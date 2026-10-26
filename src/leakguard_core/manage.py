@@ -240,10 +240,10 @@ def _main(argv=None):
 def _open_scan_store():
     """Open the durable store explicitly without importing detector setup."""
     from . import settings
-    from .scan_store import SQLiteScanStore
+    from .storage import open_scan_store
 
     config, _ = settings.load()
-    return SQLiteScanStore(settings.state_directory(), config=config)
+    return open_scan_store(settings.state_directory(), config=config, allow_ephemeral=False)
 
 
 def _typed_findings_report(args):

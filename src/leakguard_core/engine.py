@@ -62,7 +62,9 @@ def now():
 
 def db():
     _legacy()
-    from .scan_store import open_database
+    from .scan_store import open_database, StateError
+    if CONFIG.get('observation_backend') == 'encrypted':
+        raise StateError()
     return open_database(STATE)
 
 
@@ -493,7 +495,8 @@ class ScanService:
         self.binary = self.config.get('gitleaks_executable') or shutil.which('gitleaks') or 'gitleaks'
         self.rules = self.config.get('gitleaks_config') or ROOT / 'rules.toml'
         self.state_dir = pathlib.Path(state_dir) if state_dir is not None else None
-        self.store = store if store is not None else (SQLiteScanStore(self.state_dir, config=self.config) if self.state_dir is not None else MemoryScanStore(config=self.config))
+        from .storage import open_scan_store
+        self.store = store if store is not None else open_scan_store(self.state_dir, config=self.config)
         self._owns_store = store is None
         self._closed = False
         try:
@@ -897,6 +900,8 @@ class ScanService:
         policy = scan_policy.effective_policy(policy, self.config)
         policy_id = scan_policy.policy_identity(config=self.config, policy=policy, limits=limits)
         issues = (m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True),)
+        if getattr(self.store, '_leakguard_ephemeral_observations', False):
+            issues += (m.CoverageIssue(m.ErrorCode.OBSERVATIONS_EPHEMERAL),)
         if self.config.get('worker_policy') == 'supervised-alpha':
             issues += (m.CoverageIssue(m.ErrorCode.SUPERVISED_ALPHA_POLICY),)
         coverage, decision = scan_policy.evaluate((), policy=policy, policy_id=policy_id, enumeration_complete=False, issues=issues)
@@ -944,6 +949,8 @@ class ScanService:
         snapshots = []
         anchors = []
         run_issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
+        if getattr(self.store, '_leakguard_ephemeral_observations', False):
+            run_issues.append(m.CoverageIssue(m.ErrorCode.OBSERVATIONS_EPHEMERAL))
         if self.config.get('worker_policy') == 'supervised-alpha':
             run_issues.append(m.CoverageIssue(m.ErrorCode.SUPERVISED_ALPHA_POLICY))
         enumeration_complete = True
