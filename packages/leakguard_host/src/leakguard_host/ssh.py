@@ -122,19 +122,42 @@ def _exchange(argv: list[str], payload: bytes, *, timeout: float, maximum: int, 
 
 # The remote supervisor enforces a wall bound even after client disconnection.
 _SCAN_SUPERVISOR = r'''
-import json,os,signal,subprocess,sys
+import json,os,signal,subprocess,sys,threading
+import psutil
 request=json.loads(sys.stdin.buffer.read(65537))
 seconds=request["max_seconds"]
 if type(seconds) is not int or not 1 <= seconds <= 120: sys.exit(2)
 p=subprocess.Popen([sys.executable,"-m","leakguard_host.remote_worker"],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
+owned=psutil.Process(p.pid); known={}; stopped=threading.Event(); mutex=threading.Lock()
+def capture():
+    try:
+        children=owned.children(recursive=True)
+        if len(children)>256:
+            os.killpg(p.pid,signal.SIGKILL)
+            children=children[:256]
+        with mutex:
+            for child in children:
+                try: known[(child.pid,child.create_time())]=child
+                except psutil.Error: pass
+    except (psutil.Error,ProcessLookupError): pass
+def monitor():
+    while not stopped.wait(0.05): capture()
+watcher=threading.Thread(target=monitor,daemon=True);watcher.start()
 try:
     out,_=p.communicate(json.dumps(request).encode(),timeout=seconds+30)
     if p.returncode or len(out)>4500000: sys.exit(2)
     sys.stdout.buffer.write(out)
 except subprocess.TimeoutExpired:
-    os.killpg(p.pid,signal.SIGKILL)
-    p.communicate()
     sys.exit(2)
+finally:
+    capture();stopped.set();watcher.join(timeout=1)
+    try: os.killpg(p.pid,signal.SIGKILL)
+    except ProcessLookupError: pass
+    with mutex: descendants=list(known.values())
+    for child in reversed(descendants):
+        try: child.kill()
+        except psutil.Error: pass
+    p.wait()
 '''
 
 _UPLOAD = r'''

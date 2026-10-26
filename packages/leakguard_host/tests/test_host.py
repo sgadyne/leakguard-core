@@ -21,7 +21,7 @@ from leakguard_core import ScanConfig, ScanReport, CoverageSummary, PolicyDecisi
 from leakguard_core.models import CoverageIssue, DecisionVerdict, ErrorCode
 from leakguard_core.scan_store import MemoryScanStore
 from leakguard_host import HostError, HostService, SSHRunner, browse, service_spec
-from leakguard_host.ssh import _exchange, _INSTALL
+from leakguard_host.ssh import _exchange, _INSTALL, _SCAN_SUPERVISOR
 
 
 class SessionStore(MemoryScanStore):
@@ -361,6 +361,39 @@ class HostTests(unittest.TestCase):
             try:
                 os.kill(child, 9)
             except ProcessLookupError:
+                pass
+
+    def test_remote_supervisor_reaps_children_in_separate_process_groups(self):
+        import psutil
+        package = self.root / "fake/leakguard_host"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / "remote_worker.py").write_text('''import json,pathlib,psutil,subprocess,sys,time
+request=json.load(sys.stdin)
+child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True)
+process=psutil.Process(child.pid)
+pathlib.Path(request['root'],'child.json').write_text(json.dumps({'pid':child.pid,'started':process.create_time()}))
+time.sleep(30)
+''')
+        # Keep this timeout regression quick; only the supervisor's wall budget
+        # changes, while the actual child/process tracking code is exercised.
+        supervisor = _SCAN_SUPERVISOR.replace("timeout=seconds+30", "timeout=0.5")
+        launch = "import os;os.environ['PYTHONPATH']=" + repr(str(package.parent)) + ";exec(" + repr(supervisor) + ")"
+        with self.assertRaisesRegex(HostError, "ssh-execution-failed"):
+            _exchange([sys.executable, "-c", launch], json.dumps({"max_seconds": 1, "root": str(self.root)}).encode(), timeout=3, maximum=1000)
+        child = json.loads((self.root / "child.json").read_text())
+        try:
+            process = psutil.Process(child["pid"])
+            if process.create_time() == child["started"]:
+                self.assertIn(process.status(), {psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD})
+        except psutil.NoSuchProcess:
+            pass
+        finally:
+            try:
+                process = psutil.Process(child["pid"])
+                if process.create_time() == child["started"]:
+                    process.kill()
+            except psutil.Error:
                 pass
 
     def test_remote_bundle_rejects_traversal_before_writing(self):
