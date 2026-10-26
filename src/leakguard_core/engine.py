@@ -33,12 +33,15 @@ def _legacy():
     if _LEGACY_READY:
         return
     CONFIG, CONFIG_PATH = load()
+    if CONFIG.get('extension_registry'):
+        from .extensions import ExtensionRegistry
+        CONFIG = ExtensionRegistry(CONFIG['extension_registry']).apply(CONFIG, CONFIG.get('detection_profile', 'credentials'))
     STATE = state_directory()
     EXE = pathlib.Path(os.environ.get('LEAKGUARD_GITLEAKS') or CONFIG.get('gitleaks_executable') or shutil.which('gitleaks') or 'gitleaks')
     RULES = pathlib.Path(CONFIG.get('gitleaks_config') or ROOT / 'rules.toml')
     from ._rules import inspect
     rule_identity = inspect(RULES).identity
-    PLUGINS = plugins.load(CONFIG.get('plugins', []))
+    PLUGINS = plugins.load(CONFIG.get('plugins', []), worker_policy=CONFIG.get('worker_policy', 'strict'))
     SCAN_POLICY = hashlib.sha256((ROOT / 'finding_details.py').read_bytes() + json.dumps(rule_identity, separators=(',', ':')).encode() + json.dumps(CONFIG, sort_keys=True).encode()).hexdigest()
     _LEGACY_DEFAULTS = {name: globals()[name] for name in ('CONFIG', 'CONFIG_PATH', 'STATE', 'EXE', 'RULES', 'PLUGINS', 'SCAN_POLICY')}
     _LEGACY_READY = True

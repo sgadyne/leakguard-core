@@ -232,7 +232,7 @@ class ExtensionRegistry:
             else:
                 import fcntl
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except (OSError, ExtensionError):
             if descriptor is not None:
                 os.close(descriptor)
             raise ExtensionError('extension-registry-busy') from None
