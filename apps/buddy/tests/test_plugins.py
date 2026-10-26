@@ -113,6 +113,40 @@ class ScanConfigRefreshTests(unittest.TestCase):
         self.assertIsNone(backend._startup_observation_error)
         self.assertEqual(writes, [values])
 
+    def test_failed_candidate_restores_previous_config_and_host(self):
+        class Host:
+            def stop(self):
+                pass
+
+        store = object()
+        backend = object.__new__(BuddyBackend)
+        backend._host = Host()
+        backend._observation_store = store
+        backend._config_values = {"detection_profile": "credentials"}
+        backend._config = "old-config"
+        backend._startup_observation_error = None
+        writes = []
+        starts = 0
+
+        def start_host(candidate_store):
+            nonlocal starts
+            self.assertIs(candidate_store, store)
+            starts += 1
+            if starts == 1:
+                raise RuntimeError("candidate-failed")
+            backend._host = Host()
+
+        backend._write_config = lambda values: writes.append(dict(values))
+        backend._start_host = start_host
+        with self.assertRaisesRegex(RuntimeError, "candidate-failed"):
+            backend._replace_scan_config({"detection_profile": "firm"}, "new-config")
+        self.assertEqual(backend._config_values, {"detection_profile": "credentials"})
+        self.assertEqual(backend._config, "old-config")
+        self.assertIsNotNone(backend._host)
+        self.assertIs(backend._observation_store, store)
+        self.assertIsNone(backend._startup_observation_error)
+        self.assertEqual(writes, [{"detection_profile": "firm"}, {"detection_profile": "credentials"}])
+
 
 if __name__ == "__main__":
     unittest.main()

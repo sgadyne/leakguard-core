@@ -624,6 +624,7 @@ class BuddyBackend:
                     # Reopen from the durable store to avoid reusing a stale
                     # scheduler snapshot if candidate construction checkpointed.
                     self._start_host(store)
+                    self._startup_observation_error = None
                 except Exception as error:
                     self._startup_observation_error = _safe_code(error) or "scheduler-failed"
             raise
