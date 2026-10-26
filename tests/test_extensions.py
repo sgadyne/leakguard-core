@@ -5,13 +5,27 @@ import tempfile
 import unittest
 import os
 import subprocess
+import sys
 from unittest.mock import patch
 
-from leakguard_core import engine as guard, plugins
+from leakguard_core import engine as guard, plugins, extraction, models
 from test_integration import SYNTHETIC
 
 
+def _darwin_test_worker_policy():
+    """Select the alpha watchdog only for native Darwin worker tests."""
+    return "supervised-alpha" if sys.platform == "darwin" else "strict"
+
+
 class ExtensionTests(unittest.TestCase):
+    def setUp(self):
+        # The deprecated engine adapter reuses its module config, so select the
+        # native watchdog policy explicitly for every legacy scan in this class.
+        policy_config = patch.dict(
+            guard.CONFIG, {'worker_policy': _darwin_test_worker_policy()})
+        policy_config.start()
+        self.addCleanup(policy_config.stop)
+
     def test_explicit_credential_fields_across_text_formats(self):
         cases = [
             ('config.json', json.dumps({'client_secret': SYNTHETIC})),
@@ -48,8 +62,52 @@ class ExtensionTests(unittest.TestCase):
                 report = guard.scan_paths([root], 20, 20, False)
             self.assertEqual(report['file_counts'].get('scanned'), 1)
             self.assertEqual(report['file_counts'].get('skipped-binary-or-no-text'), 1)
-            self.assertEqual(len(report['coverage_issues']), 1)
+            issue_codes = {issue['status'] for issue in report['coverage_issues']}
+            self.assertTrue(any(code.endswith('unsupported-format') for code in issue_codes))
+            self.assertTrue(any(code.endswith('policy-omission') for code in issue_codes))
             self.assertGreater(report['findings_count'], 0)
+
+    def test_late_nul_is_explicit_binary_omission_and_required_mode_is_incomplete(self):
+        # Place the NUL exactly after the former sniff prefix so the entire
+        # admitted buffer must participate in binary classification.
+        payload = b'A' * 8192 + b'\x00'
+        extracted = extraction.extract(payload, 'opaque-unusual.bin')
+        self.assertEqual((extracted.format_id, extracted.disposition, extracted.issues),
+                         ('binary', 'unsupported', ('unsupported-format',)))
+
+        with tempfile.TemporaryDirectory(prefix='leakguard-late-nul-') as folder:
+            root = pathlib.Path(folder)
+            state = root / 'state'
+            source = models.BytesInput(payload, 'opaque-unusual.bin')
+            service = guard.ScanService({
+                'gitleaks_executable': str(guard.EXE),
+                'worker_policy': _darwin_test_worker_policy(),
+            }, state_dir=state)
+            try:
+                optional = service.scan(
+                    [source], policy=models.ScanPolicy.inventory(),
+                    limits=models.ScanLimits(30, 1), use_cache=False,
+                )
+                optional_result = optional.results[0]
+                optional_codes = {issue.code.value for issue in optional_result.issues}
+                self.assertEqual(optional_result.coverage, models.CoverageState.OMITTED)
+                self.assertIn('unsupported-format', optional_codes)
+                self.assertTrue(any(issue.omission_id == 'unsupported-binary'
+                                    for issue in optional_result.issues))
+                self.assertEqual(optional.decision.verdict, models.DecisionVerdict.ALLOW_WITH_OMISSIONS)
+
+                strict = service.scan(
+                    [source], policy=models.ScanPolicy.inventory(required_formats=('all',)),
+                    limits=models.ScanLimits(30, 1), use_cache=False,
+                )
+                strict_result = strict.results[0]
+                self.assertEqual(strict_result.coverage, models.CoverageState.INCOMPLETE)
+                self.assertTrue(any(issue.code is models.ErrorCode.UNSUPPORTED_FORMAT and issue.required
+                                    for issue in strict_result.issues))
+                self.assertFalse(strict.coverage.required_complete)
+                self.assertEqual(strict.decision.verdict, models.DecisionVerdict.INCOMPLETE)
+            finally:
+                service.close()
 
     def test_plugins_cannot_return_values_or_waive_findings(self):
         class Bad:
@@ -74,16 +132,50 @@ class ExtensionTests(unittest.TestCase):
         self.assertNotIn(SYNTHETIC, str(error.exception))
 
     def test_detector_and_extractor_extensions_run_without_source_leaks(self):
-        class Extension:
-            def extract(self, data, path):
-                return [('synthetic-part', 'SYNTHETIC_REVIEW_MARKER\n')]
-            def detect(self, text, path, part):
-                yield plugins.Finding('example-marker', 1, 'review')
-        with patch.object(guard, 'PLUGINS', [Extension()]):
-            found, status = guard.scan_blob(b'\x00binary', 'input.bin')
-        self.assertEqual(status, 'scanned')
-        self.assertTrue(any(f['rule'] == 'example-marker' and f['part'] == 'synthetic-part' for f in found))
-        self.assertNotIn('SYNTHETIC_REVIEW_MARKER', json.dumps(found))
+        from leakguard_core import models
+        with tempfile.TemporaryDirectory(prefix='leakguard-extension-fixture-') as folder:
+            root = pathlib.Path(folder)
+            (root / 'fixture_extractor.py').write_text('''from leakguard_core.extraction import Extraction, ExtractedPart
+from leakguard_core.plugins import PluginManifest
+API_VERSION=2
+MANIFEST=PluginManifest(id="fixture-note-extractor",implementation_version="1",kind="extractor",formats=("fixture-note",),part_kinds=("note",))
+class Extractor:
+ def extract(self,data,context): return Extraction("extracted",(ExtractedPart("note",1,"SYNTHETIC_REVIEW_MARKER\\n"),))
+def create_plugin(options): return Extractor()
+''', encoding='utf-8')
+            (root / 'fixture_detector.py').write_text('''from leakguard_core.plugins import Finding, PluginManifest, RuleSpec
+API_VERSION=2
+MANIFEST=PluginManifest(id="fixture-note-detector",implementation_version="1",kind="detector",rules=(RuleSpec("example-marker","review"),),formats=("fixture-note",),part_kinds=("note",))
+class Detector:
+ def detect(self,text,context): return [Finding("example-marker",1,"review")] if "SYNTHETIC_REVIEW_MARKER" in text else []
+def create_plugin(options): return Detector()
+''', encoding='utf-8')
+            sys_path = str(root)
+            import sys
+            sys.path.insert(0, sys_path)
+            service = None
+            try:
+                service = guard.ScanService({
+                    'gitleaks_executable': str(guard.EXE), 'gitleaks_config': str(guard.RULES),
+                    'worker_policy': _darwin_test_worker_policy(),
+                    'plugins': [{'module': 'fixture_extractor', 'options': {}},
+                                {'module': 'fixture_detector', 'options': {}}],
+                    'extractor_overrides': {'.bin': 'fixture-note-extractor'},
+                })
+                report = service.scan(
+                    [models.BytesInput(b'fixture-input', 'input.bin')],
+                    policy=models.ScanPolicy.inventory(),
+                    limits=models.ScanLimits(20, 4), use_cache=False,
+                )
+            finally:
+                if service is not None:
+                    service.close()
+                sys.path.remove(sys_path)
+        findings = [finding for result in report.results for finding in result.findings]
+        self.assertEqual(report.results[0].coverage, models.CoverageState.COMPLETE)
+        self.assertTrue(any(f.rule == 'example-marker' and f.part_id == 'note-1'
+                            and f.severity is models.FindingSeverity.REVIEW for f in findings))
+        self.assertNotIn('SYNTHETIC_REVIEW_MARKER', report.to_json())
 
     def test_explicit_loading_rejects_missing_or_wrong_api(self):
         with self.assertRaises(plugins.PluginError):
@@ -105,7 +197,10 @@ class ExtensionTests(unittest.TestCase):
             (repo / 'data.txt').write_text('SYNTHETIC_REVIEW_MARKER')
             command(repo, 'add', 'data.txt').check_returncode()
             (root / 'extension_fixture.py').write_text("from leakguard_core.plugins import Finding\nAPI_VERSION=1\nclass Detector:\n def detect(self,text,path,part):\n  if 'SYNTHETIC_REVIEW_MARKER' in text: yield Finding('fixture-marker',1,'block')\ndef create_plugin(options): return Detector()\n")
-            config = root / 'config.json'; config.write_text(json.dumps({'plugins': [{'module': 'extension_fixture'}]}))
+            config = root / 'config.json'; config.write_text(json.dumps({
+                'worker_policy': _darwin_test_worker_policy(),
+                'plugins': [{'module': 'extension_fixture'}],
+            }))
             hooks.install_at(repo / '.git/hooks')
             environment = dict(os.environ, LEAKGUARD_CONFIG=str(config))
             environment['PYTHONPATH'] = str(root) + os.pathsep + environment.get('PYTHONPATH', '')
@@ -115,9 +210,10 @@ class ExtensionTests(unittest.TestCase):
             self.assertNotIn(b'SYNTHETIC_REVIEW_MARKER', result.stderr + result.stdout)
 
     def test_missing_engine_report_fails_closed(self):
-        from types import SimpleNamespace
+        from leakguard_core._supervision import WorkerResult
         with tempfile.TemporaryDirectory(prefix='leakguard-test-') as folder:
-            with patch.object(guard, 'STATE', pathlib.Path(folder)), patch('leakguard_core.engine.subprocess.run', return_value=SimpleNamespace(returncode=0)):
+            empty_report = WorkerResult(stdout=b'', returncode=0)
+            with patch.object(guard, 'STATE', pathlib.Path(folder)), patch('leakguard_core.backends.run_worker', return_value=empty_report):
                 with self.assertRaises(RuntimeError):
                     guard.engine(['stdin'], b'input')
 

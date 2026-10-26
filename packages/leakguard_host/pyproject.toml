@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leakguard-host"
+version = "0.2.0"
+description = "Bounded local navigation, encrypted scan scheduling and explicit SSH execution"
+requires-python = ">=3.11"
+dependencies = ["leakguard-core>=0.2,<0.3", "psutil==7.2.2"]
+
+[project.scripts]
+leakguard-host = "leakguard_host.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

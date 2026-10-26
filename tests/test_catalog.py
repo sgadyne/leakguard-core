@@ -45,7 +45,9 @@ class CatalogTests(unittest.TestCase):
         catalog.observe(self.conn, renamed, b'changed', guard.CONFIG)
         catalog.event(self.conn, renamed, 'deleted', guard.CONFIG)
         states = dict(self.conn.execute('SELECT path,present FROM locations'))
-        self.assertEqual((states[one], states[two], states[renamed]), (1, 0, 0))
+        # Events are location hints only. A rename/deletion leaves source
+        # presence unknown until a bounded reconciliation confirms absence.
+        self.assertEqual((states[one], states[two], states[renamed]), (1, None, None))
         kinds = [r[0] for r in self.conn.execute('SELECT kind FROM location_events')]
         self.assertIn('content-changed', kinds); self.assertIn('renamed', kinds); self.assertIn('deleted', kinds)
 

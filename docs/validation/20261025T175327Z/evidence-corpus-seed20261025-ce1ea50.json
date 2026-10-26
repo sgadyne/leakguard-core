@@ -1,0 +1,176 @@
+{
+  "artifact_sha256": "cb6c0eb4ee6410174521fa92c49966f7cf8fda65810d1c9a171349d439cb434e",
+  "by_category": {
+    "duplicate-json": {
+      "cases": 2,
+      "covered": 2,
+      "failed": 0,
+      "metric_eligible": 0,
+      "metric_not_scored": 2,
+      "uncovered": 0
+    },
+    "exact-placeholder": {
+      "cases": 14,
+      "covered": 14,
+      "failed": 0,
+      "metric_eligible": 14,
+      "metric_not_scored": 0,
+      "uncovered": 0
+    },
+    "function-ast-proof": {
+      "cases": 3,
+      "covered": 3,
+      "failed": 0,
+      "metric_eligible": 0,
+      "metric_not_scored": 3,
+      "uncovered": 0
+    },
+    "literal-positive": {
+      "cases": 2,
+      "covered": 2,
+      "failed": 0,
+      "metric_eligible": 2,
+      "metric_not_scored": 0,
+      "uncovered": 0
+    },
+    "msg": {
+      "cases": 3,
+      "covered": 3,
+      "failed": 0,
+      "metric_eligible": 2,
+      "metric_not_scored": 1,
+      "uncovered": 0
+    },
+    "office-sheet": {
+      "cases": 1,
+      "covered": 1,
+      "failed": 0,
+      "metric_eligible": 1,
+      "metric_not_scored": 0,
+      "uncovered": 0
+    },
+    "office-slides": {
+      "cases": 1,
+      "covered": 1,
+      "failed": 0,
+      "metric_eligible": 1,
+      "metric_not_scored": 0,
+      "uncovered": 0
+    },
+    "office-word": {
+      "cases": 3,
+      "covered": 3,
+      "failed": 0,
+      "metric_eligible": 2,
+      "metric_not_scored": 1,
+      "uncovered": 0
+    },
+    "part-boundary": {
+      "cases": 3,
+      "covered": 3,
+      "failed": 0,
+      "metric_eligible": 3,
+      "metric_not_scored": 0,
+      "uncovered": 0
+    },
+    "pdf": {
+      "cases": 2,
+      "covered": 2,
+      "failed": 0,
+      "metric_eligible": 1,
+      "metric_not_scored": 1,
+      "uncovered": 0
+    },
+    "plugin-collision": {
+      "cases": 2,
+      "covered": 2,
+      "failed": 0,
+      "metric_eligible": 0,
+      "metric_not_scored": 2,
+      "uncovered": 0
+    },
+    "provider-hash-proof": {
+      "cases": 3,
+      "covered": 3,
+      "failed": 0,
+      "metric_eligible": 0,
+      "metric_not_scored": 3,
+      "uncovered": 0
+    },
+    "unusual-extension": {
+      "cases": 1,
+      "covered": 1,
+      "failed": 0,
+      "metric_eligible": 1,
+      "metric_not_scored": 0,
+      "uncovered": 0
+    },
+    "utf16": {
+      "cases": 1,
+      "covered": 1,
+      "failed": 0,
+      "metric_eligible": 1,
+      "metric_not_scored": 0,
+      "uncovered": 0
+    },
+    "weak-literal": {
+      "cases": 6,
+      "covered": 6,
+      "failed": 0,
+      "metric_eligible": 6,
+      "metric_not_scored": 0,
+      "uncovered": 0
+    }
+  },
+  "cache_status": "uncached",
+  "command": [
+    "python",
+    "tools/_corpus_runner.py",
+    "--seed",
+    "20261025"
+  ],
+  "counts": {
+    "covered": 47,
+    "failed": 0,
+    "false_negative": 0,
+    "false_positive": 0,
+    "labeled_cases": 47,
+    "metric_eligible_cases": 34,
+    "metric_not_scored_cases": 13,
+    "true_negative": 21,
+    "true_positive": 13,
+    "uncovered": 0
+  },
+  "dependency_lock_digest": "c2856378001212fd3e68affb8bd6a899884da6b7c51c638a56d5cbce2d38c255",
+  "detector_metrics": {
+    "false_negative": 0,
+    "false_positive": 0,
+    "true_negative": 21,
+    "true_positive": 13
+  },
+  "elapsed_seconds": 7.528,
+  "finished_utc": "2026-10-25T20:34:06.400364+00:00",
+  "gitleaks_identity": "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509",
+  "host_label": "linux",
+  "input_manifest_digest": "cb6c0eb4ee6410174521fa92c49966f7cf8fda65810d1c9a171349d439cb434e",
+  "installed_dependencies": {
+    "olefile": "0.47",
+    "packaging": "26.3",
+    "pypdf": "6.21.2"
+  },
+  "lane": "evidence",
+  "outcome": "passed",
+  "patch_digest": "4cb33267502f03a115264ba7573f14c16892a8f42ee9fa1a5eeefa8c35e1a038",
+  "patch_digest_after": "4cb33267502f03a115264ba7573f14c16892a8f42ee9fa1a5eeefa8c35e1a038",
+  "peak_rss_bytes": null,
+  "policy_id": "969ecaa5e84648140b5231fecc2296bde826886e2d7e6f90f26441ff734b4e17",
+  "python": "3.11.2",
+  "run_id": "c5c11139b4944902b6d7814f28beb944",
+  "runtime_id": "2412ed52f994e86b07a09dd2787feae40ecd5cc862acc2d76c36a87c8b849082",
+  "seed": 20261025,
+  "source_commit": "ce1ea500fd832ea7c15a0a3558918fbf674f0eb4",
+  "source_commit_after": "ce1ea500fd832ea7c15a0a3558918fbf674f0eb4",
+  "source_stable": true,
+  "started_utc": "2026-10-25T20:33:58.886537+00:00",
+  "subprocess_count": null
+}

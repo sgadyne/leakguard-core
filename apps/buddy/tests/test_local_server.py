@@ -1,0 +1,258 @@
+import http.client
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import urlsplit
+
+from leakguard_buddy.server import LocalBuddy, open_existing
+
+
+class StubBackend:
+    def status(self):
+        return {"ready": True}
+
+    def close(self):
+        pass
+
+    def git_hooks_install(self, repository, profile):
+        return {"repository": repository, "profile": profile}
+
+    def plugin_install(self, payload):
+        return {"filename": payload["filename"]}
+
+class LocalServerTests(unittest.TestCase):
+    def test_bootstrap_rotates_after_exchange_and_next_open_works(self):
+        with tempfile.TemporaryDirectory(prefix="buddy-http-test-") as name:
+            launch_file = Path(name) / "buddy-launch.url"
+            app = LocalBuddy(StubBackend(), bootstrap_file=launch_file)
+            app.start()
+            try:
+                initial = app.bootstrap
+                with patch("webbrowser.open", return_value=True) as browser_open:
+                    self.assertTrue(open_existing(Path(name)))
+                    browser_open.assert_called_once_with(app.url, new=1, autoraise=True)
+                self.assertFalse(launch_file.exists())
+                first = self._exchange(app, initial)
+                self.assertEqual(first.status, 200)
+                self.assertNotEqual(app.bootstrap, initial)
+                self.assertIn(app.bootstrap, launch_file.read_text(encoding="utf-8"))
+                self.assertEqual(self._exchange(app, initial).status, 403)
+
+                cookie = first.getheader("Set-Cookie").split(";", 1)[0]
+                self.assertEqual(self._request(app, "GET", "/api/status", cookie=cookie)[0], 200)
+                next_token = app.bootstrap
+                with patch("webbrowser.open", return_value=True) as browser_open:
+                    self.assertTrue(open_existing(Path(name)))
+                    browser_open.assert_called_once_with(app.url, new=1, autoraise=True)
+                second = self._exchange(app, next_token, cookie=cookie)
+                self.assertEqual(second.status, 200)
+                self.assertEqual(first.getheader("Set-Cookie"), second.getheader("Set-Cookie"))
+                self.assertEqual(json.loads(second._buddy_body)["csrf"], json.loads(first._buddy_body)["csrf"])
+                status, _ = self._request(
+                    app, "POST", "/api/hooks/install", cookie=cookie,
+                    payload={"repository": "/synthetic/repo", "profile": "firm"},
+                    origin=app.server.origin, csrf=json.loads(first._buddy_body)["csrf"],
+                )
+                self.assertEqual(status, 200)
+            finally:
+                app.close()
+            self.assertFalse(launch_file.exists())
+
+    def test_mutating_api_requires_csrf_and_exact_origin(self):
+        app = LocalBuddy(StubBackend())
+        app.start()
+        try:
+            response = self._exchange(app, app.bootstrap)
+            cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+            csrf = json.loads(response._buddy_body)["csrf"]
+            payload = {"repository": "/synthetic/repo", "profile": "firm"}
+            status, _ = self._request(app, "POST", "/api/hooks/install", cookie=cookie, payload=payload, origin=app.server.origin)
+            self.assertEqual(status, 403)
+            status, response = self._request(app, "POST", "/api/hooks/install", cookie=cookie, payload=payload, origin="http://localhost")
+            self.assertEqual(status, 403)
+            status, response = self._request(app, "POST", "/api/hooks/install", cookie=cookie, payload=payload, origin=app.server.origin, csrf=csrf)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(response._buddy_body), payload)
+        finally:
+            app.close()
+
+    def test_plugin_upload_requires_and_preserves_wheel_filename(self):
+        app = LocalBuddy(StubBackend())
+        app.start()
+        try:
+            response = self._exchange(app, app.bootstrap)
+            cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+            csrf = json.loads(response._buddy_body)["csrf"]
+            status, _ = self._request(
+                app, "POST", "/api/plugins/install", cookie=cookie,
+                payload={"wheel": "AAAA", "reviewed": True},
+                origin=app.server.origin, csrf=csrf,
+            )
+            self.assertEqual(status, 400)
+            filename = "firm_checker-1.2.3-py3-none-any.whl"
+            status, response = self._request(
+                app, "POST", "/api/plugins/install", cookie=cookie,
+                payload={"wheel": "AAAA", "filename": filename, "reviewed": True},
+                origin=app.server.origin, csrf=csrf,
+            )
+            self.assertEqual(status, 201)
+            self.assertEqual(json.loads(response._buddy_body), {"filename": filename})
+        finally:
+            app.close()
+
+    def test_extension_registration_errors_are_safe_client_errors(self):
+        codes = (
+            "extension-conflict",
+            "extension-runtime-inspection-failed",
+            "extension-startup-artifact",
+            "extension-wheel-invalid",
+        )
+
+        class CodedError(Exception):
+            def __init__(self, code):
+                self.code = code
+                super().__init__("private detail must not reach the response")
+
+        class FailingBackend(StubBackend):
+            error_code = ""
+
+            def plugin_conformance(self, _payload):
+                raise CodedError(self.error_code)
+
+        app = LocalBuddy(FailingBackend())
+        app.start()
+        try:
+            exchange = self._exchange(app, app.bootstrap)
+            cookie = exchange.getheader("Set-Cookie").split(";", 1)[0]
+            csrf = json.loads(exchange._buddy_body)["csrf"]
+            for code in codes:
+                with self.subTest(code=code):
+                    app.backend.error_code = code
+                    status, response = self._request(
+                        app, "POST", "/api/plugins/conformance", cookie=cookie,
+                        payload={"id": "sample"},
+                        origin=app.server.origin, csrf=csrf,
+                    )
+                    self.assertEqual(status, 400)
+                    self.assertEqual(json.loads(response._buddy_body), {"error": code})
+                    self.assertNotIn(b"private detail", response._buddy_body)
+        finally:
+            app.close()
+
+    def test_extension_registration_errors_have_plain_language_ui_messages(self):
+        source = Path(__file__).parents[1] / "src" / "leakguard_buddy" / "static" / "app.js"
+        client = source.read_text(encoding="utf-8")
+        messages = {
+            "extension-conflict": "Use a unique package name.",
+            "extension-runtime-inspection-failed": "Buddy's private runtime is unavailable.",
+            "extension-startup-artifact": "Review the plugin startup artifact before installing it.",
+            "extension-wheel-invalid": "Review the plugin wheel artifact before installing it.",
+        }
+        for code, message in messages.items():
+            with self.subTest(code=code):
+                self.assertIn(f'"{code}": "', client)
+                self.assertIn(message, client)
+
+    def test_host_source_and_navigation_errors_map_to_safe_client_responses(self):
+        navigation_codes = (
+            "permission-denied", "offline", "unreadable", "path-invalid",
+            "outside-root", "directory-changed", "cursor-invalid", "page-invalid",
+            "platform-unavailable",
+        )
+
+        class CodedError(Exception):
+            def __init__(self, code):
+                self.code = code
+                super().__init__("/private/path and host details must not reach response")
+
+        class FailingBackend(StubBackend):
+            error_code = ""
+
+            def remove_source(self, _source_id):
+                raise CodedError(self.error_code)
+
+            def browse(self, _query):
+                raise CodedError(self.error_code)
+
+        app = LocalBuddy(FailingBackend())
+        app.start()
+        try:
+            exchange = self._exchange(app, app.bootstrap)
+            cookie = exchange.getheader("Set-Cookie").split(";", 1)[0]
+            csrf = json.loads(exchange._buddy_body)["csrf"]
+            app.backend.error_code = "source-busy"
+            status, response = self._request(
+                app, "DELETE", "/api/sources/source_1", cookie=cookie,
+                payload={}, origin=app.server.origin, csrf=csrf,
+            )
+            self.assertEqual(status, 409)
+            self.assertEqual(json.loads(response._buddy_body), {"error": "source-busy"})
+            for code in navigation_codes:
+                with self.subTest(code=code):
+                    app.backend.error_code = code
+                    status, response = self._request(
+                        app, "GET", "/api/browse?path=%2Fsynthetic", cookie=cookie,
+                    )
+                    self.assertEqual(status, 409 if code == "directory-changed" else 400)
+                    self.assertEqual(json.loads(response._buddy_body), {"error": code})
+                    self.assertNotIn(b"/private/path", response._buddy_body)
+        finally:
+            app.close()
+
+    def test_navigation_statuses_use_plain_language_labels(self):
+        source = Path(__file__).parents[1] / "src" / "leakguard_buddy" / "static" / "app.js"
+        client = source.read_text(encoding="utf-8")
+        for code, label in {
+            "permission-denied": "Permission denied",
+            "offline": "Offline",
+            "unreadable": "Cannot read this location",
+            "not-directory": "This location is not a folder",
+            "directory-changed": "Folder changed; browse again",
+            "platform-unavailable": "Unavailable on this platform",
+        }.items():
+            with self.subTest(code=code):
+                key = f'"{code}"' if "-" in code else code
+                self.assertIn(f'{key}: "{label}"', client)
+        for message in (
+            "Wait for the current scan slice to stop before removing this source.",
+            "Enter a valid folder path.",
+            "Choose a folder inside the selected source.",
+            "This folder listing expired. Browse it again.",
+            "Choose a valid number of locations to display.",
+        ):
+            with self.subTest(message=message):
+                self.assertIn(message, client)
+
+    @staticmethod
+    def _request(app, method, path, *, token=None, cookie=None, payload=None, origin=None, csrf=None):
+        connection = http.client.HTTPConnection("127.0.0.1", app.server.server_address[1], timeout=5)
+        headers = {"Host": app.server.expected_host}
+        if token is not None:
+            headers.update({"Origin": app.server.origin, "Content-Type": "application/json"})
+            body = json.dumps({"token": token})
+        elif payload is not None:
+            headers["Content-Type"] = "application/json"
+            headers["Origin"] = origin or app.server.origin
+            if csrf is not None:
+                headers["X-Buddy-CSRF"] = csrf
+            body = json.dumps(payload)
+        else:
+            body = None
+        if cookie is not None:
+            headers["Cookie"] = cookie
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        response._buddy_body = response.read()
+        connection.close()
+        return response.status, response
+
+    def _exchange(self, app, token, *, cookie=None):
+        path = urlsplit(app.url).path + "__bootstrap"
+        _, response = self._request(app, "POST", path, token=token, cookie=cookie)
+        return response
+
+
+if __name__ == "__main__":
+    unittest.main()

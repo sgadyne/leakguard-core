@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "case_id": "structured-customer-id",
+      "text": "customer_id: ACME-CUST-004812",
+      "logical_path": "fixtures/customer.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [
+        {
+          "rule": "firm-customer-number",
+          "start_line": 1,
+          "end_line": 1,
+          "severity": "block"
+        }
+      ]
+    },
+    {
+      "case_id": "confidentiality-label",
+      "text": "CONFIDENTIAL - synthetic demo record",
+      "logical_path": "fixtures/document.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [
+        {
+          "rule": "firm-confidentiality-marker",
+          "start_line": 1,
+          "end_line": 1,
+          "severity": "review"
+        }
+      ]
+    },
+    {
+      "case_id": "unlabelled-customer-token-control",
+      "text": "ACME-CUST-004812",
+      "logical_path": "fixtures/document.txt",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
+      "case_id": "ordinary-label-control",
+      "text": "Internal use only; no restricted marker is present.",
+      "logical_path": "fixtures/document.txt",
+      "format_id": "text",
+      "part_id": "text"
+    }
+  ]
+}

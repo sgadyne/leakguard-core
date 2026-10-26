@@ -5,30 +5,39 @@ useDefault = true
 
 [[rules]]
 id = "literal-client-secret"
-description = "Literal value assigned to an explicit client-secret field"
-regex = '''(?i)(?:^|[\s{,.])["']?(?:client[_-]?secret|clientsecret)["']?\s*[:=]\s*["']([a-z0-9_~.\-]{20,160})["']'''
+description = "Literal value assigned to an explicit client, application or API secret field"
+regex = '''(?i)(?:^|[\s{,.])((?:["']?(?:client[_-]?secret(?:[_-]?value)?|clientsecret|app[_-]?secret|application[_-]?secret|api[_-]?secret|oauth[_-]?client[_-]?secret)["']?[ \t]*[:=][ \t]*(?:"[^"\r\n]{1,160}"|'[^'\r\n]{1,160}'|[^"'\s,;}\]]{1,160}["']?)))'''
 secretGroup = 1
+entropy = 0
 keywords = ["secret"]
   [[rules.allowlists]]
   regexTarget = "secret"
-  regexes = ['''(?i)^(?:your-client-secret|example-client-secret|placeholder-value|test-secret-placeholder)$''']
+  regexes = ['''(?i)^["']?(?:client[_-]?secret(?:[_-]?value)?|clientsecret|app[_-]?secret|application[_-]?secret|api[_-]?secret|oauth[_-]?client[_-]?secret)["']?\s*[:=]\s*["']?(?:your-client-secret|example-client-secret|placeholder-value|test-secret-placeholder|\$\{[a-z_][a-z0-9_]*\}?|%[a-z_][a-z0-9_]*%)["']?$''']
+  [[rules.allowlists]]
+  regexTarget = "secret"
+  regexes = ['''(?i)^["']?(?:client[_-]?secret(?:[_-]?value)?|clientsecret|app[_-]?secret|application[_-]?secret|api[_-]?secret|oauth[_-]?client[_-]?secret)["']?\s*[:=]\s*(?:os\.environ\s*\[\s*["']|os\.environ\.get\s*\(\s*["']|os\.getenv\s*\(\s*["']|process\.env\.[a-z_][a-z0-9_]*|get_secret\s*\(\))["']?$''']
 
 [[rules]]
 id = "literal-password"
-description = "Quoted literal value assigned to an explicit password field"
-regex = '''(?i)(?:^|[\s{,.])["']?(?:password|passwd)["']?\s*[:=]\s*["']([^"'\r\n]{8,120})["']'''
+description = "Literal value assigned to a password, passphrase or common password alias"
+regex = '''(?i)(?:^|[\s{,.])((?:["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?[ \t]*[:=][ \t]*(?:"[^"\r\n]{1,160}"|'[^'\r\n]{1,160}'|[^"'\s,;}\]]{1,160}["']?)))'''
 secretGroup = 1
-keywords = ["password", "passwd"]
+entropy = 0
+keywords = ["password", "passwd", "passphrase", "pwd"]
   [[rules.allowlists]]
   regexTarget = "secret"
-  regexes = ['''(?i)^(?:\$\{[a-z_][a-z0-9_]*\}|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password)$''']
+  regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*[:=]\s*["']?(?:\$\{[a-z_][a-z0-9_]*\}?|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password|change[-_ ]?me|replace[-_ ]?me|not[-_ ]?a[-_ ]?secret|test|none|null|undefined)["']?$''']
+  [[rules.allowlists]]
+  regexTarget = "secret"
+  regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*[:=]\s*(?:os\.environ\s*\[\s*["']|os\.environ\.get\s*\(\s*["']|os\.getenv\s*\(\s*["']|process\.env\.[a-z_][a-z0-9_]*|get_password\s*\(\))["']?$''']
 
 [[rules]]
 id = "xml-password"
 description = "Literal password in XML application settings"
-regex = '''(?i)\b(?:key|name)\s*=\s*["'](?:[^"'\r\n]{0,40}[_:.])?(?:password|passwd|pwd)["']\s+value\s*=\s*["']([^"'\r\n]{8,120})["']'''
+regex = '''(?i)\b((?:key|name)\s*=\s*["'](?:[^"'\r\n]{0,40}[_:.])?(?:password|passwd|pwd)["']\s+value\s*=\s*["'][^"'\r\n]{1,120}["'])'''
 secretGroup = 1
+entropy = 0
 keywords = ["password", "passwd", "pwd"]
   [[rules.allowlists]]
   regexTarget = "secret"
-  regexes = ['''(?i)^(?:\$\{[a-z_][a-z0-9_]*\}|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password)$''']
+  regexes = ['''(?i)^(?:key|name)\s*=\s*["'](?:[^"'\r\n]{0,40}[_:.])?(?:password|passwd|pwd)["']\s+value\s*=\s*["'](?:\$\{[a-z_][a-z0-9_]*\}|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password|change[-_ ]?me|replace[-_ ]?me|not[-_ ]?a[-_ ]?secret|test|none|null|undefined)["']$''']

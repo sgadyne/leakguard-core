@@ -1,0 +1,89 @@
+{
+  "case_count_limit": 4,
+  "cases": [
+    {
+      "ast_observations": {
+        "dump_calls": 1,
+        "parse_calls": 1
+      },
+      "behavior_passed": true,
+      "case": "matching-small-control",
+      "child_wall_seconds": 0.081281,
+      "classification": "verified-function-ast-sha256",
+      "classification_seconds": 0.000334,
+      "detector_severity": "block",
+      "expected_behavior": "matching-proof",
+      "has_proof": true,
+      "peak_rss_kib": 21632,
+      "returncode": 0,
+      "severity": "info",
+      "source_bytes": 26
+    },
+    {
+      "ast_observations": {
+        "parse_calls": 1,
+        "parse_error_type": "RecursionError"
+      },
+      "behavior_passed": true,
+      "case": "binary-chain-5000",
+      "child_wall_seconds": 0.071109,
+      "classification": "heuristic",
+      "classification_seconds": 0.002547,
+      "detector_severity": "block",
+      "expected_behavior": "retain-block",
+      "has_proof": false,
+      "peak_rss_kib": 25132,
+      "returncode": 0,
+      "severity": "block",
+      "source_bytes": 10024
+    },
+    {
+      "ast_observations": {
+        "parse_calls": 1,
+        "parse_error_type": "RecursionError"
+      },
+      "behavior_passed": true,
+      "case": "attribute-chain-100000",
+      "child_wall_seconds": 0.081169,
+      "classification": "heuristic",
+      "classification_seconds": 0.013985,
+      "detector_severity": "block",
+      "expected_behavior": "retain-block",
+      "has_proof": false,
+      "peak_rss_kib": 48632,
+      "returncode": 0,
+      "severity": "block",
+      "source_bytes": 200026
+    },
+    {
+      "ast_observations": {
+        "dump_calls": 1,
+        "parse_calls": 1
+      },
+      "behavior_passed": true,
+      "case": "wide-function-95000",
+      "child_wall_seconds": 0.655655,
+      "classification": "heuristic",
+      "classification_seconds": 0.583812,
+      "detector_severity": "block",
+      "expected_behavior": "retain-block",
+      "has_proof": false,
+      "peak_rss_kib": 257456,
+      "returncode": 0,
+      "severity": "block",
+      "source_bytes": 950013
+    }
+  ],
+  "memory_limit_bytes": 536870912,
+  "platform": "Linux",
+  "production_edits": false,
+  "python": "3.11.2",
+  "source_sha256": {
+    "engine.py": "a56c2043cc4a18f39a8e6a235535d7ee1ad7eb022d0c2d769944feb1b02b2ae0",
+    "finding_details.py": "fe83e7a41cc8bf5dd7d36d0aae1bba68e097a2d26469b638ede2b7dd3e22aa75",
+    "sources.py": "060064b5ccfbdb83b4be3bc5700f0307d427c3dc1594ec523ae87954386b8ca1"
+  },
+  "timeout_seconds_per_child": 5,
+  "probe_process_limit_scope": "limits applied to each fresh finite probe child, not a production parent-process memory guarantee",
+  "private_original_receipt": "semantics-metadata-ast-probe.json"
+}

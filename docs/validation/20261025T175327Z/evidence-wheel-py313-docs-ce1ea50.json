@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "run_id": "c338b0869c834e3ea17ef9607633dbef",
+  "mode": "wheel",
+  "source_commit": "ce1ea500fd832ea7c15a0a3558918fbf674f0eb4",
+  "source_commit_after": "ce1ea500fd832ea7c15a0a3558918fbf674f0eb4",
+  "source_stable": true,
+  "patch_digest": "4cb33267502f03a115264ba7573f14c16892a8f42ee9fa1a5eeefa8c35e1a038",
+  "patch_digest_after": "4cb33267502f03a115264ba7573f14c16892a8f42ee9fa1a5eeefa8c35e1a038",
+  "host_label": "linux",
+  "target_python_version": "3.13.15",
+  "documents_extra": true,
+  "installation_mode": "venv",
+  "installed_dependencies": {
+    "leakguard-core": "0.2.0",
+    "leakguard-example-detector": "1.0.0",
+    "leakguard-example-extractor": "1.0.0",
+    "olefile": "0.47",
+    "packaging": "26.3",
+    "pypdf": "6.21.2"
+  },
+  "gitleaks_identity": "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509",
+  "test_count": 249,
+  "test_summary": {
+    "errors": 0,
+    "failures": 0,
+    "passed": 247,
+    "skip_test_ids": [
+      "test_conformance.SupervisionConformanceTests.test_windows_job_enforces_a_hard_memory_limit.test_windows_job_enforces_a_hard_memory_limit",
+      "test_conformance.SupervisionConformanceTests.test_windows_job_kills_descendant_after_parent_success.test_windows_job_kills_descendant_after_parent_success"
+    ],
+    "skipped": 2,
+    "total": 249
+  },
+  "conformance": [
+    {
+      "cases": 1,
+      "component_id": "legacy-plugin",
+      "kind": "detector",
+      "passed": true
+    },
+    {
+      "cases": 1,
+      "component_id": "example-firm-marker",
+      "kind": "detector",
+      "passed": true
+    },
+    {
+      "cases": 1,
+      "component_id": "example-demo-note",
+      "kind": "extractor",
+      "passed": true
+    }
+  ],
+  "started_utc": "2026-10-25T20:30:16.907213+00:00",
+  "finished_utc": "2026-10-25T20:32:11.402255+00:00",
+  "elapsed_seconds": 114.495,
+  "outcome": "passed",
+  "failed_stage": null,
+  "builder_python": "3.11.2",
+  "core_tree": "9d3597b34f0471645869b77c396d3136dfd5dc1a",
+  "installed_origin_relative": "lib/python3.13/site-packages/leakguard_core/__init__.py",
+  "pythonpath_unset_for_installed_tests": true,
+  "private_original_receipt": "evidence-wheel-py313-docs-ce1ea50.json",
+  "artifact_audit": {
+    "leakguard_core-0.2.0-py3-none-any.whl": {
+      "archive_sha256": "3bb489fa0e59ebd9cf259fd1111a0c02fedeec39f6a4520bf7acc3225768c67e",
+      "archive_size_bytes": 121907,
+      "member_count": 38,
+      "member_manifest_sha256": "0436b72dc1e32ab38793c3f80f3bc6e84fec528841a73ec266c771de2edc1f41"
+    },
+    "leakguard_core-0.2.0.tar.gz": {
+      "archive_sha256": "e1a6773a6f0d527d742a0f17405016d681abdca23a203d90c8b06ba580fda017",
+      "archive_size_bytes": 227425,
+      "member_count": 90,
+      "member_manifest_sha256": "c48f2697b31d36b156e34bc150ede414aab9c5a9fa720bbe41333b49c2da9d26"
+    },
+    "leakguard_example_detector-1.0.0-py3-none-any.whl": {
+      "archive_sha256": "5310a38c64a06bd722ba7f77dd232f3b768d2cee794a5887886e56057f225a51",
+      "archive_size_bytes": 2188,
+      "member_count": 6,
+      "member_manifest_sha256": "57d73af13ca50741d18f6242450e5f3b29a2d5d8fea4f0b958a8e3b583aa792b"
+    },
+    "leakguard_example_extractor-1.0.0-py3-none-any.whl": {
+      "archive_sha256": "baee0db37bf0ea0092b6a6b8196f481c355f2474a534e230d279f9158731a627",
+      "archive_size_bytes": 2261,
+      "member_count": 6,
+      "member_manifest_sha256": "a64ce64ac073c7734cd9f7fa8066a6f68dc7df38ff599cadc80e357561c72d2b"
+    }
+  },
+  "builder_dependencies": {
+    "build": "1.6.1",
+    "packaging": "26.3",
+    "pyproject_hooks": "1.3.3",
+    "setuptools": "84.2.1"
+  },
+  "dependency_lock_digest": "305c02aa43709bd7799db65df71732a840c7a44fb98cbe25f66d53b15c9f8951",
+  "dependency_lock_digest_scheme": "SHA256 canonical compact JSON of installed/builder dependency version maps; archive/member hashes identify the built artifacts."
+}

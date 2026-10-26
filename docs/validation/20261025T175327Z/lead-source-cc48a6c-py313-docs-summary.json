@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "source_commit": "cc48a6cf84f063c21ac9e51f954f1c5352799755",
+  "core_tree": "9d3597b34f0471645869b77c396d3136dfd5dc1a",
+  "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "source_untracked_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "executed": true,
+  "source_stable": true,
+  "platform": "linux-x86_64",
+  "python": "3.13.15",
+  "parsers": {
+    "pypdf": "6.21.2",
+    "olefile": "0.47"
+  },
+  "command": "python -m unittest discover -s tests -v",
+  "test_total": 250,
+  "passed": 248,
+  "skipped": 2,
+  "skip_reason": "Windows Job Object tests require native Windows",
+  "failures": 0,
+  "errors": 0,
+  "suite_seconds": 101.53,
+  "wrapper_seconds": 102.425,
+  "private_job_receipt": "job-c115f53d03304c2aa71a91d310075722.json"
+}

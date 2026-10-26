@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "labeling": "independent product-intent labels, authored before detector evaluation",
+  "cases": [
+    {
+      "case_id": "short-client-secret-01",
+      "category": "short-literal",
+      "expected": "finding",
+      "expected_rule": "literal-client-secret",
+      "text": "client_secret = \"short\""
+    },
+    {
+      "case_id": "short-client-secret-02",
+      "category": "short-literal",
+      "expected": "finding",
+      "expected_rule": "literal-client-secret",
+      "text": "client-secret = '1234567890123456789'"
+    },
+    {
+      "case_id": "short-client-secret-03",
+      "category": "short-literal",
+      "expected": "finding",
+      "expected_rule": "literal-client-secret",
+      "text": "clientsecret: tiny-value"
+    },
+    {
+      "case_id": "short-password-01",
+      "category": "short-literal",
+      "expected": "finding",
+      "expected_rule": "literal-password",
+      "text": "password = \"short\""
+    },
+    {
+      "case_id": "short-password-02",
+      "category": "short-literal",
+      "expected": "finding",
+      "expected_rule": "literal-password",
+      "text": "passwd: '1234567'"
+    },
+    {
+      "case_id": "short-password-03",
+      "category": "short-literal",
+      "expected": "finding",
+      "expected_rule": "literal-password",
+      "text": "pwd=K4x"
+    },
+    {
+      "case_id": "client-secret-placeholder-01",
+      "category": "placeholder",
+      "expected": "none",
+      "text": "client_secret = \"your-client-secret\""
+    },
+    {
+      "case_id": "client-secret-placeholder-02",
+      "category": "placeholder",
+      "expected": "none",
+      "text": "client_secret = \"example-client-secret\""
+    },
+    {
+      "case_id": "password-placeholder-01",
+      "category": "placeholder",
+      "expected": "none",
+      "text": "password = \"${PASSWORD}\""
+    },
+    {
+      "case_id": "password-placeholder-02",
+      "category": "placeholder",
+      "expected": "none",
+      "text": "password = \"<redacted>\""
+    },
+    {
+      "case_id": "password-context-01",
+      "category": "benign-context",
+      "expected": "none",
+      "text": "The setup guide asks you to choose a password in the UI."
+    },
+    {
+      "case_id": "password-context-02",
+      "category": "benign-context",
+      "expected": "none",
+      "text": "Update password_key after rotating the synthetic test fixture."
+    }
+  ]
+}

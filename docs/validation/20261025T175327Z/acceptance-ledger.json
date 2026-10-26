@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "run_id": "20261025T175327Z",
+  "updated_utc": "2026-10-25T21:30:30.331475+00:00",
+  "implementation_validation_commit": "9111c9caa7426148d2412244be00542ac2989bde",
+  "implementation_validation_tree": "0474c80494fddb24a833adbd1481d55612d415df",
+  "production_core_subtree": "9d3597b34f0471645869b77c396d3136dfd5dc1a",
+  "overall_outcome": "partial-native-platform-verification-outstanding",
+  "rows": {
+    "A01": {
+      "status": "linux-pass-native-windows-open",
+      "evidence": "Executable atomic hooks, actual commit/push enforcement, backup/chaining/stdin/args and isolated launcher.",
+      "references": [
+        "semantics-portable-before-after.json",
+        "../../../tests/test_git_policy.py",
+        "../../../tests/test_integration.py"
+      ]
+    },
+    "A02": {
+      "status": "pass",
+      "evidence": "Positive replay and exact normalized cold/warm/uncached equivalence; content/context/runtime invalidation.",
+      "references": [
+        "benchmark-cc48a6c-summary.json",
+        "../../../tests/test_scan_state.py"
+      ]
+    },
+    "A03": {
+      "status": "pass",
+      "evidence": "Required missing/malformed/no-text/encrypted/limit/crash/timeout coverage and named nontext omissions; parser import isolation.",
+      "references": [
+        "base-corpus-9111c9c-summary.json",
+        "../../../tests/test_conformance.py",
+        "../../../tests/test_worker_imports.py"
+      ]
+    },
+    "A04": {
+      "status": "pass",
+      "evidence": "Unique-marker API/CLI/explain/current/history and SQLite logical/raw DB/WAL/SHM regression; sanitized extension/script failures and archive audits.",
+      "references": [
+        "lead-source-9111c9c-py311-docs-summary.json",
+        "evidence-wheel-py313-docs-final-9111c9c.json",
+        "../../../tests/test_public_api.py"
+      ]
+    },
+    "A05": {
+      "status": "linux-pass",
+      "evidence": "Immutable Git/blob/index/commit context and inclusive part/line provenance, unusual pathname bytes.",
+      "references": [
+        "../../../tests/test_git_policy.py",
+        "../../../tests/test_integration.py"
+      ]
+    },
+    "A06": {
+      "status": "pass",
+      "evidence": "Narrow built-in same-version proof; ambiguous/duplicate/mixed/changed/incomplete context denies waiver; restrictive merge.",
+      "references": [
+        "evidence-corpus-seed20261025-9111c9c.json",
+        "semantics-metadata-ast-probe.json",
+        "../../../tests/test_runtime_identity.py"
+      ]
+    },
+    "A07": {
+      "status": "pass",
+      "evidence": "Complete comparable resolution, conservative unknown state, anchored absence and transactional legacy migration.",
+      "references": [
+        "../../../tests/test_scan_state.py",
+        "../../../tests/test_catalog.py"
+      ]
+    },
+    "A08": {
+      "status": "linux-pass-native-windows-open",
+      "evidence": "Actual concurrent audit/drain ordering, separate SQLite connections, leases/generations, resumable checked directories, bounded contention and POSIX child containment.",
+      "references": [
+        "semantics-sqlite-lock-measurement.json",
+        "../../../tests/test_scan_state.py",
+        "../../../tests/test_conformance.py"
+      ]
+    },
+    "A09": {
+      "status": "pass",
+      "evidence": "Index/worktree/history/roots/merges/new branches/tags/deletions/shallow/bare scope; original-object isolation and hard history/document limits.",
+      "references": [
+        "../../../tests/test_git_policy.py",
+        "../../../tests/test_integration.py"
+      ]
+    },
+    "A10": {
+      "status": "pass",
+      "evidence": "Installed v1/v2 detector/extractor conformance, script adapter, strict output/severity/limits, unknown closure denies reuse.",
+      "references": [
+        "evidence-wheel-py313-docs-final-9111c9c.json",
+        "../../../tests/test_script_checks.py",
+        "../../../tests/test_conformance.py"
+      ]
+    },
+    "A11": {
+      "status": "pass",
+      "evidence": "Inert public imports, one typed service/policy, JSON/exit/report schema and bounded rendering.",
+      "references": [
+        "surface-installed-cli-ce1ea50.json",
+        "../../../tests/test_public_api.py"
+      ]
+    },
+    "A12": {
+      "status": "linux-pass-native-platforms-open",
+      "evidence": "Four Python 3.11/3.13 base/docs production-freeze wheels, refreshed cells and final source/wheel; native macOS/Windows unverified.",
+      "references": [
+        "PLATFORM_CHECKS.md",
+        "lead-source-9111c9c-py311-docs-summary.json",
+        "evidence-wheel-py313-docs-final-9111c9c.json"
+      ]
+    },
+    "A13": {
+      "status": "pass-with-measurement-limits",
+      "evidence": "48 executed corpus cases; 35 classification cases (14 TP, 21 TN, 0 FP, 0 FN); 13 separate proof/coverage cases. Complete repeated reference curves and same-host correctness-cost measurements, with explicit scope/measurement limits.",
+      "references": [
+        "evidence-corpus-seed20261025-9111c9c.json",
+        "base-corpus-9111c9c-summary.json",
+        "PERFORMANCE.md",
+        "benchmark-input-manifest-cc48a6c-summary.json"
+      ]
+    },
+    "A14": {
+      "status": "pass-with-documented-retention",
+      "evidence": "All three worker roots absent after inspected ILMR cleanup and verified branch/artifact retention. Removed 598,666,700 bytes of exact owned transient inputs/state/environments/caches/downloads; active lead checkout deliberately retained, temporary files cleaned. Audited 327 heavy-invocation receipts; none remained marked running and no matching live wrapper/ILMR job process remained. Bounded lead/supervisor lifecycle and retained audit resources are explicit.",
+      "references": [
+        "cleanup.json"
+      ]
+    },
+    "A15": {
+      "status": "pass",
+      "evidence": "Injected store is sole durable sink; keyed bounded material observations and fixed-argv script protocol. Actual-secret vault is deferred.",
+      "references": [
+        "../../../tests/test_scan_state.py",
+        "../../../tests/test_script_checks.py",
+        "../../../COMPATIBILITY.md"
+      ]
+    }
+  },
+  "native_platforms_unverified": [
+    "macOS",
+    "Windows"
+  ],
+  "no_real_data_scans": true,
+  "no_release": true,
+  "no_optimization_accepted": true,
+  "process_containment_scope": "Tested Linux POSIX worker limits; Go managed-heap target is not a hard address-space limit; native Windows Job Objects unverified.",
+  "native_ci_availability": "native-ci-availability.json"
+}

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leakguard-buddy"
+version = "0.1.0a2"
+description = "Loopback-only local browser companion for LeakGuard"
+requires-python = ">=3.11"
+dependencies = ["leakguard-core>=0.2,<0.3", "leakguard-host>=0.2,<0.3", "leakguard-vault>=0.1,<0.2"]
+
+[project.scripts]
+leakguard-buddy = "leakguard_buddy.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+leakguard_buddy = ["static/*"]

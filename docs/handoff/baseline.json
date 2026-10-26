@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-25",
+  "commit": "7600d922be176cb0c07c91ac47da363a6e51ed62",
+  "package_version": "0.1.0",
+  "platform": "macOS arm64",
+  "python": "3.13.13",
+  "gitleaks": "8.30.1",
+  "gitleaks_darwin_arm64_archive_sha256": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+  "source_suite": {"passed": 26, "failed": 7, "total": 33, "seconds": 6.232},
+  "failed_tests": [
+    "test_plugin_executes_in_staged_git_guard_without_exposing_content",
+    "test_ast_metadata_with_wrong_hash_or_wrong_context_stays_blocked",
+    "test_integrity_manifest_can_commit_but_hex_api_key_is_blocked",
+    "test_plugin_mode_preserves_metadata_proof_and_real_key_blocking",
+    "test_staged_ast_metadata_uses_index_source_and_keeps_hex_keys_blocking",
+    "test_staged_office_document_is_scanned_from_index",
+    "test_staged_secret_is_blocked_even_when_working_tree_is_clean"
+  ],
+  "hook_failure": "Newly written hooks have no executable bit; Git ignores them on POSIX",
+  "portable_hook_probe": {
+    "executable": false,
+    "commit_exit_code": 0,
+    "blocks_staged_synthetic": false,
+    "output_redacted": true
+  },
+  "cache_probe": {
+    "first_status": "scanned", "first_findings": 1,
+    "second_status": "unchanged", "second_findings": 0
+  },
+  "git_document_probe": {
+    "fixture": "DOCX-shaped ZIP with only a Content Types XML member",
+    "extraction_status": "skipped-binary-or-no-text", "hook_exit_code": 0
+  },
+  "tiny_text_benchmark": {
+    "files": 50, "content": "50 clean UTF-8 text files, 20 repeated lines each",
+    "cold_seconds": 9.7839, "warm_seconds": 0.0021,
+    "cold_counts": {"scanned": 50}, "warm_counts": {"unchanged": 50},
+    "scope": "One local run; warm hits omit findings and do not establish correct result replay"
+  },
+  "scope": "Local source-suite results with isolated state and synthetic files; remote execution, optional parser acceptance and clean wheel installation were not part of this baseline"
+}

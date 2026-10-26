@@ -22,16 +22,37 @@ class PresentationTests(unittest.TestCase):
         duplicate = ('{"scope.py":{"function_ast_sha256":{"token":"' + digest + '","token":"other"}}}').encode()
         self.assertEqual(details.describe(finding, duplicate, lambda _: source)['severity'], 'block')
 
+    def test_unrelated_nonfinite_json_cannot_waive_an_exact_ast_hash(self):
+        source = b'def token(value):\n    return value\n'
+        digest = hashlib.sha256(ast.dump(ast.parse(source).body[0]).encode()).hexdigest()
+        finding = {'path': 'origins.json', 'line': 4, 'rule': 'generic-api-key', 'severity': 'block'}
+        for constant in ('NaN', 'Infinity', '-Infinity'):
+            text = ('{\n'
+                    '  "scope.py": {\n'
+                    '    "function_ast_sha256": {\n'
+                    f'      "token": "{digest}"\n'
+                    '    }\n'
+                    '  },\n'
+                    f'  "unrelated": {constant}\n'
+                    '}')
+            with self.subTest(constant=constant):
+                result = details.describe(finding, text.encode(), lambda _: source)
+                self.assertEqual(result['severity'], 'block')
+                self.assertNotIn('classification', result)
+
     def test_summary_has_location_commit_and_type_but_never_raw_engine_fields(self):
         fixture_value = 'NeverDisplayThisPrivateFixture'
         report = {'label': 'git-pre-push', 'repo': r'C:\repo', 'findings': [{'path': r'C:\repo\settings.json', 'line': 5, 'commit': 'a' * 40, 'rule': 'generic-api-key', 'severity': 'block', 'field': 'api_key', 'info': 'Possible API key/token', 'Secret': fixture_value, 'Match': fixture_value, 'Line': fixture_value}]}
         output = presentation.render(report)
         self.assertIn('settings.json:5', output)
         self.assertIn('[aaaaaaaaaaaa]', output)
-        self.assertIn('api_key', output)
-        self.assertIn('[value redacted]', output)
+        self.assertIn('generic-api-key', output)
+        self.assertIn('values are redacted', output)
+        self.assertNotIn('api_key', output)
+        self.assertNotIn('Possible API key/token', output)
         self.assertNotIn(fixture_value, output)
         self.assertNotIn(fixture_value, json.dumps(presentation.sanitized_report(report)))
+        self.assertNotIn('Possible API key/token', json.dumps(presentation.sanitized_report(report)))
 
     def test_report_lookup_stays_with_the_requested_repo(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-test-', dir=pathlib.Path(tempfile.gettempdir())) as folder:

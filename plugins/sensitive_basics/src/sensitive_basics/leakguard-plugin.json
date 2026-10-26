@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "sensitive-basics",
+  "api_version": 2,
+  "module": "sensitive_basics.plugin",
+  "component": "sensitive-basics",
+  "version": "0.1.0",
+  "conformance": "sensitive_basics/cases.json"
+}
