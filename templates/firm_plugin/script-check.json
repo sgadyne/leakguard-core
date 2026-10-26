@@ -1,0 +1,11 @@
+{
+  "id": "firm-demo-check",
+  "argv": [
+    "/absolute/path/to/private-python",
+    "/absolute/path/to/firm_plugin/scripts/firm_check.py"
+  ],
+  "implementation_version": "0.1.0",
+  "rules": [
+    {"id": "firm-script-marker", "minimum_severity": "review"}
+  ]
+}

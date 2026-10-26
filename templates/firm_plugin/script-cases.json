@@ -1,0 +1,20 @@
+{
+  "cases": [
+    {
+      "case_id": "fixed-argv-positive",
+      "text": "Synthetic script check fixture: FIRM-SCRIPT-REVIEW-MARKER",
+      "logical_path": "fixtures/script-positive.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [{"rule": "firm-script-marker", "start_line": 1, "end_line": 1, "severity": "review"}]
+    },
+    {
+      "case_id": "fixed-argv-negative-control",
+      "text": "Synthetic script check control: ordinary review note.",
+      "logical_path": "fixtures/script-negative.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": []
+    }
+  ]
+}

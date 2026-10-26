@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77", "wheel>=0.45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leakguard-firm-example"
+version = "0.1.0"
+description = "Private firm v2 detector and fixed-argv check example"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["leakguard-core>=0.2,<0.3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+firm_plugin = ["cases.json", "leakguard-plugin.json"]
