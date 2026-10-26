@@ -1,0 +1,220 @@
+"""Explicit current-user SSH deployment and bounded, value-free remote scans.
+
+SSH uses the user's existing keys/agent and known_hosts. This adapter never asks
+for, saves, or forwards credential-vault values or share passwords.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import threading
+import time
+
+from .errors import HostError
+
+
+def _remote_path(value, *, allow_root=False) -> str:
+    if type(value) is not str or len(value) > 4096 or not value.startswith("/") or any(char in value for char in "\x00\r\n"):
+        raise HostError("remote-path-invalid")
+    path = PurePosixPath(value)
+    if ".." in path.parts or not allow_root and str(path) == "/":
+        raise HostError("remote-path-invalid")
+    return str(path)
+
+
+def _target(value: str) -> str:
+    # No ssh options, shell operators, URL syntax, password, or ProxyCommand.
+    if type(value) is not str or len(value) > 320 or not re.fullmatch(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?(?:[A-Za-z0-9][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:]+\])", value):
+        raise HostError("ssh-target-invalid")
+    return value
+
+
+def _terminate(process):
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _exchange(argv: list[str], payload: bytes, *, timeout: float, maximum: int, cancel=None) -> bytes:
+    """Bound stdout AND stderr while writing input; never expose stderr."""
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=os.name == "posix")
+    except OSError:
+        raise HostError("ssh-unavailable") from None
+    output = bytearray()
+    exceeded = threading.Event()
+    def read(stream, keep):
+        count = 0
+        try:
+            while True:
+                chunk = stream.read(65_536)
+                if not chunk:
+                    break
+                count += len(chunk)
+                if count > (maximum if keep else 65_536):
+                    exceeded.set()
+                    _terminate(process)
+                    break
+                if keep:
+                    output.extend(chunk)
+        except OSError:
+            pass
+        finally:
+            stream.close()
+    def write():
+        try:
+            process.stdin.write(payload)
+            process.stdin.close()
+        except (OSError, BrokenPipeError):
+            pass
+    readers = [threading.Thread(target=read, args=(process.stdout, True), daemon=True),
+               threading.Thread(target=read, args=(process.stderr, False), daemon=True)]
+    writer = threading.Thread(target=write, daemon=True)
+    for thread in readers + [writer]:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    failure = None
+    try:
+        while process.poll() is None:
+            if exceeded.is_set():
+                failure = "ssh-output-limit"
+                break
+            if cancel is not None and cancel():
+                failure = "cancelled"
+                break
+            if time.monotonic() >= deadline:
+                failure = "ssh-timeout"
+                break
+            try:
+                process.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        _terminate(process)
+        process.wait()
+        for thread in readers + [writer]:
+            thread.join(timeout=2)
+    if exceeded.is_set():
+        raise HostError("ssh-output-limit")
+    if failure:
+        raise HostError(failure)
+    if process.returncode != 0:
+        raise HostError("ssh-execution-failed")
+    return bytes(output)
+
+
+# The remote supervisor enforces a wall bound even after client disconnection.
+_SCAN_SUPERVISOR = r'''
+import json,os,signal,subprocess,sys
+request=json.loads(sys.stdin.buffer.read(65537))
+seconds=request["max_seconds"]
+if type(seconds) is not int or not 1 <= seconds <= 120: sys.exit(2)
+p=subprocess.Popen([sys.executable,"-m","leakguard_host.remote_worker"],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
+try:
+    out,_=p.communicate(json.dumps(request).encode(),timeout=seconds+30)
+    if p.returncode or len(out)>4500000: sys.exit(2)
+    sys.stdout.buffer.write(out)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid,signal.SIGKILL)
+    p.communicate()
+    sys.exit(2)
+'''
+
+_UPLOAD = r'''
+import hashlib,json,os,pathlib,sys
+root=pathlib.Path(sys.argv[1]); expected=sys.argv[2]; maximum=int(sys.argv[3])
+if not root.is_absolute() or root.exists(): sys.exit(2)
+root.mkdir(mode=0o700,parents=False)
+os.chmod(root,0o700)
+path=root/"release.zip"; h=hashlib.sha256(); total=0
+try:
+    with path.open("xb") as stream:
+        os.chmod(path,0o600)
+        while True:
+            chunk=sys.stdin.buffer.read(1048576)
+            if not chunk: break
+            total+=len(chunk)
+            if total>maximum: raise ValueError()
+            h.update(chunk); stream.write(chunk)
+        stream.flush();os.fsync(stream.fileno())
+    if h.hexdigest()!=expected: raise ValueError()
+    print(json.dumps({"version":1,"uploaded":True,"sha256":expected,"bytes":total}))
+except BaseException:
+    path.unlink(missing_ok=True)
+    try: root.rmdir()
+    except OSError: pass
+    raise
+'''
+
+
+class SSHRunner:
+    def __init__(self, *, executable: str | None = None, port: int = 22):
+        self.executable = executable or shutil.which("ssh") or "ssh"
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise HostError("ssh-port-invalid")
+        self.port = port
+
+    def _command(self, target: str, python: str, script: str, args=()) -> list[str]:
+        target = _target(target)
+        if python != "python3":
+            python = _remote_path(python)
+        # OpenSSH's remote command uses a POSIX shell; quote each fixed argument.
+        command = shlex.join([python, "-c", script, *args])
+        return [self.executable, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
+                "-p", str(self.port), "--", target, command]
+
+    def run(self, target: str, root: str, *, python: str, config_path: str | None = None,
+            max_seconds: int = 30, max_files: int = 100, cancel=None) -> dict:
+        root = _remote_path(root, allow_root=True)
+        if type(max_seconds) is not int or not 1 <= max_seconds <= 120 or type(max_files) is not int or not 1 <= max_files <= 1000:
+            raise HostError("remote-limit-invalid")
+        if config_path is not None:
+            config_path = _remote_path(config_path)
+        request = {"version": 1, "root": root, "config_path": config_path, "max_seconds": max_seconds, "max_files": max_files}
+        output = _exchange(self._command(target, python, _SCAN_SUPERVISOR), json.dumps(request).encode(),
+                           timeout=max_seconds + 45, maximum=4_500_000, cancel=cancel)
+        try:
+            from leakguard_core.scan_store import _report_from
+            report = _report_from(json.loads(output))
+            return {"target": _target(target), "root": root, "report": report.to_dict(),
+                    "coverage": "complete" if report.coverage.required_complete and report.coverage.enumeration_complete else "incomplete"}
+        except Exception:
+            raise HostError("remote-report-invalid") from None
+
+    def upload(self, target: str, artifact: Path, remote_directory: str, *, sha256: str, python: str = "python3", cancel=None) -> dict:
+        """Transfer exactly one chosen ZIP into a NEW, private remote directory."""
+        remote_directory = _remote_path(remote_directory)
+        if not isinstance(artifact, Path) or artifact.is_symlink() or not artifact.is_file() or artifact.suffix.lower() != ".zip" or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise HostError("artifact-invalid")
+        try:
+            with artifact.open("rb") as stream:
+                data = stream.read(536_870_913)
+        except OSError:
+            raise HostError("artifact-unreadable") from None
+        if len(data) > 536_870_912 or hashlib.sha256(data).hexdigest() != sha256:
+            raise HostError("artifact-hash-invalid")
+        output = _exchange(self._command(target, python, _UPLOAD, (remote_directory, sha256, str(len(data)))), data,
+                           timeout=300, maximum=4096, cancel=cancel)
+        try:
+            receipt = json.loads(output)
+            if receipt != {"version": 1, "uploaded": True, "sha256": sha256, "bytes": len(data)}:
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError):
+            raise HostError("remote-receipt-invalid") from None
+        return {**receipt, "target": _target(target), "remote_directory": remote_directory,
+                "artifact": remote_directory + "/release.zip", "installed": False}
