@@ -236,8 +236,12 @@ class DirectoryIdentity:
 
 def _directory_identity(path):
     try:
-        value = os.stat(path, follow_symlinks=False)
-        if not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode) or getattr(value, 'st_file_attributes', 0) & 0x400 or not value.st_ino:
+        # Ancestor aliases such as macOS /var -> /private/var are legitimate
+        # provenance spellings. Bind them to the actual directory inode so
+        # retargeting/replacing a parent invalidates a proof. Enumeration still
+        # refuses symlink entries and acquisition still refuses linked files.
+        value = os.stat(path, follow_symlinks=True)
+        if not stat.S_ISDIR(value.st_mode) or getattr(value, 'st_file_attributes', 0) & 0x400 or not value.st_ino:
             raise AcquisitionError('source-unavailable')
         return DirectoryIdentity(str(path), value.st_dev, value.st_ino, value.st_mode)
     except OSError:
