@@ -50,7 +50,7 @@ try {
   for (const label of ['Overview', 'Sources', 'Findings', 'Credential vault', 'Plugins', 'Settings']) {
     stage = 'route-' + label.toLowerCase().replaceAll(' ', '-');
     await navigation.getByRole('button', { name: label, exact: true }).click();
-    await page.getByRole('heading', { level: 1, name: label, exact: true }).waitFor();
+    await page.getByRole('heading', { level: 1, name: label, exact: true }).first().waitFor();
   }
   await navigation.getByRole('button', { name: 'Findings', exact: true }).click();
   stage = 'real-findings-grid';
