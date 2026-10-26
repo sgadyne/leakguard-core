@@ -29,6 +29,23 @@ class RegistryTests(unittest.TestCase):
             with self.assertRaises(ExtensionError):
                 inspect_wheel(wheel)
 
+    def test_wheel_startup_hooks_are_rejected_without_import_or_install(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
+            wheel = Path(folder) / 'example-1-py3-none-any.whl'
+            metadata = {'schema_version': 1, 'id': 'example', 'api_version': 2, 'module': 'example', 'version': '1'}
+            startup_paths = ['bootstrap.pth', 'sitecustomize.py', 'usercustomize/__init__.py',
+                             'example-1.data/purelib/bootstrap.pth',
+                             'example-1.data/platlib/sitecustomize.cpython-311-x86_64-linux-gnu.so']
+            for startup in startup_paths:
+                with self.subTest(member=startup):
+                    with zipfile.ZipFile(wheel, 'w') as archive:
+                        archive.writestr('example/leakguard-plugin.json', json.dumps(metadata))
+                        archive.writestr(startup, 'raise RuntimeError("must not execute")')
+                    with patch('leakguard_core.plugins.load', side_effect=AssertionError('inspection imported code')), patch('subprocess.run', side_effect=AssertionError('inspection installed code')):
+                        with self.assertRaises(ExtensionError) as failure:
+                            inspect_wheel(wheel)
+                    self.assertEqual(failure.exception.code, 'extension-startup-artifact')
+
     def test_script_activation_is_explicit_checked_profile_scoped_and_private(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
             registry = ExtensionRegistry(Path(folder))

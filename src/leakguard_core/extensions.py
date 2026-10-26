@@ -135,7 +135,14 @@ def inspect_wheel(path):
             names = set()
             metadata = []
             for item in members:
-                _member(item.filename)
+                member = _member(item.filename)
+                # Wheel installation can place these in site-packages directly
+                # or through .data/{purelib,platlib}. Python executes them before
+                # registry activation, so disabled extensions must reject them.
+                if any(part.endswith('.pth') or part in {'sitecustomize', 'usercustomize'}
+                       or part.startswith(('sitecustomize.', 'usercustomize.'))
+                       for part in (component.lower() for component in member.parts)):
+                    raise ExtensionError('extension-startup-artifact')
                 if item.filename in names or stat.S_ISLNK(item.external_attr >> 16):
                     raise ExtensionError('extension-wheel-invalid')
                 names.add(item.filename)
