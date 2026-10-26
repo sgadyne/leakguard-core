@@ -328,6 +328,9 @@ class HostTests(unittest.TestCase):
         installer = '''import json,pathlib,sys
 root=pathlib.Path(sys.argv[sys.argv.index('--prefix')+1])
 state=pathlib.Path(sys.argv[sys.argv.index('--state-dir')+1])
+binary=root/'releases/test/bin';binary.mkdir(parents=True)
+(binary/'python').symlink_to(sys.executable)
+(binary/'buddy').write_text('synthetic console script')
 print(json.dumps(dict(installed=str(root/'releases/test'),active=True,release_version='test',source_commit=None,runtime_python=str(root/'releases/test/bin/python'),buddy_command=str(root/'releases/test/bin/buddy'),state_dir=str(state))))
 '''
         with zipfile.ZipFile(artifact, "w") as archive:

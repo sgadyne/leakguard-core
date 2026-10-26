@@ -213,9 +213,13 @@ try:
     receipt=json.loads(output)
     fields={"installed","active","release_version","source_commit","runtime_python","buddy_command","state_dir"}
     if type(receipt) is not dict or set(receipt)!=fields or receipt["active"] is not True: sys.exit(2)
-    for key in ("installed","runtime_python","buddy_command"):
+    for key in ("installed","buddy_command"):
         value=pathlib.Path(receipt[key]).resolve()
         if not value.is_relative_to((root/"runtime").resolve()): sys.exit(2)
+    runtime=pathlib.Path(receipt["runtime_python"])
+    if not runtime.is_absolute() or ".." in runtime.parts or not runtime.parent.resolve().is_relative_to((root/"runtime").resolve()): sys.exit(2)
+    if not runtime.is_file(): sys.exit(2)
+    if not runtime.resolve().is_relative_to((root/"runtime").resolve()) and not runtime.samefile(sys.executable): sys.exit(2)
     if pathlib.Path(receipt["state_dir"]).resolve()!=(root/"state").resolve(): sys.exit(2)
     print(json.dumps(receipt))
 except subprocess.TimeoutExpired:
