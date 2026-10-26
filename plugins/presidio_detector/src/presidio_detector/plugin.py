@@ -14,7 +14,10 @@ from importlib import metadata, util
 from itertools import islice
 import json
 import math
+import os
+from pathlib import Path
 import re
+import stat
 from typing import Any
 
 from presidio_detector import __version__
@@ -44,6 +47,7 @@ DEFAULT_ENTITIES = (
 _TOKEN = re.compile(r"[A-Z][A-Z0-9_]{0,79}\Z")
 _LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}\Z")
 _MODEL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+_MODEL_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _FACTORY = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*):([A-Za-z_][A-Za-z0-9_]*)\Z")
 _NER_MODES = ("required", "pattern-only")
 _OPTION_FIELDS = (
@@ -51,7 +55,8 @@ _OPTION_FIELDS = (
     OptionSpec("language", "string", default="en", max_length=16),
     OptionSpec("score-threshold", "string", default="0.35", max_length=16),
     OptionSpec("ner-mode", "enum", default="pattern-only", choices=_NER_MODES),
-    OptionSpec("model-name", "string", default="en_core_web_sm", max_length=128),
+    OptionSpec("model-name", "string", default="en_core_web_sm", max_length=64),
+    OptionSpec("model-sha256", "string", default="", max_length=64),
     OptionSpec("block-entities", "list", default=[], max_length=64),
     OptionSpec("recognizer-modules", "list", default=[], max_length=16),
     OptionSpec("recognizer-options", "string", default="{}", max_length=32768),
@@ -134,8 +139,13 @@ def _validate_options(options: Mapping[str, object]) -> dict[str, Any]:
     if type(ner_mode) is not str or ner_mode not in _NER_MODES:
         raise PresidioConfigurationError("invalid NER mode")
     model_name = options.get("model-name", "en_core_web_sm")
-    if type(model_name) is not str or not _MODEL_NAME.fullmatch(model_name):
+    if type(model_name) is not str or len(model_name) > 64 or not _MODEL_NAME.fullmatch(model_name):
         raise PresidioConfigurationError("invalid model name")
+    model_sha256 = options.get("model-sha256", "")
+    if type(model_sha256) is not str or (ner_mode == "required" and not _MODEL_SHA256.fullmatch(model_sha256)):
+        raise PresidioConfigurationError("required NER needs an expected model SHA-256")
+    if ner_mode == "pattern-only" and model_sha256:
+        raise PresidioConfigurationError("pattern-only mode does not accept a model identity")
     block_entities = options.get("block-entities", [])
     if type(block_entities) is not list or len(block_entities) > 64:
         raise PresidioConfigurationError("invalid severity policy")
@@ -164,21 +174,98 @@ def _validate_options(options: Mapping[str, object]) -> dict[str, Any]:
         "score_threshold": _parse_threshold(options.get("score-threshold", "0.35")),
         "ner_mode": ner_mode,
         "model_name": model_name,
+        "model_sha256": model_sha256,
         "block_entities": frozenset(block_entities),
         "recognizer_modules": tuple(modules),
         "recognizer_options": custom_options,
     }
 
 
-def _model_identity(model_name: str, ner_mode: str) -> str:
-    if ner_mode == "pattern-only":
-        return "no-op-nlp"
-    distribution_name = model_name.replace("_", "-")
+def _hash_model_distribution(model_name: str) -> tuple[str, str]:
+    """Hash a stable, bounded manifest of an installed model distribution."""
+    maximum_bytes = 512 * 1024 * 1024
+    chunk_bytes = 1024 * 1024
     try:
-        model_version = metadata.version(distribution_name)
-    except metadata.PackageNotFoundError:
+        distribution = metadata.distribution(model_name.replace("_", "-"))
+        model_version = distribution.version
+        entries = distribution.files
+        if not entries:
+            raise ValueError
+        root = Path(distribution.locate_file("")).resolve(strict=True)
+        members = []
+        total_bytes = 0
+        for entry in sorted(entries, key=lambda item: str(item)):
+            relative = Path(str(entry))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError
+            if "__pycache__" in relative.parts or relative.suffix == ".pyc":
+                continue
+            target = root / relative
+            parent = root
+            for part in relative.parts[:-1]:
+                parent = parent / part
+                if stat.S_ISLNK(parent.lstat().st_mode):
+                    raise ValueError
+            before_path = target.lstat()
+            if not stat.S_ISREG(before_path.st_mode):
+                raise ValueError
+            resolved = target.resolve(strict=True)
+            if not resolved.is_relative_to(root):
+                raise ValueError
+            if total_bytes + before_path.st_size > maximum_bytes:
+                raise ValueError
+            descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                before_fd = os.fstat(descriptor)
+                if (not stat.S_ISREG(before_fd.st_mode)
+                        or (before_fd.st_dev, before_fd.st_ino, before_fd.st_size, before_fd.st_mtime_ns)
+                        != (before_path.st_dev, before_path.st_ino, before_path.st_size, before_path.st_mtime_ns)):
+                    raise ValueError
+                digest = hashlib.sha256()
+                read_bytes = 0
+                while True:
+                    chunk = os.read(descriptor, chunk_bytes)
+                    if not chunk:
+                        break
+                    read_bytes += len(chunk)
+                    if read_bytes > before_fd.st_size or total_bytes + read_bytes > maximum_bytes:
+                        raise ValueError
+                    digest.update(chunk)
+                after_fd = os.fstat(descriptor)
+                if ((before_fd.st_dev, before_fd.st_ino, before_fd.st_size, before_fd.st_mtime_ns)
+                        != (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns)
+                        or read_bytes != before_fd.st_size):
+                    raise ValueError
+            finally:
+                os.close(descriptor)
+            total_bytes += read_bytes
+            members.append((relative.as_posix(), digest.digest()))
+        if not members:
+            raise ValueError
+        manifest_digest = hashlib.sha256()
+        for label, digest in members:
+            manifest_digest.update(label.encode("utf-8"))
+            manifest_digest.update(b"\0")
+            manifest_digest.update(digest)
+        return model_version, manifest_digest.hexdigest()
+    except Exception:
         raise ModuleNotFoundError("configured Presidio NER model is unavailable") from None
-    return f"{model_name}:{model_version}"
+
+
+def installed_model_sha256(model_name: str) -> str:
+    """Return the model distribution identity for an operator-approved model."""
+    if type(model_name) is not str or len(model_name) > 64 or not _MODEL_NAME.fullmatch(model_name):
+        raise ValueError("invalid model name")
+    return _hash_model_distribution(model_name)[1]
+
+
+def _model_identity(model_name: str, ner_mode: str, expected_sha256: str) -> tuple[str, str | None, str | None]:
+    if ner_mode == "pattern-only":
+        return "no-op-nlp", None, None
+    model_version, actual_sha256 = _hash_model_distribution(model_name)
+    if actual_sha256 != expected_sha256:
+        raise ModuleNotFoundError("configured Presidio NER model identity mismatch") from None
+    return f"{model_name}:{model_version}:{actual_sha256}", model_version, actual_sha256
 
 
 def _assigned_recognizer_id(namespace: str, module_name: str, recognizer) -> str:
@@ -291,14 +378,22 @@ class PresidioDetector:
             raise ModuleNotFoundError("Presidio Analyzer dependency is unavailable") from None
         if installed_analyzer_version != ANALYZER_VERSION:
             raise ModuleNotFoundError("unsupported Presidio Analyzer version")
-        self._model_id = _model_identity(self._config["model_name"], self._config["ner_mode"])
+        self._model_id, expected_model_version, expected_model_sha256 = _model_identity(
+            self._config["model_name"], self._config["ner_mode"], self._config["model_sha256"]
+        )
         self._analyzer, self._custom_recognizer_count, self._recognizer_ids = _build_analyzer(self._config)
+        if expected_model_sha256 is not None:
+            actual_model_version, actual_model_sha256 = _hash_model_distribution(self._config["model_name"])
+            if (actual_model_version, actual_model_sha256) != (expected_model_version, expected_model_sha256):
+                self._analyzer = None
+                raise ModuleNotFoundError("configured Presidio NER model identity changed during load") from None
         self._calls = 0
         self._closed = False
         identity_material = {
             "adapter": __version__,
             "analyzer": ANALYZER_VERSION,
             "model": self._model_id,
+            "expected_model_sha256": self._config["model_sha256"],
             "language": self._config["language"],
             "entities": sorted(self._config["entities"]),
             "score_threshold": str(self._config["score_threshold"]),

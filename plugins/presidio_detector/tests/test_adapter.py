@@ -9,6 +9,7 @@ from presidio_detector.plugin import (
     MANIFEST,
     PresidioConfigurationError,
     create_plugin,
+    installed_model_sha256,
 )
 
 
@@ -112,7 +113,7 @@ def test_reviewed_native_firm_recognizer_and_negative_control(monkeypatch):
 
 def test_required_ner_fails_clearly_when_configured_model_is_missing():
     with pytest.raises(ModuleNotFoundError, match="configured Presidio NER model is unavailable"):
-        create_plugin({"entities": ["PERSON"], "model-name": "model_not_installed", "ner-mode": "required"})
+        create_plugin({"entities": ["PERSON"], "model-name": "model_not_installed", "model-sha256": "0" * 64, "ner-mode": "required"})
 
 
 def test_pattern_only_rejects_entities_without_pattern_recognizers():
@@ -121,11 +122,15 @@ def test_pattern_only_rejects_entities_without_pattern_recognizers():
 
 
 def test_required_spacy_ner_uses_configured_model_without_fallback():
-    detector = create_plugin({"entities": ["PERSON"], "ner-mode": "required"})
+    detector = create_plugin({
+        "entities": ["PERSON"],
+        "ner-mode": "required",
+        "model-sha256": installed_model_sha256("en_core_web_sm"),
+    })
     try:
         capabilities = detector.capabilities()
         assert capabilities["ner_enabled"] is True
-        assert capabilities["model_id"].startswith("en_core_web_sm:3.8.0")
+        assert capabilities["model_id"].startswith("en_core_web_sm:3.8.0:")
         findings = _findings(detector, "meeting with Jane Exampleton")
         assert any(f.analysis.entity_type == "PERSON" for f in findings)
     finally:
@@ -139,6 +144,18 @@ def test_required_ner_rejects_a_model_for_the_wrong_language():
             "language": "fr",
             "model-name": "en_core_web_sm",
             "ner-mode": "required",
+            "model-sha256": installed_model_sha256("en_core_web_sm"),
+        })
+
+
+def test_required_ner_rejects_a_mismatched_model_identity(monkeypatch):
+    monkeypatch.setattr("presidio_detector.plugin._build_analyzer", lambda _config: pytest.fail("model loaded before identity check"))
+    with pytest.raises(ModuleNotFoundError, match="configured Presidio NER model identity mismatch"):
+        create_plugin({
+            "entities": ["PERSON"],
+            "ner-mode": "required",
+            "model-name": "en_core_web_sm",
+            "model-sha256": "0" * 64,
         })
 
 

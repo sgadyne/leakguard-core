@@ -18,10 +18,14 @@ and wheel hashes. The adapter does not bundle an NER model. Its default is
 person/location recognition. Required NER is available only after an operator
 installs an approved model into the private runtime. Add NER-backed types such
 as `PERSON` or `LOCATION` to the entity allowlist when selecting `required`.
-The adapter checks the
-model distribution and language before analysis. Presidio's spaCy engine can
-download missing models automatically, so this preflight deliberately fails
-before that path is reached. Model files must follow the deployment's
+The adapter checks the model distribution and language before analysis.
+Required NER also requires the expected SHA-256 of the installed model
+distribution. It hashes sorted relative file labels and per-file SHA-256
+digests, excluding bytecode and `__pycache__`, with a 512 MiB total bound. The
+identity is checked before and after analyzer construction, then reused for all
+parts in the worker session; model files are not rehashed per part. Presidio's
+spaCy engine can download missing models automatically, so this preflight
+deliberately fails before that path is reached. Model files must follow the deployment's
 licensing and distribution review; they are outside this package.
 
 ## Explicit configuration
@@ -33,6 +37,7 @@ licensing and distribution review; they are outside this package.
   "score-threshold": "0.35",
   "ner-mode": "pattern-only",
   "model-name": "en_core_web_sm",
+  "model-sha256": "",
   "block-entities": [],
   "recognizer-modules": [],
   "recognizer-options": "{}"
@@ -81,11 +86,18 @@ python -m pip install --no-deps .
 ```
 
 To enable NER, first install an operator-approved model into that same private
-runtime, then set `ner-mode` to `required` and `model-name` to its installed
-package name. The adapter does not download or substitute a model. Its focused
+runtime, then set `ner-mode` to `required`, `model-name` to its installed
+package name, and `model-sha256` to its distribution identity. Calculate that
+identity with `installed_model_sha256()` in the private runtime, then review
+and store the value alongside the model package version in the profile. The
+adapter does not download or substitute a model. Its focused
 development checks cover both the real `en_core_web_sm==3.8.0` NER path and
 the default NoOp path; that model was used only in a private test environment
 and is not included in this package or lock.
+
+```sh
+python -c "from presidio_detector.plugin import installed_model_sha256; print(installed_model_sha256('en_core_web_sm'))"
+```
 
 For an author-side conformance run, install the package and invoke the core's
 supervised conformance CLI with its bundled cases:
