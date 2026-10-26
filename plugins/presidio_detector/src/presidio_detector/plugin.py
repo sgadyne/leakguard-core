@@ -62,8 +62,8 @@ MANIFEST = PluginManifest(
     implementation_version=__version__,
     kind="detector",
     rules=(RuleSpec(id=STATIC_RULE_ID, minimum_severity="review"),),
-    formats=("text",),
-    part_kinds=("text",),
+    formats=("text", "pdf-text", "office-word", "office-sheet", "office-slides", "outlook-msg"),
+    part_kinds=(),
     options_schema=OptionSchema(fields=_OPTION_FIELDS),
     dependencies=(
         DistributionSpec(name="presidio-analyzer"),
@@ -181,6 +181,21 @@ def _model_identity(model_name: str, ner_mode: str) -> str:
     return f"{model_name}:{model_version}"
 
 
+def _assigned_recognizer_id(namespace: str, module_name: str, recognizer) -> str:
+    """Build a deterministic, value-free ID from registration metadata."""
+    module_parts = [part for part in module_name.split(".") if part]
+    module_token = ".".join(module_parts[-2:])
+    class_name = type(recognizer).__name__
+    entities = getattr(recognizer, "supported_entities", ())
+    raw = ".".join((namespace, module_token, class_name, ",".join(sorted(entities))))
+    token = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+    identifier = f"presidio-{token}"
+    if len(identifier) > 200:
+        suffix = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        identifier = f"{identifier[:183]}-{suffix}"
+    return identifier
+
+
 def _load_custom_recognizers(config: dict[str, Any], language: str, entities: tuple[str, ...]):
     from presidio_analyzer import EntityRecognizer
 
@@ -211,7 +226,7 @@ def _load_custom_recognizers(config: dict[str, Any], language: str, entities: tu
             supported_entities = getattr(recognizer, "supported_entities", ())
             if language not in supported_languages or not supported_entities or not set(supported_entities) <= set(entities):
                 raise PresidioConfigurationError("custom recognizer capabilities do not match detector options")
-            recognizers.append(recognizer)
+            recognizers.append((recognizer, match.group(1)))
     return recognizers
 
 
@@ -243,17 +258,26 @@ def _build_analyzer(config: dict[str, Any]):
     registry = RecognizerRegistry(supported_languages=[language])
     registry.load_predefined_recognizers(nlp_engine=nlp_engine, languages=[language])
     custom = _load_custom_recognizers(config, language, config["entities"])
-    for recognizer in custom:
+    assigned_ids = {}
+    custom_origins = {}
+    for recognizer, module_name in custom:
         registry.add_recognizer(recognizer)
+        custom_origins[getattr(recognizer, "id", None)] = module_name
     if not set(config["entities"]) <= set(registry.get_supported_entities()):
         raise PresidioConfigurationError("configured entities are not supported by the selected recognizers")
+    for recognizer in registry.get_recognizers(language=language, entities=list(config["entities"])):
+        identifier = getattr(recognizer, "id", None)
+        module_name = custom_origins.get(identifier)
+        namespace = "firm" if module_name is not None else "builtin"
+        source_module = module_name or type(recognizer).__module__
+        assigned_ids[identifier] = _assigned_recognizer_id(namespace, source_module, recognizer)
     analyzer = AnalyzerEngine(
         registry=registry,
         nlp_engine=nlp_engine,
         supported_languages=[language],
         default_score_threshold=0.0,
     )
-    return analyzer, len(custom)
+    return analyzer, len(custom), assigned_ids
 
 
 class PresidioDetector:
@@ -268,7 +292,7 @@ class PresidioDetector:
         if installed_analyzer_version != ANALYZER_VERSION:
             raise ModuleNotFoundError("unsupported Presidio Analyzer version")
         self._model_id = _model_identity(self._config["model_name"], self._config["ner_mode"])
-        self._analyzer, self._custom_recognizer_count = _build_analyzer(self._config)
+        self._analyzer, self._custom_recognizer_count, self._recognizer_ids = _build_analyzer(self._config)
         self._calls = 0
         self._closed = False
         identity_material = {
@@ -316,9 +340,13 @@ class PresidioDetector:
                 continue
             key = (entity_type, start, end)
             previous = deduplicated.get(key)
-            if previous is None or score > previous:
-                deduplicated[key] = score
+            metadata = getattr(result, "recognition_metadata", None)
+            instance_id = metadata.get("recognizer_identifier") if type(metadata) is dict else None
+            recognizer_id = self._recognizer_ids.get(instance_id, "presidio-unattributed")
+            if previous is None or score > previous[0] or score == previous[0] and recognizer_id < previous[1]:
+                deduplicated[key] = (score, recognizer_id)
         for (entity_type, start, end), score in sorted(deduplicated.items(), key=lambda item: (item[0][1], item[0][2], item[0][0])):
+            score, recognizer_id = score
             line = bisect_right(newline_positions, start) + 1
             severity = "block" if entity_type in self._config["block_entities"] else "review"
             yield NewFinding(
@@ -331,7 +359,7 @@ class PresidioDetector:
                     end=end,
                     entity_type=entity_type,
                     score=score,
-                    recognizer_id="presidio",
+                    recognizer_id=recognizer_id,
                     analyzer_id=ANALYZER_ID,
                     analyzer_version=ANALYZER_VERSION,
                     model_id=self._model_id,

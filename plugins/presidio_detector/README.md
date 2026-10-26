@@ -6,6 +6,10 @@ it for successive parts. Presidio receives the text in memory; findings expose
 only a static rule ID, line, character offsets, entity type, confidence score,
 and analyzer/model identifiers. They never include the matched value or source
 snippet.
+The adapter accepts LeakGuard text, PDF text, Word, spreadsheet, slide, and
+Outlook MSG text formats. It analyzes each extracted text part separately so
+its offsets remain relative to that part; parser/extraction choices stay with
+the core runtime.
 
 The base runtime is pinned to Python 3.11 and `presidio-analyzer==2.2.365`;
 `requirements-py311.lock` records the complete 52-package dependency closure

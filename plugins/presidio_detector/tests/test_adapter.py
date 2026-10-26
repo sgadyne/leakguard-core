@@ -41,6 +41,8 @@ def test_pattern_only_emits_value_free_character_locations():
         assert finding.analysis.end == text.index("\nbuild=")
         assert finding.analysis.score == 1.0
         assert finding.analysis.analyzer_id == "presidio"
+        assert finding.analysis.recognizer_id.startswith("presidio-builtin-")
+        assert len(finding.analysis.recognizer_id) <= 200
         assert finding.analysis.analyzer_version == ANALYZER_VERSION
         assert finding.analysis.model_id == "no-op-nlp"
         assert "person@example.com" not in repr(finding)
@@ -88,10 +90,22 @@ def test_reviewed_native_firm_recognizer_and_negative_control(monkeypatch):
         negative = _findings(detector, "account_id=BUILD-73K9Q2PD")
         assert len(positive) == 1
         assert positive[0].analysis.entity_type == "FIRM_ACCOUNT_ID"
-        assert positive[0].analysis.recognizer_id == "presidio"
+        assert positive[0].analysis.recognizer_id.startswith("presidio-firm-")
+        assert len(positive[0].analysis.recognizer_id) <= 200
         assert negative == []
         assert detector.capabilities()["custom_recognizer_count"] == 1
         assert "73K9Q2PD" not in repr(positive[0])
+        another = create_plugin({
+            "entities": ["FIRM_ACCOUNT_ID"],
+            "ner-mode": "pattern-only",
+            "recognizer-modules": [module_spec],
+            "recognizer-options": '{"firm_presidio_recognizer.plugin:build_recognizers":{"prefix":"FIRM-DEMO"}}',
+        })
+        try:
+            second_positive = _findings(another, "account_id=FIRM-DEMO-73K9Q2PD")
+            assert second_positive[0].analysis.recognizer_id == positive[0].analysis.recognizer_id
+        finally:
+            another.close()
     finally:
         detector.close()
 
