@@ -290,3 +290,17 @@ def test_multi_field_credential_edit_validates_before_single_durable_change(tmp_
     assert value['username'] == 'hidden-user' and value['notes'] == 'hidden-notes'
     assert value['title'] == 'Updated' and value['secret'] == 'synthetic-replacement'
     vault.lock()
+
+
+def test_older_encrypted_observation_checkpoint_gets_additive_directory_cursor(tmp_path):
+    path = tmp_path / 'observations.lgo'
+    store = EncryptedScanStore.create(path, PASS)
+    store.save_host_state({'progress': 7})
+    store._store.conn.execute('ALTER TABLE audit_work DROP COLUMN directory_progress')
+    store.checkpoint()
+    store.close()
+    upgraded = EncryptedScanStore.open(path, PASS)
+    columns = {row[1] for row in upgraded._store.conn.execute('PRAGMA table_info(audit_work)')}
+    assert 'directory_progress' in columns
+    assert upgraded.load_host_state() == {'progress': 7}
+    upgraded.close()

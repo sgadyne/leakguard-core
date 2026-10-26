@@ -857,6 +857,9 @@ class SQLiteScanStore:
             page_size = conn.execute('PRAGMA page_size').fetchone()[0]
             conn.execute('PRAGMA max_page_count=' + str(max_bytes // page_size))
             conn.executescript(_SCHEMA)
+            work_columns = {row[1] for row in conn.execute('PRAGMA table_info(audit_work)')}
+            if 'directory_progress' not in work_columns:
+                conn.execute('ALTER TABLE audit_work ADD COLUMN directory_progress TEXT')
             conn.execute('CREATE INDEX IF NOT EXISTS audit_directory_checks ON audit_work(scope,generation,kind,directory_checked,done,path)')
             conn.execute('PRAGMA user_version=2')
             conn.commit()
