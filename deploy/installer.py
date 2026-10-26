@@ -184,11 +184,14 @@ def read_manifest(path: Path) -> dict[str, Any]:
     if data.get("wheelhouse", "wheelhouse") != "wheelhouse":
         raise DeployError("unsupported wheelhouse directory in release manifest")
     target_platform = data.get("target_platform")
+    target_python = data.get("target_python")
     quality = data.get("release_quality")
     backend_version = data.get("backend_version")
     if (not isinstance(target_platform, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", target_platform)
             or target_platform in {".", ".."}):
         raise DeployError("release manifest has no valid target platform")
+    if not isinstance(target_python, str) or not re.fullmatch(r"3\.[0-9]{1,2}", target_python):
+        raise DeployError("release manifest has no valid target Python version")
     if quality not in {"complete", "partial"}:
         raise DeployError("release manifest has invalid release quality")
     if not isinstance(backend_version, str) or not VERSION_RE.fullmatch(backend_version):
@@ -713,6 +716,12 @@ def install_bundle(bundle_arg: Path, *, root: Path | None = None, state: Path | 
         actual_platform = _platform_label()
         if manifest["target_platform"] != actual_platform:
             raise DeployError(f"bundle targets {manifest['target_platform']}; this host is {actual_platform}")
+        actual_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+        if actual_python != manifest["target_python"]:
+            raise DeployError(
+                f"bundle wheels target Python {manifest['target_python']}; "
+                f"selected Python is {actual_python}; select a matching interpreter and rebuild the private runtime"
+            )
         wheels = validate_wheelhouse(bundle, manifest)
         if sys.version_info < (3, 11):
             raise DeployError("LeakGuard requires Python 3.11 or newer")
@@ -1076,6 +1085,10 @@ def doctor(root: Path | None = None) -> tuple[dict[str, Any], int]:
     try:
         version, release, manifest = _current_release(root)
         add("active_release", "pass", version)
+        actual_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+        python_ok = actual_python == manifest["target_python"]
+        add("target_python", "pass" if python_ok else "fail",
+            f"bundle targets Python {manifest['target_python']}; current installer Python is {actual_python}")
         _ = validate_wheelhouse(release, manifest)
         add("release_hashes", "pass", "all installed wheel artifacts match the release manifest")
     except (DeployError, OSError) as exc:

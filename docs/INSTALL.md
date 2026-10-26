@@ -52,8 +52,15 @@ python deploy/build_bundle.py \
   --output artifacts/LeakGuard-0.2.0-alpha.1-linux-x86_64.zip \
   --source-commit "$(git rev-parse HEAD)" \
   --target-platform linux-x86_64 \
+  --target-python 3.11 \
   --backend-artifact linux-x86_64/gitleaks=/path/to/pinned/gitleaks
 ```
+
+Build the wheelhouse and run `build_bundle.py` under the exact target Python
+minor version, and pass it with `--target-python`. The archive records that
+version. Installation rejects a different Python minor before it creates the
+versioned runtime; a CPython 3.11 wheelhouse therefore cannot be selected with
+Python 3.13 just because both satisfy the package's minimum requirement.
 
 The command prints the bundle SHA-256. Keep that digest with the archive when
 transferring it through an offline corporate channel. The builder refuses a

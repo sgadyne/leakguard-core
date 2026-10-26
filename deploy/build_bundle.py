@@ -83,6 +83,12 @@ def make_bundle(args: argparse.Namespace) -> Path:
     target_platform = args.target_platform
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", target_platform) or target_platform in {".", ".."}:
         raise ValueError("target platform must be a short OS-architecture label")
+    target_python = args.target_python
+    if not re.fullmatch(r"3\.[0-9]{1,2}", target_python):
+        raise ValueError("target Python must be a major.minor version such as 3.11")
+    current_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if target_python != current_python:
+        raise ValueError(f"bundle builder is running Python {current_python}; run it under target Python {target_python}")
     backend_version = args.backend_version or release_spec.get("backend_version")
     if not isinstance(backend_version, str) or not VERSION_RE.fullmatch(backend_version):
         raise ValueError("release manifest must declare an exact backend_version")
@@ -200,6 +206,7 @@ def make_bundle(args: argparse.Namespace) -> Path:
             "release_version": version,
             "source_commit": args.source_commit.lower(),
             "target_platform": target_platform,
+            "target_python": target_python,
             "release_quality": "partial" if not target_backends else "complete",
             "backend_version": backend_version,
             "source_manifest_sha256": sha256_file(release_spec_path),
@@ -237,6 +244,7 @@ def main() -> int:
     parser.add_argument("--version", help="release version label (defaults to the checked-in manifest)")
     parser.add_argument("--source-commit", required=True, help="integrated source commit ID")
     parser.add_argument("--target-platform", required=True, help="target OS-architecture label, e.g. linux-x86_64 or macos-arm64")
+    parser.add_argument("--target-python", required=True, help="exact Python major.minor used for this wheelhouse, e.g. 3.11")
     parser.add_argument("--backend-version", help="exact Gitleaks version (defaults to checked-in manifest)")
     parser.add_argument("--partial", action="store_true", help="allow an explicitly incomplete release without a native Gitleaks backend")
     parser.add_argument("--require-package", action="append", default=[], metavar="NAME", help="require a distribution in the wheelhouse; repeat as needed")
