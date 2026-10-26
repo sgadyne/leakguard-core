@@ -12,6 +12,11 @@ from leakguard_core import models, plugins
 from leakguard_core.plugins import PluginError
 
 
+def _darwin_test_worker_policy():
+    """Select the alpha watchdog only for native Darwin worker tests."""
+    return "supervised-alpha" if sys.platform == "darwin" else "strict"
+
+
 class ScriptCheckTests(unittest.TestCase):
     def make_detector(self, script: Path, *, maximum_severity="review"):
         return plugins.load_scripts([{
@@ -25,16 +30,19 @@ class ScriptCheckTests(unittest.TestCase):
         script.write_text(source, encoding="utf-8")
         return script
 
+    def run_detector(self, *args, **kwargs):
+        return plugins.detect(*args, worker_policy=_darwin_test_worker_policy(), **kwargs)
+
     def test_published_example_round_trips_through_the_supervised_adapter(self):
         example = Path(__file__).resolve().parent / "fixtures" / "script_check_example.py"
         detector = self.make_detector(example)
-        findings = tuple(plugins.detect(
+        findings = tuple(self.run_detector(
             [detector], "ordinary\nFIRM-DEMO-MARKER\n", "space/é\nfixture.txt", "text",
             format_id="text", timeout=5,
         ))
         self.assertEqual([(item.rule, item.line, item.severity) for item in findings],
                          [("firm-demo-marker", 2, "review")])
-        self.assertEqual(tuple(plugins.detect(
+        self.assertEqual(tuple(self.run_detector(
             [detector], "ordinary fixture", "fixture.txt", "text", timeout=5,
         )), ())
 
@@ -51,7 +59,7 @@ print(json.dumps({"schema_version": 1, "findings": [
 ''')
             detector = self.make_detector(script, maximum_severity="block")
             with self.assertRaises(PluginError) as error:
-                tuple(plugins.detect([detector], "FIRM-DEMO-MARKER", "fixture.txt", "text", timeout=5))
+                tuple(self.run_detector([detector], "FIRM-DEMO-MARKER", "fixture.txt", "text", timeout=5))
             self.assertEqual(error.exception.code, "detector-output-invalid")
             self.assertEqual(str(error.exception), "detector-output-invalid")
 
@@ -60,14 +68,14 @@ print(json.dumps({"schema_version": 1, "findings": [
         with tempfile.TemporaryDirectory(prefix="leakguard-script-test-") as temporary:
             bad = self.write_script(Path(temporary), "print('not-json')\n")
             with self.assertRaises(PluginError) as error:
-                tuple(plugins.detect([self.make_detector(bad)], marker, "fixture.txt", "text", timeout=5))
+                tuple(self.run_detector([self.make_detector(bad)], marker, "fixture.txt", "text", timeout=5))
             self.assertEqual(error.exception.code, "detector-output-invalid")
             self.assertNotIn(marker, str(error.exception))
 
             crashed = self.write_script(Path(temporary),
                                         "import sys\nsys.stderr.write(" + repr(marker) + ")\nsys.exit(9)\n")
             with self.assertRaises(PluginError) as error:
-                tuple(plugins.detect([self.make_detector(crashed)], marker, "fixture.txt", "text", timeout=5))
+                tuple(self.run_detector([self.make_detector(crashed)], marker, "fixture.txt", "text", timeout=5))
             self.assertEqual(error.exception.code, "plugin-crashed")
             self.assertNotIn(marker, str(error.exception))
 
@@ -78,7 +86,7 @@ print(json.dumps({"schema_version": 1, "findings": [
             detector = self.make_detector(hangs)
             started = time.monotonic()
             with self.assertRaises(PluginError) as error:
-                tuple(plugins.detect([detector], marker, "fixture.txt", "text", timeout=0.15))
+                tuple(self.run_detector([detector], marker, "fixture.txt", "text", timeout=0.15))
             self.assertLess(time.monotonic() - started, 4)
             self.assertEqual(error.exception.code, "plugin-timeout")
             self.assertNotIn(marker, str(error.exception))
@@ -87,7 +95,7 @@ print(json.dumps({"schema_version": 1, "findings": [
             detector = self.make_detector(flood)
             limits = models.ScanLimits(5, 1, max_ipc_bytes=512)
             with self.assertRaises(PluginError) as error:
-                tuple(plugins.detect([detector], "short", "fixture.txt", "text", timeout=5, limits=limits))
+                tuple(self.run_detector([detector], "short", "fixture.txt", "text", timeout=5, limits=limits))
             self.assertEqual(error.exception.code, "detector-output-limit")
             self.assertNotIn(marker, str(error.exception))
 
@@ -100,7 +108,7 @@ print(json.dumps({"schema_version": 1, "findings": [None, None]}))
             detector = self.make_detector(script)
             limits = models.ScanLimits(5, 1, max_findings=1)
             with self.assertRaises(PluginError) as error:
-                tuple(plugins.detect(
+                tuple(self.run_detector(
                     [detector], "fixture", "fixture.txt", "text", timeout=5, limits=limits,
                 ))
         self.assertEqual(error.exception.code, "detector-output-limit")
@@ -113,7 +121,7 @@ print(json.dumps({"schema_version": 1, "findings": [None, None]}))
 print('{{"schema_version":1,"findings":[{{"rule":"firm-demo-marker","line":{constant},"severity":"review"}}]}}')
 ''')
                     with self.assertRaises(PluginError) as error:
-                        tuple(plugins.detect(
+                        tuple(self.run_detector(
                             [self.make_detector(script)], "FIRM-DEMO-MARKER", "fixture.txt", "text", timeout=5,
                         ))
                     self.assertEqual(error.exception.code, "detector-output-invalid")

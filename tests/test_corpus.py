@@ -28,6 +28,11 @@ _CATALOG_DOC = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
 CASE_CATALOG = tuple(_CATALOG_DOC["cases"])
 
 
+def _darwin_test_worker_policy():
+    """Select the alpha watchdog only for native Darwin worker tests."""
+    return "supervised-alpha" if sys.platform == "darwin" else "strict"
+
+
 def _pdf_with_text(text: str) -> bytes:
     try:
         from pypdf import PdfWriter
@@ -322,7 +327,9 @@ class DeterministicCorpusTests(unittest.TestCase):
         self.assertEqual(_CATALOG_DOC["seed"], SEED)
 
     def test_actual_labeled_cases_emit_case_level_counts_without_fixture_text(self):
-        summary = run_labeled_corpus(SEED, engine.EXE)
+        summary = run_labeled_corpus(
+            SEED, engine.EXE, worker_policy=_darwin_test_worker_policy(),
+        )
         expected_uncovered = set()
         expected_metric_eligible = 35
         expected_metric_not_scored = 13
@@ -367,9 +374,13 @@ class DeterministicCorpusTests(unittest.TestCase):
 
     def test_same_seed_artifact_manifest_is_stable_across_wall_clock_ticks(self):
         import time
-        first = run_labeled_corpus(SEED, engine.EXE)
+        first = run_labeled_corpus(
+            SEED, engine.EXE, worker_policy=_darwin_test_worker_policy(),
+        )
         time.sleep(2.1)
-        second = run_labeled_corpus(SEED, engine.EXE)
+        second = run_labeled_corpus(
+            SEED, engine.EXE, worker_policy=_darwin_test_worker_policy(),
+        )
         first_hashes = {item["case_id"]: item["artifact_sha256"] for item in first["cases"]}
         second_hashes = {item["case_id"]: item["artifact_sha256"] for item in second["cases"]}
         self.assertEqual(first_hashes, second_hashes)
@@ -378,7 +389,8 @@ class DeterministicCorpusTests(unittest.TestCase):
     def test_pdf_fixture_is_parsed_as_a_real_text_document(self):
         payload = _pdf_with_text("Synthetic PDF marker line")
         self.assertTrue(payload.startswith(b"%PDF-"))
-        result = extract(payload, "opaque-extension.data", timeout=5)
+        result = extract(payload, "opaque-extension.data", timeout=5,
+                         worker_policy=_darwin_test_worker_policy())
         self.assertEqual(result.format_id, "pdf-text")
         self.assertEqual(result.disposition, "extracted")
         self.assertEqual([part.part_id for part in result.parts], ["pdf-page-1"])
@@ -387,7 +399,8 @@ class DeterministicCorpusTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec("olefile"), "optional olefile is unavailable")
     def test_msg_fixture_parses_real_compound_streams_and_cp1252(self):
         payload = _msg_fixture()
-        result = extract(payload, "mail.msg", timeout=5)
+        result = extract(payload, "mail.msg", timeout=5,
+                         worker_policy=_darwin_test_worker_policy())
         self.assertEqual(result.format_id, "outlook-msg")
         self.assertEqual(result.disposition, "extracted")
         parts = {part.part_id: part.text for part in result.parts}
@@ -400,7 +413,8 @@ class DeterministicCorpusTests(unittest.TestCase):
     def test_unknown_compound_document_remains_an_explicit_omission(self):
         payload = _cfb_with_streams(())
         self.assertTrue(payload.startswith(bytes.fromhex("D0CF11E0A1B11AE1")))
-        result = extract(payload, "unlabelled.bin", timeout=5)
+        result = extract(payload, "unlabelled.bin", timeout=5,
+                         worker_policy=_darwin_test_worker_policy())
         self.assertEqual((result.disposition, result.issues), ("unsupported", ("unsupported-format",)))
 
     def test_multiline_parts_preserve_boundaries_and_static_labels(self):
@@ -408,7 +422,8 @@ class DeterministicCorpusTests(unittest.TestCase):
             ("word/document.xml", "prefix BEGIN</p><p>first line"),
             ("word/comments1.xml", "SECRET suffix</p><p>last line"),
         ))
-        result = extract(payload, "odd name/é\nrenamed.document", timeout=5)
+        result = extract(payload, "odd name/é\nrenamed.document", timeout=5,
+                         worker_policy=_darwin_test_worker_policy())
         self.assertEqual(result.disposition, "extracted")
         self.assertEqual([part.part_id for part in result.parts], ["office-word-1", "office-word-2"])
         self.assertEqual(result.parts[0].text, "prefix BEGIN\nfirst line")
@@ -418,32 +433,40 @@ class DeterministicCorpusTests(unittest.TestCase):
         secret = _seeded_secret(SEED)
         text = f'client_secret = "{secret}"'
         split = len("client_se")
-        sheet = extract(_xlsx_fixture(((text[:split], text[split:]),)), "fixture.xlsx", timeout=10)
+        sheet = extract(_xlsx_fixture(((text[:split], text[split:]),)), "fixture.xlsx", timeout=10,
+                        worker_policy=_darwin_test_worker_policy())
         self.assertEqual((sheet.format_id, sheet.disposition), ("office-sheet", "extracted"))
         self.assertEqual(len(sheet.parts), 1)
         self.assertIn(text, sheet.parts[0].text)
         self.assertTrue(backends.detect(sheet.parts[0].text, binary=engine.EXE,
-                                        rules=engine.RULES, timeout=15))
+                                        rules=engine.RULES, timeout=15,
+                                        worker_policy=_darwin_test_worker_policy()))
 
-        slides = extract(_pptx_fixture(((text[:split], text[split:]),)), "fixture.pptx", timeout=10)
+        slides = extract(_pptx_fixture(((text[:split], text[split:]),)), "fixture.pptx", timeout=10,
+                         worker_policy=_darwin_test_worker_policy())
         self.assertEqual((slides.format_id, slides.disposition), ("office-slides", "extracted"))
         self.assertEqual(len(slides.parts), 1)
         self.assertIn(text, slides.parts[0].text)
         self.assertTrue(backends.detect(slides.parts[0].text, binary=engine.EXE,
-                                        rules=engine.RULES, timeout=15))
+                                        rules=engine.RULES, timeout=15,
+                                        worker_policy=_darwin_test_worker_policy()))
 
         cross_cell = _xlsx_fixture((('client_secret = "SyntheticOnly~',), ('CorpusSecretTail"',)))
-        cell_result = extract(cross_cell, "fixture.xlsx", timeout=10)
+        cell_result = extract(cross_cell, "fixture.xlsx", timeout=10,
+                              worker_policy=_darwin_test_worker_policy())
         self.assertEqual(cell_result.disposition, "extracted")
         self.assertFalse(any(backends.detect(part.text, binary=engine.EXE,
-                                             rules=engine.RULES, timeout=15)
+                                             rules=engine.RULES, timeout=15,
+                                             worker_policy=_darwin_test_worker_policy())
                              for part in cell_result.parts))
 
         cross_paragraph = _pptx_fixture((('client_secret = "SyntheticOnly~',), ('CorpusSecretTail"',)))
-        paragraph_result = extract(cross_paragraph, "fixture.pptx", timeout=10)
+        paragraph_result = extract(cross_paragraph, "fixture.pptx", timeout=10,
+                                   worker_policy=_darwin_test_worker_policy())
         self.assertEqual(paragraph_result.disposition, "extracted")
         self.assertFalse(any(backends.detect(part.text, binary=engine.EXE,
-                                             rules=engine.RULES, timeout=15)
+                                             rules=engine.RULES, timeout=15,
+                                             worker_policy=_darwin_test_worker_policy())
                              for part in paragraph_result.parts))
 
 
@@ -463,6 +486,7 @@ class PluginCollisionTests(unittest.TestCase):
                 service = engine.ScanService({
                     "gitleaks_executable": str(engine.EXE),
                     "gitleaks_config": str(engine.RULES),
+                    "worker_policy": _darwin_test_worker_policy(),
                     "plugins": [
                         {"module": "collision_block", "options": {}},
                         {"module": "collision_review", "options": {}},

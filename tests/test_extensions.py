@@ -5,10 +5,16 @@ import tempfile
 import unittest
 import os
 import subprocess
+import sys
 from unittest.mock import patch
 
 from leakguard_core import engine as guard, plugins, extraction, models
 from test_integration import SYNTHETIC
+
+
+def _darwin_test_worker_policy():
+    """Select the alpha watchdog only for native Darwin worker tests."""
+    return "supervised-alpha" if sys.platform == "darwin" else "strict"
 
 
 class ExtensionTests(unittest.TestCase):
@@ -140,6 +146,7 @@ def create_plugin(options): return Detector()
             try:
                 service = guard.ScanService({
                     'gitleaks_executable': str(guard.EXE), 'gitleaks_config': str(guard.RULES),
+                    'worker_policy': _darwin_test_worker_policy(),
                     'plugins': [{'module': 'fixture_extractor', 'options': {}},
                                 {'module': 'fixture_detector', 'options': {}}],
                     'extractor_overrides': {'.bin': 'fixture-note-extractor'},
@@ -179,7 +186,10 @@ def create_plugin(options): return Detector()
             (repo / 'data.txt').write_text('SYNTHETIC_REVIEW_MARKER')
             command(repo, 'add', 'data.txt').check_returncode()
             (root / 'extension_fixture.py').write_text("from leakguard_core.plugins import Finding\nAPI_VERSION=1\nclass Detector:\n def detect(self,text,path,part):\n  if 'SYNTHETIC_REVIEW_MARKER' in text: yield Finding('fixture-marker',1,'block')\ndef create_plugin(options): return Detector()\n")
-            config = root / 'config.json'; config.write_text(json.dumps({'plugins': [{'module': 'extension_fixture'}]}))
+            config = root / 'config.json'; config.write_text(json.dumps({
+                'worker_policy': _darwin_test_worker_policy(),
+                'plugins': [{'module': 'extension_fixture'}],
+            }))
             hooks.install_at(repo / '.git/hooks')
             environment = dict(os.environ, LEAKGUARD_CONFIG=str(config))
             environment['PYTHONPATH'] = str(root) + os.pathsep + environment.get('PYTHONPATH', '')

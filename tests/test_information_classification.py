@@ -7,6 +7,11 @@ from unittest.mock import patch
 from leakguard_core import backends, engine, models as m, plugins
 
 
+def _darwin_test_worker_policy():
+    """Select the alpha watchdog only for native Darwin worker tests."""
+    return "supervised-alpha" if sys.platform == "darwin" else "strict"
+
+
 class InformationClassificationTests(unittest.TestCase):
     def test_actual_packs_classify_information_and_preserve_promotions(self):
         root = Path(__file__).resolve().parents[1]
@@ -19,7 +24,10 @@ class InformationClassificationTests(unittest.TestCase):
         with patch.object(sys, 'path', paths), patch('leakguard_core.scan_policy.runtime_identity', return_value=('synthetic', False)), patch.object(backends, 'detect', return_value=()):
             for module, options, text, rule, severity in cases:
                 with self.subTest(module=module, promoted=bool(options)):
-                    service = engine.ScanService({'plugins': [{'module': module, 'options': options}]})
+                    service = engine.ScanService({
+                        'worker_policy': _darwin_test_worker_policy(),
+                        'plugins': [{'module': module, 'options': options}],
+                    })
                     try:
                         report = service.scan((m.BytesInput(text, 'synthetic.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(10, 1))
                         self.assertTrue(report.coverage.required_complete)

@@ -27,6 +27,11 @@ from leakguard_core.conformance import (
 )
 
 
+def _darwin_test_worker_policy():
+    """Select the alpha watchdog only for native Darwin worker tests."""
+    return "supervised-alpha" if sys.platform == "darwin" else "strict"
+
+
 class PublicModelConformanceTests(unittest.TestCase):
     def make_report(self):
         started = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc)
@@ -202,9 +207,11 @@ class ExtensionConformanceModelTests(unittest.TestCase):
             sys.path.insert(0, temporary)
             try:
                 if timeout is None:
-                    return check_detector('fixture_detector', {}, cases)
+                    return check_detector('fixture_detector', {}, cases,
+                                          worker_policy=_darwin_test_worker_policy())
                 with patch('leakguard_core.conformance._CONFORMANCE_TIMEOUT_SECONDS', timeout):
-                    return check_detector('fixture_detector', {}, cases)
+                    return check_detector('fixture_detector', {}, cases,
+                                          worker_policy=_darwin_test_worker_policy())
             finally:
                 sys.path.remove(temporary)
 
@@ -267,7 +274,8 @@ def create_plugin(options): return Detector()
             module_path.write_text(source, encoding='utf-8')
             sys.path.insert(0, temporary)
             try:
-                return check_extractor('fixture_extractor', {}, cases)
+                return check_extractor('fixture_extractor', {}, cases,
+                                       worker_policy=_darwin_test_worker_policy())
             finally:
                 sys.path.remove(temporary)
 
@@ -353,7 +361,10 @@ def create_plugin(options): return Detector()
             try:
                 output = io.StringIO()
                 with redirect_stdout(output):
-                    status = conformance_main(['--kind', 'detector', '--module', 'fixture_cli', '--cases', str(cases_path)])
+                    status = conformance_main([
+                        '--worker-policy', _darwin_test_worker_policy(), '--kind', 'detector',
+                        '--module', 'fixture_cli', '--cases', str(cases_path),
+                    ])
                 line = output.getvalue()
                 self.assertEqual(status, 0)
                 self.assertEqual(len(line.splitlines()), 1)
@@ -368,14 +379,20 @@ def create_plugin(options): return Detector()
                 }]}), encoding='utf-8')
                 output = io.StringIO()
                 with redirect_stdout(output):
-                    status = conformance_main(['--kind', 'detector', '--module', 'fixture_cli', '--cases', str(mismatch)])
+                    status = conformance_main([
+                        '--worker-policy', _darwin_test_worker_policy(), '--kind', 'detector',
+                        '--module', 'fixture_cli', '--cases', str(mismatch),
+                    ])
                 self.assertEqual(status, 1)
                 self.assertEqual(len(output.getvalue().splitlines()), 1)
                 self.assertFalse(json.loads(output.getvalue())['passed'])
 
                 output = io.StringIO()
                 with redirect_stdout(output):
-                    status = conformance_main(['--kind', 'detector', '--module', 'fixture_cli'])
+                    status = conformance_main([
+                        '--worker-policy', _darwin_test_worker_policy(), '--kind', 'detector',
+                        '--module', 'fixture_cli',
+                    ])
                 self.assertEqual(status, 2)
                 self.assertEqual(len(output.getvalue().splitlines()), 1)
                 self.assertEqual(json.loads(output.getvalue())['issues'][0]['code'], 'setup-failed')
@@ -507,7 +524,7 @@ def create_plugin(options): return Detector()
                 DetectorCase('marker-present', 'SYNTHETIC_REVIEW_MARKER', 'sample.txt', 'text', 'text',
                              (ExpectedFinding('example-review-marker', 1, 1, 'review'),)),
                 DetectorCase('marker-absent', 'ordinary fixture', 'sample.txt', 'text', 'text'),
-            ))
+            ), worker_policy=_darwin_test_worker_policy())
         finally:
             sys.path.remove(str(source))
         self.assertEqual((report.total_cases, report.passed_cases, report.failed_cases), (2, 2, 0))
@@ -706,7 +723,8 @@ class ExtractionConformanceTests(unittest.TestCase):
             ('word/document.xml', '<document><p>body text</p></document>'),
             ('word/comments1.xml', '<comments><comment>comment text</comment></comments>'),
         ])
-        result = extract(data, 'renamed-document.docx', timeout=5)
+        result = extract(data, 'renamed-document.docx', timeout=5,
+                         worker_policy=_darwin_test_worker_policy())
         self.assertEqual(result.disposition, 'extracted')
         self.assertEqual([part.part_id for part in result.parts], ['office-word-1', 'office-word-2'])
         self.assertEqual([part.text for part in result.parts], ['body text', 'comment text'])
@@ -717,7 +735,8 @@ class ExtractionConformanceTests(unittest.TestCase):
             '<w:r><w:t>ghp_ABC</w:t></w:r><w:r><w:t>123</w:t></w:r>'
             '</w:p></w:body></w:document>'
         )
-        result = extract(self.make_docx([('word/document.xml', document)]), 'split-run.docx', timeout=5)
+        result = extract(self.make_docx([('word/document.xml', document)]), 'split-run.docx', timeout=5,
+                         worker_policy=_darwin_test_worker_policy())
         self.assertEqual(result.disposition, 'extracted')
         self.assertEqual([part.text for part in result.parts], ['ghp_ABC123'])
 
@@ -727,7 +746,8 @@ class ExtractionConformanceTests(unittest.TestCase):
             '<a:r><a:t>123</a:t></a:r></a:p></p:txBody></p:sp>'
             '</p:spTree></p:cSld></p:sld>'
         )
-        presentation = extract(self.make_docx([('ppt/slides/slide1.xml', slide)]), 'split-run.pptx', timeout=5)
+        presentation = extract(self.make_docx([('ppt/slides/slide1.xml', slide)]), 'split-run.pptx', timeout=5,
+                               worker_policy=_darwin_test_worker_policy())
         self.assertEqual(presentation.disposition, 'extracted')
         self.assertEqual([part.text for part in presentation.parts], ['ghp_ABC123'])
 
@@ -736,7 +756,8 @@ class ExtractionConformanceTests(unittest.TestCase):
             '<x:r><x:t>ghp_ABC</x:t></x:r><x:r><x:t>123</x:t></x:r>'
             '</x:is></x:c></x:row></x:sheetData></x:worksheet>'
         )
-        spreadsheet = extract(self.make_docx([('xl/worksheets/sheet1.xml', rich_cell)]), 'rich-cell.xlsx', timeout=5)
+        spreadsheet = extract(self.make_docx([('xl/worksheets/sheet1.xml', rich_cell)]), 'rich-cell.xlsx', timeout=5,
+                              worker_policy=_darwin_test_worker_policy())
         self.assertEqual(spreadsheet.disposition, 'extracted')
         self.assertEqual([part.text for part in spreadsheet.parts], ['ghp_ABC123'])
 
@@ -747,7 +768,8 @@ class ExtractionConformanceTests(unittest.TestCase):
             '<w:p><w:r><w:t>ABC123</w:t></w:r></w:p>'
             '</w:body></w:document>'
         )
-        word = extract(self.make_docx([('word/document.xml', document)]), 'paragraphs.docx', timeout=5)
+        word = extract(self.make_docx([('word/document.xml', document)]), 'paragraphs.docx', timeout=5,
+                       worker_policy=_darwin_test_worker_policy())
         self.assertEqual(word.disposition, 'extracted')
         self.assertEqual(word.parts[0].text, 'ghp_\nABC123')
         self.assertNotIn('ghp_ABC123', word.parts[0].text)
@@ -755,7 +777,8 @@ class ExtractionConformanceTests(unittest.TestCase):
         across_parts = extract(self.make_docx([
             ('word/document.xml', '<w:document xmlns:w="urn:word"><w:body><w:p><w:r><w:t>ghp_</w:t></w:r></w:p></w:body></w:document>'),
             ('word/comments1.xml', '<w:comments xmlns:w="urn:word"><w:comment><w:p><w:r><w:t>ABC123</w:t></w:r></w:p></w:comment></w:comments>'),
-        ]), 'separate-parts.docx', timeout=5)
+        ]), 'separate-parts.docx', timeout=5,
+                               worker_policy=_darwin_test_worker_policy())
         self.assertEqual(across_parts.disposition, 'extracted')
         self.assertEqual([part.part_id for part in across_parts.parts], ['office-word-1', 'office-word-2'])
         self.assertEqual([part.text for part in across_parts.parts], ['ghp_', 'ABC123'])
@@ -767,14 +790,16 @@ class ExtractionConformanceTests(unittest.TestCase):
             '<x:c><x:is><x:t>ABC123</x:t></x:is></x:c>'
             '</x:row></x:sheetData></x:worksheet>'
         )
-        sheet = extract(self.make_docx([('xl/worksheets/sheet1.xml', worksheet)]), 'cells.xlsx', timeout=5)
+        sheet = extract(self.make_docx([('xl/worksheets/sheet1.xml', worksheet)]), 'cells.xlsx', timeout=5,
+                        worker_policy=_darwin_test_worker_policy())
         self.assertEqual(sheet.disposition, 'extracted')
         self.assertEqual(sheet.parts[0].text, 'ghp_\nABC123')
         self.assertNotIn('ghp_ABC123', sheet.parts[0].text)
 
     def test_malformed_docx_is_an_explicit_error(self):
         data = self.make_docx([('[Content_Types].xml', '<Types/>')])
-        result = extract(data, 'incomplete.docx', timeout=5)
+        result = extract(data, 'incomplete.docx', timeout=5,
+                         worker_policy=_darwin_test_worker_policy())
         self.assertEqual(result.disposition, 'error')
         self.assertEqual(result.issues, ('extract-failed',))
         self.assertEqual(result.parts, ())
@@ -795,7 +820,8 @@ class ExtractionConformanceTests(unittest.TestCase):
             with zipfile.ZipFile(buffer, 'w') as archive:
                 archive.writestr('word/document.xml', '<document><p>one</p></document>')
                 archive.writestr('word/document.xml', '<document><p>two</p></document>')
-        duplicate = extract(buffer.getvalue(), 'dup.docx', timeout=5)
+        duplicate = extract(buffer.getvalue(), 'dup.docx', timeout=5,
+                            worker_policy=_darwin_test_worker_policy())
         self.assertEqual(duplicate.disposition, 'error')
         self.assertEqual(duplicate.issues, ('extract-failed',))
 
@@ -803,7 +829,8 @@ class ExtractionConformanceTests(unittest.TestCase):
             ('word/document.xml', '<document><p>body</p></document>'),
             ('word/comments1.xml', '<comments><comment>comment</comment></comments>'),
         ])
-        limited = extract(multi, 'many.docx', limits=ExtractionLimits(max_parts=1), timeout=5)
+        limited = extract(multi, 'many.docx', limits=ExtractionLimits(max_parts=1), timeout=5,
+                          worker_policy=_darwin_test_worker_policy())
         self.assertEqual(limited.disposition, 'error')
         self.assertEqual(limited.issues, ('extract-part-limit',))
         self.assertEqual([part.part_id for part in limited.parts], ['office-word-1'])
