@@ -36,6 +36,67 @@ the [adapter guide](plugins/presidio_detector/README.md) explains registration,
 entity allowlists, confidence thresholds and independent severity policy.
 Python traversal remains the default and needs no Rust compiler.
 
+## Plugin guide
+
+Author firm recognizers as a **separate private wheel**, using native Presidio
+`PatternRecognizer` or `EntityRecognizer` objects. Start with the
+[shipped firm example](plugins/presidio_detector/examples/firm_presidio_recognizer),
+then keep actual firm rules, configuration and data in your private project.
+Its `build_recognizers(options)` factory returns recognizers for explicit
+registration; installed packages are not discovered automatically.
+
+Build on your approved development/staging machine and install the reviewed
+wheel into the isolated Python 3.11 runtime from the setup guide:
+
+```powershell
+& $PY -m pip wheel --no-deps --wheel-dir .\dist `
+  .\plugins\presidio_detector\examples\firm_presidio_recognizer
+& $PY -m pip install --no-deps `
+  .\dist\example_firm_presidio_recognizer-0.1.0-py3-none-any.whl
+```
+
+Add this adapter entry to your private scan config's `plugins` list:
+
+```json
+{
+  "module": "presidio_detector.plugin",
+  "options": {
+    "entities": ["EMAIL_ADDRESS", "FIRM_ACCOUNT_ID"],
+    "ner-mode": "pattern-only",
+    "score-threshold": "0.35",
+    "block-entities": [],
+    "recognizer-modules": ["firm_presidio_recognizer.plugin:build_recognizers"],
+    "recognizer-options": "{\"firm_presidio_recognizer.plugin:build_recognizers\":{\"prefix\":\"FIRM-DEMO\"}}"
+  }
+}
+```
+
+The entity allowlist selects what is analyzed. Confidence filters matches;
+`block-entities` is a separate severity policy, so a high score alone does not
+block. Pattern-only is the default; NER requires a separately approved installed
+model and its explicit checksum. Findings use offsets relative to each extracted
+part, not arbitrary original-document page positions, and contain no match text.
+
+From the repository root, check the adapter's bundled conformance cases, then
+scan the example's synthetic positive/negative fixtures with your private config:
+
+```powershell
+& $PY -m leakguard_core.conformance --kind detector --module presidio_detector.plugin `
+  --cases plugins\presidio_detector\src\presidio_detector\cases.json
+& $PY -m leakguard_core scan --config C:\Work\LeakGuardFrameworkTest\firm.json `
+  --state-dir C:\Work\LeakGuardFrameworkTest\firm-state --format json `
+  --budget-seconds 30 --max-files 2 `
+  plugins\presidio_detector\examples\firm_presidio_recognizer\fixtures
+```
+
+The firm fixtures expect one `FIRM_ACCOUNT_ID` review finding in the positive
+file and none in the negative. Add your own labeled positive/negative cases
+before using firm data. On macOS, select the documented `supervised-alpha` worker
+policy explicitly; the commands above use the Windows strict default. See the
+[adapter authoring details](plugins/presidio_detector/README.md) and
+[versioned plugin contract](PLUGIN_API.md) for options, conformance case schemas,
+span metadata, worker lifetimes and compatibility.
+
 The integrated Password Buddy alpha adds a private local UI, encrypted vault and observations, host jobs, and offline deployment. Start with [the alpha guide](docs/ALPHA.md) and [installation instructions](docs/INSTALL.md). Exact native platform claims live in each release’s receipts.
 
 Offline secret scanning, Git guards and local file inventory. The engine uses Gitleaks as a subprocess and supports explicitly configured detector/extractor plugins. Configured module-backed plugins run in supervised workers. Source files are never moved or changed by a scan. Reports contain locations, rules and evidence classifications, never matched values or source snippets.
