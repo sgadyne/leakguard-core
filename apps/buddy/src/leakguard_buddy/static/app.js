@@ -785,7 +785,7 @@
       if (!byId("plugin-reviewed").checked) throw new Error("Confirm that you reviewed and trust this plugin before installing it.");
       if (file.size > 48_000_000) throw new Error("This alpha accepts wheel files up to 48 MB.");
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const installed = await request("/api/plugins/install", "POST", { wheel: base64FromBytes(bytes), reviewed: true });
+      const installed = await request("/api/plugins/install", "POST", { wheel: base64FromBytes(bytes), filename: file.name, reviewed: true });
       byId("plugin-form").reset(); byId("plugin-profile").value = "firm"; await loadPlugins(); notify(installed.id ? `Installed ${installed.id}. Enable it in its separate profile when ready.` : "Plugin installed and inspected.");
     });
   });

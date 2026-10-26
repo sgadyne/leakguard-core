@@ -19,6 +19,9 @@ class StubBackend:
     def git_hooks_install(self, repository, profile):
         return {"repository": repository, "profile": profile}
 
+    def plugin_install(self, payload):
+        return {"filename": payload["filename"]}
+
 
 class LocalServerTests(unittest.TestCase):
     def test_bootstrap_rotates_after_exchange_and_next_open_works(self):
@@ -66,6 +69,30 @@ class LocalServerTests(unittest.TestCase):
             status, response = self._request(app, "POST", "/api/hooks/install", cookie=cookie, payload=payload, origin=app.server.origin, csrf=csrf)
             self.assertEqual(status, 200)
             self.assertEqual(json.loads(response._buddy_body), payload)
+        finally:
+            app.close()
+
+    def test_plugin_upload_requires_and_preserves_wheel_filename(self):
+        app = LocalBuddy(StubBackend())
+        app.start()
+        try:
+            response = self._exchange(app, app.bootstrap)
+            cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+            csrf = json.loads(response._buddy_body)["csrf"]
+            status, _ = self._request(
+                app, "POST", "/api/plugins/install", cookie=cookie,
+                payload={"wheel": "AAAA", "reviewed": True},
+                origin=app.server.origin, csrf=csrf,
+            )
+            self.assertEqual(status, 400)
+            filename = "firm_checker-1.2.3-py3-none-any.whl"
+            status, response = self._request(
+                app, "POST", "/api/plugins/install", cookie=cookie,
+                payload={"wheel": "AAAA", "filename": filename, "reviewed": True},
+                origin=app.server.origin, csrf=csrf,
+            )
+            self.assertEqual(status, 201)
+            self.assertEqual(json.loads(response._buddy_body), {"filename": filename})
         finally:
             app.close()
 

@@ -52,6 +52,7 @@ class BuddyBackend:
             pass
         self.observation_path = self.state_dir / "observations.lgo"
         self.credential_path = self.state_dir / "credentials.lgv"
+        self.extension_registry_path = self.state_dir / "extensions"
         self._config_values = dict(defaults)
         # Buddy's selected profile and worker count must not rewrite the shared
         # LeakGuard CLI/Git configuration. Keep its overlay in private state.
@@ -67,8 +68,11 @@ class BuddyBackend:
                 self._config_values.update({key: value for key, value in buddy_values.items() if key in _BUDDY_CONFIG_FIELDS})
             except (OSError, ValueError, TypeError, UnicodeError, RecursionError):
                 raise RuntimeError("buddy-config-invalid") from None
-        self._config_values.setdefault("extension_registry", str((self.state_dir / "extensions").absolute()))
-        self._config_values["extension_registry"] = str((self.state_dir / "extensions").absolute())
+        # Initialize the private registry through core's public API before the
+        # config references it. initialize() creates an empty registry once and
+        # refuses to recreate a registry whose enabled state was lost.
+        self._extension_registry().initialize()
+        self._config_values["extension_registry"] = str(self.extension_registry_path.absolute())
         self._config_values["observation_backend"] = "encrypted"
         self._config_values["observation_path"] = str(self.observation_path.absolute())
         self._config = ScanConfig.from_mapping(self._config_values)
@@ -542,11 +546,12 @@ class BuddyBackend:
     def plugin_install(self, payload: dict[str, Any]):
         if payload.get("reviewed") is not True:
             raise BuddyOperationError("plugin-review-required")
+        filename = _safe_wheel_filename(payload.get("filename"))
         raw = base64.b64decode(payload["wheel"], validate=True)
         if not raw.startswith(b"PK\x03\x04") or len(raw) > 48_000_000:
-            raise ValueError("plugin-invalid")
+            raise BuddyOperationError("plugin-invalid")
         with tempfile.TemporaryDirectory(prefix="leakguard-buddy-plugin-") as temporary:
-            wheel = Path(temporary) / "plugin.whl"
+            wheel = Path(temporary) / filename
             _private_write(wheel, raw)
             result = self._extension_registry().install_wheel(wheel)
             return _wire(result)
@@ -562,8 +567,7 @@ class BuddyBackend:
 
     def _extension_registry(self):
         from leakguard_core.extensions import ExtensionRegistry
-        directory = self._config_values.get("extension_registry")
-        return ExtensionRegistry(Path(directory))
+        return ExtensionRegistry(self.extension_registry_path)
 
     def settings(self):
         return {
@@ -613,6 +617,43 @@ def _private_write(path: Path, data: bytes) -> None:
             os.fsync(stream.fileno())
     finally:
         os.close(descriptor)
+
+
+def _safe_wheel_filename(value: Any) -> str:
+    """Validate the PEP 427 basename before passing it to pip/core."""
+    if (type(value) is not str or not 1 <= len(value) <= 255
+            or not value.endswith(".whl") or "/" in value or "\\" in value
+            or "\x00" in value or Path(value).name != value):
+        raise BuddyOperationError("plugin-invalid")
+    parts = value[:-4].split("-")
+    if len(parts) == 6:
+        distribution, version, build, python_tag, abi_tag, platform_tag = parts
+        if not re.fullmatch(r"[0-9][A-Za-z0-9_]*", build, re.ASCII):
+            raise BuddyOperationError("plugin-invalid")
+    elif len(parts) == 5:
+        distribution, version, python_tag, abi_tag, platform_tag = parts
+    else:
+        raise BuddyOperationError("plugin-invalid")
+    if not re.fullmatch(r"[A-Za-z0-9_]+", distribution, re.ASCII):
+        raise BuddyOperationError("plugin-invalid")
+    if not re.fullmatch(r"[A-Za-z0-9_.!+]+", version, re.ASCII):
+        raise BuddyOperationError("plugin-invalid")
+    for tag in (python_tag, abi_tag, platform_tag):
+        if not tag or any(not re.fullmatch(r"[A-Za-z0-9_]+", alternative, re.ASCII)
+                          for alternative in tag.split(".")):
+            raise BuddyOperationError("plugin-invalid")
+    try:
+        from packaging.utils import parse_wheel_filename
+    except ImportError:
+        # The grammar above still prevents path components in minimal dev
+        # environments; the private runtime also validates full wheel syntax.
+        pass
+    else:
+        try:
+            parse_wheel_filename(value)
+        except (TypeError, ValueError):
+            raise BuddyOperationError("plugin-invalid") from None
+    return value
 
 
 def _atomic_private_write(path: Path, data: bytes) -> None:

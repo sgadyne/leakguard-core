@@ -315,7 +315,8 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 if "replace" in body and type(body["replace"]) is not bool: raise ApiError(400, "request-invalid")
                 return app.credential_restore(body), 200
             if path == "/api/plugins/install":
-                _keys(body, {"wheel", "reviewed"}, {"wheel", "reviewed"}); _text(body, "wheel", 68_000_000)
+                _keys(body, {"wheel", "filename", "reviewed"}, {"wheel", "filename", "reviewed"})
+                _text(body, "wheel", 68_000_000); _text(body, "filename", 255)
                 if body["reviewed"] is not True: raise ApiError(400, "request-invalid")
                 return app.plugin_install(body), 201
             if path == "/api/plugins/conformance":
