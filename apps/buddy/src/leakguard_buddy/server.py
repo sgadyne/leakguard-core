@@ -141,14 +141,25 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                     now = time.monotonic()
                     for expired in [key for key, value in self.server.sessions.items() if value.expires_at <= now]:
                         self.server.sessions.pop(expired, None)
-                    if len(self.server.sessions) >= _SESSION_LIMIT:
-                        oldest = min(self.server.sessions, key=lambda key: self.server.sessions[key].expires_at)
-                        self.server.sessions.pop(oldest, None)
-                    session_id = secrets.token_bytes(32)
-                    csrf = secrets.token_urlsafe(32)
-                    self.server.sessions[hashlib.sha256(session_id).digest()] = Session(
-                        hashlib.sha256(session_id).digest(), csrf, now + _SESSION_SECONDS
-                    )
+                    cookie = self.headers.get("Cookie", "")
+                    existing_cookie = re.search(r"(?:^|;\s*)buddy_session=([0-9a-f]{64})(?:;|$)", cookie)
+                    existing_id = bytes.fromhex(existing_cookie.group(1)) if existing_cookie else None
+                    existing_digest = hashlib.sha256(existing_id).digest() if existing_id else None
+                    existing_session = self.server.sessions.get(existing_digest) if existing_digest else None
+                    if existing_session is not None:
+                        # A fresh authorized browser launch in the same browser
+                        # should share the valid session with already-open tabs.
+                        session_id = existing_id
+                        csrf = existing_session.csrf
+                        existing_session.expires_at = now + _SESSION_SECONDS
+                    else:
+                        if len(self.server.sessions) >= _SESSION_LIMIT:
+                            oldest = min(self.server.sessions, key=lambda key: self.server.sessions[key].expires_at)
+                            self.server.sessions.pop(oldest, None)
+                        session_id = secrets.token_bytes(32)
+                        csrf = secrets.token_urlsafe(32)
+                        digest = hashlib.sha256(session_id).digest()
+                        self.server.sessions[digest] = Session(digest, csrf, now + _SESSION_SECONDS)
                     if callable(self.server.bootstrap_rotator):
                         replacement = self.server.bootstrap_rotator()
                         self.server.bootstrap_digest = hashlib.sha256(replacement.encode("ascii")).digest()

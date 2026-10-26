@@ -47,9 +47,16 @@ class LocalServerTests(unittest.TestCase):
                 with patch("webbrowser.open", return_value=True) as browser_open:
                     self.assertTrue(open_existing(Path(name)))
                     browser_open.assert_called_once_with(app.url, new=1, autoraise=True)
-                second = self._exchange(app, next_token)
+                second = self._exchange(app, next_token, cookie=cookie)
                 self.assertEqual(second.status, 200)
-                self.assertNotEqual(first.getheader("Set-Cookie"), second.getheader("Set-Cookie"))
+                self.assertEqual(first.getheader("Set-Cookie"), second.getheader("Set-Cookie"))
+                self.assertEqual(json.loads(second._buddy_body)["csrf"], json.loads(first._buddy_body)["csrf"])
+                status, _ = self._request(
+                    app, "POST", "/api/hooks/install", cookie=cookie,
+                    payload={"repository": "/synthetic/repo", "profile": "firm"},
+                    origin=app.server.origin, csrf=json.loads(first._buddy_body)["csrf"],
+                )
+                self.assertEqual(status, 200)
             finally:
                 app.close()
             self.assertFalse(launch_file.exists())
@@ -119,9 +126,9 @@ class LocalServerTests(unittest.TestCase):
         connection.close()
         return response.status, response
 
-    def _exchange(self, app, token):
+    def _exchange(self, app, token, *, cookie=None):
         path = urlsplit(app.url).path + "__bootstrap"
-        _, response = self._request(app, "POST", path, token=token)
+        _, response = self._request(app, "POST", path, token=token, cookie=cookie)
         return response
 
 
