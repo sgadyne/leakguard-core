@@ -73,7 +73,12 @@ class WorkerImportIsolationTests(unittest.TestCase):
         self.sentinel = self.root / "local-pypdf-imported"
         (self.cwd / "pypdf.py").write_text(_fake_shadow(self.sentinel), encoding="utf-8")
         self.config = self.root / "config.json"
-        self.config.write_text("{}\n", encoding="utf-8")
+        # The default policy stays strict. Native macOS alpha checks opt into
+        # supervised execution explicitly so they test import isolation rather
+        # than the platform's lack of RLIMIT_AS support.
+        self.worker_policy = "supervised-alpha" if sys.platform == "darwin" else "strict"
+        self.config.write_text(json.dumps({"worker_policy": self.worker_policy}) + "\n",
+                               encoding="utf-8")
         self.gitconfig = self.root / "gitconfig"
         self.gitconfig.write_text("", encoding="utf-8")
 
@@ -153,7 +158,15 @@ class WorkerImportIsolationTests(unittest.TestCase):
         distribution = importlib.metadata.distribution("packaging")
         shutil.copytree(distribution._path, site / distribution._path.name,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        psutil = importlib.util.find_spec("psutil")
+        self.assertIsNotNone(psutil)
+        shutil.copytree(Path(psutil.origin).parent, site / "psutil",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        distribution = importlib.metadata.distribution("psutil")
+        shutil.copytree(distribution._path, site / distribution._path.name,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         self.assertFalse((site / "pypdf").exists())
+        self.assertTrue((site / "psutil").exists())
 
         # The PDF header is enough to select the PDF parser. If it imports the
         # local shadow, that fake parser reports complete benign text instead.
@@ -207,10 +220,11 @@ class WorkerImportIsolationTests(unittest.TestCase):
         sys.path.insert(0, str(extensions))
         try:
             os.chdir(self.cwd)
-            loaded = plugins.load([{"module": "trusted_fixture_plugin"}])
+            loaded = plugins.load([{"module": "trusted_fixture_plugin"}],
+                                  worker_policy=self.worker_policy)
             findings = list(plugins.detect(
                 loaded, "synthetic-plugin-import-marker", Path("fixture.txt"), "text",
-                format_id="text",
+                format_id="text", worker_policy=self.worker_policy,
             ))
         finally:
             os.chdir(original_cwd)
