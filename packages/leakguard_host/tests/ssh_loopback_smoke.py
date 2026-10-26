@@ -37,6 +37,8 @@ def main():
     known.write_text(f"[127.0.0.1]:{port} {public}\n")
     known.chmod(0o600)
     config = root / "sshd_config"
+    uv = shutil.which("uv")
+    helper_path = f"SetEnv PATH={Path(uv).parent}:/usr/local/bin:/usr/bin:/bin\n" if uv else ""
     config.write_text(f'''Port {port}
 ListenAddress 127.0.0.1
 HostKey {root / 'host'}
@@ -49,6 +51,7 @@ PermitRootLogin no
 AllowUsers {getpass.getuser()}
 StrictModes yes
 LogLevel ERROR
+{helper_path}
 ''')
     source = root / "source"
     source.mkdir()
