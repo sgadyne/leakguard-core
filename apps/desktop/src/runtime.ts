@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
+import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { failure, inside } from './policy.ts';
 
@@ -20,19 +21,22 @@ export function cleanEnvironment(stateDir?:string,config?:string):NodeJS.Process
   if(config) env.LEAKGUARD_CONFIG=config;
   return env;
 }
-export async function canonicalDataDirectory(input:string):Promise<string> {
+export function canonicalDataDirectorySync(input:string):string {
   if(!path.isAbsolute(input) || input.includes('\0')) throw failure('profile-path-invalid');
   try {
-    if((await fs.lstat(input)).isSymbolicLink()) throw failure('profile-path-invalid');
+    if(lstatSync(input).isSymbolicLink()) throw failure('profile-path-invalid');
   }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT') throw error;}
-  await fs.mkdir(input,{recursive:true,mode:0o700});
-  const canonical=await fs.realpath(input);
+  mkdirSync(input,{recursive:true,mode:0o700});
+  const canonical=realpathSync(input);
   for(const sub of ['profile','profile/state','runtimes']){
     const candidate=path.join(canonical,sub);
-    try{if((await fs.lstat(candidate)).isSymbolicLink())throw failure('profile-path-invalid');}
+    try{if(lstatSync(candidate).isSymbolicLink())throw failure('profile-path-invalid');}
     catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
   }
   return canonical;
+}
+export async function canonicalDataDirectory(input:string):Promise<string> {
+  return canonicalDataDirectorySync(input);
 }
 async function resourcePath(root:string,relative:string):Promise<string> {
   if(typeof relative!=='string' || !relative || relative.includes('\\') || relative.includes('\0') ||

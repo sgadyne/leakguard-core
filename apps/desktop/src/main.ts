@@ -6,7 +6,7 @@ import { ClipboardOwner } from './clipboard.ts';
 import { Control } from './control.ts';
 import { CHANNELS, type BackendStatus, type ClearReason, type DesktopEvent, type Page, type Preferences } from './contracts.ts';
 import { backupBytes, failure, pageAllowed, record } from './policy.ts';
-import { canonicalDataDirectory, cleanEnvironment, prepareRuntime, waitForPreparation } from './runtime.ts';
+import { canonicalDataDirectorySync, cleanEnvironment, prepareRuntime, waitForPreparation } from './runtime.ts';
 
 let window:BrowserWindow|undefined;
 let tray:Tray|undefined;
@@ -328,7 +328,7 @@ async function main(){
   const index=process.argv.indexOf('--buddy-data-dir');
   const input=index>=0?process.argv[index+1]:path.join(app.getPath('appData'),'Password Buddy');
   if(!input || (index>=0 && input.startsWith('--')))throw failure('profile-path-invalid');
-  dataDir=await canonicalDataDirectory(input);app.setPath('userData',dataDir);
+  dataDir=canonicalDataDirectorySync(input);app.setPath('userData',dataDir);app.setPath('sessionData',dataDir);
   if(!app.requestSingleInstanceLock()){app.quit();return;}
   app.on('second-instance',()=>show());
   app.on('activate',()=>show());
