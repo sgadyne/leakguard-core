@@ -30,9 +30,20 @@ try {
     dir: staging, name: 'Password Buddy', executableName: 'Password Buddy', platform, arch,
     electronVersion: '45.0.0', appVersion: '0.1.0-alpha.1', appBundleId: 'org.leakguard.passwordbuddy',
     out: path.resolve(values.output), asar: true, prune: true, overwrite: false,
-    extraResource: [path.resolve(values.resources)], osxSign: false, osxNotarize: false,
+    osxSign: false, osxNotarize: false,
     win32metadata: { CompanyName: 'LeakGuard', FileDescription: 'Password Buddy', ProductName: 'Password Buddy' },
   });
+  // Packager's extraResource copier resolves relative symlinks to absolute
+  // staging paths. CPython must keep its validated relocatable link targets.
+  for (const packaged of paths) {
+    const resourceRoot = platform === 'darwin'
+      ? path.join(packaged, 'Password Buddy.app', 'Contents', 'Resources')
+      : path.join(packaged, 'resources');
+    await access(path.join(resourceRoot, 'app.asar'));
+    await cp(path.resolve(values.resources), path.join(resourceRoot, 'buddy'), {
+      recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true,
+    });
+  }
   process.stdout.write(JSON.stringify({ appDirectories: paths, nativeAcceptance: 'not-run' }) + '\n');
 } finally {
   await rm(staging, { recursive: true, force: true });

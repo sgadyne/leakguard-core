@@ -204,6 +204,10 @@ def assemble(args):
         app = app_paths[0]
         artifact = output / f"Password-Buddy-{DESKTOP_VERSION}-{args.target}.zip"
         app_bundle = app / "Password Buddy.app" if args.target == "macos-arm64" else app
+        packaged_resources = (app_bundle / "Contents/Resources/buddy" if args.target == "macos-arm64"
+                              else app_bundle / "resources/buddy")
+        if bootstrap.records(packaged_resources) != manifest["files"]:
+            raise ValueError("Packaged resource bytes or symlink targets differ from the sealed payload")
         zip_tree(app_bundle, artifact)
         app_files = {"sourceCommit": source_commit, "runtimeId": manifest["runtimeId"], "files": bootstrap.records(app_bundle)}
         write_json(output / "artifact-files.json", app_files)
@@ -243,7 +247,7 @@ def main():
     args = parser.parse_args()
     try:
         assemble(args)
-    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError, bootstrap.PreparationError) as error:
         parser.exit(1, f"desktop-build: {error}\n")
 
 
