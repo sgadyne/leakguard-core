@@ -598,9 +598,18 @@ try:
 except MemoryError:
     print('bounded')
 """
+        if sys.platform == 'darwin':
+            with self.assertRaises(_supervision.WorkerError) as error:
+                _supervision.run_worker(
+                    [sys.executable, '-c', code], b'', timeout=8, max_output_bytes=1024,
+                    memory_bytes=64 * 1024 * 1024, worker_policy='strict',
+                )
+            self.assertEqual(error.exception.code, 'resource-bound-unavailable',
+                             'Darwin strict policy must report that it has no hard memory cap')
+            return
         result = _supervision.run_worker(
             [sys.executable, '-c', code], b'', timeout=8, max_output_bytes=1024,
-            memory_bytes=64 * 1024 * 1024,
+            memory_bytes=64 * 1024 * 1024, worker_policy=_darwin_test_worker_policy(),
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b'bounded\n')
@@ -611,7 +620,7 @@ except MemoryError:
         with patch.object(_supervision.subprocess, 'Popen', wraps=original_popen) as popen:
             result = _supervision.run_worker(
                 [sys.executable, '-c', "print('single')"], b'', timeout=5,
-                memory_bytes=256 * 1024 * 1024,
+                memory_bytes=256 * 1024 * 1024, worker_policy=_darwin_test_worker_policy(),
             )
         self.assertEqual(result.stdout, b'single\n')
         self.assertNotIn('preexec_fn', popen.call_args.kwargs)
@@ -619,7 +628,7 @@ except MemoryError:
         def run_one(index):
             return _supervision.run_worker(
                 [sys.executable, '-c', f"print('worker-{index}')"], b'', timeout=5,
-                memory_bytes=256 * 1024 * 1024,
+                memory_bytes=256 * 1024 * 1024, worker_policy=_darwin_test_worker_policy(),
             )
 
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -644,6 +653,7 @@ except MemoryError:
             _supervision.run_worker(
                 [sys.executable, '-c', code], b'', timeout=5,
                 max_output_bytes=128, memory_bytes=512 * 1024 * 1024,
+                worker_policy=_darwin_test_worker_policy(),
             )
         self.assertEqual(caught.exception.code, 'worker-output-limit')
         self.assertNotIn(marker, str(caught.exception))
@@ -655,7 +665,7 @@ except MemoryError:
         with self.assertRaises(_supervision.WorkerError) as caught:
             _supervision.run_worker(
                 [sys.executable, '-c', code], b'', timeout=0.15,
-                memory_bytes=512 * 1024 * 1024,
+                memory_bytes=512 * 1024 * 1024, worker_policy=_darwin_test_worker_policy(),
             )
         self.assertLess(time.monotonic() - started, 4)
         self.assertEqual(caught.exception.code, 'worker-timeout')
@@ -669,7 +679,7 @@ except MemoryError:
             parent = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',%r]); print('done')" % child
             result = _supervision.run_worker(
                 [sys.executable, '-c', parent], b'', timeout=4,
-                memory_bytes=512 * 1024 * 1024,
+                memory_bytes=512 * 1024 * 1024, worker_policy=_darwin_test_worker_policy(),
             )
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b'done\n')
