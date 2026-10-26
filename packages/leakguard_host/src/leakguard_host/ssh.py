@@ -160,6 +160,65 @@ except BaseException:
     raise
 '''
 
+_INSTALL = r'''
+import hashlib,json,os,pathlib,signal,stat,subprocess,sys,zipfile
+root=pathlib.Path(sys.argv[1]); expected=sys.argv[2]
+if sys.version_info<(3,11) or not root.is_absolute() or root.is_symlink(): sys.exit(2)
+info=root.stat()
+if info.st_uid!=os.getuid() or info.st_mode&0o077: sys.exit(2)
+archive=root/"release.zip"
+if archive.is_symlink() or not archive.is_file() or archive.stat().st_size>536870912: sys.exit(2)
+h=hashlib.sha256()
+with archive.open("rb") as stream:
+    for chunk in iter(lambda:stream.read(1048576),b""): h.update(chunk)
+if h.hexdigest()!=expected: sys.exit(2)
+destination=root/"content"
+destination.mkdir(mode=0o700,exist_ok=False)
+with zipfile.ZipFile(archive) as bundle:
+    members=bundle.infolist()
+    if not 1<=len(members)<=5000 or sum(x.file_size for x in members)>1073741824: sys.exit(2)
+    seen=set()
+    for member in members:
+        name=member.filename
+        parts=name.rstrip("/").split("/")
+        path=pathlib.PurePosixPath(name)
+        mode=member.external_attr>>16
+        if not parts or parts[0]!="LeakGuard" or any(x in ("",".","..") for x in parts) or "\\" in name or ":" in name or "\x00" in name: sys.exit(2)
+        if path.is_absolute() or path.as_posix() in seen or member.flag_bits&1 or member.file_size>268435456: sys.exit(2)
+        if stat.S_ISLNK(mode) or stat.S_IFMT(mode) not in (0,stat.S_IFREG,stat.S_IFDIR): sys.exit(2)
+        seen.add(path.as_posix())
+    for member in members:
+        target=destination.joinpath(*pathlib.PurePosixPath(member.filename).parts)
+        if member.is_dir(): target.mkdir(mode=0o700,parents=True,exist_ok=True);continue
+        target.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+        with bundle.open(member) as source,target.open("xb") as out:
+            os.chmod(target,0o600)
+            remaining=member.file_size
+            while remaining:
+                chunk=source.read(min(1048576,remaining))
+                if not chunk: raise ValueError()
+                out.write(chunk);remaining-=len(chunk)
+            if source.read(1): raise ValueError()
+bundle_root=destination/"LeakGuard"
+installer=bundle_root/"deploy/installer.py"
+if not installer.is_file() or not (bundle_root/"release.json").is_file(): sys.exit(2)
+command=[sys.executable,str(installer),"install",str(bundle_root),"--prefix",str(root/"runtime"),"--state-dir",str(root/"state")]
+p=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
+try:
+    output,_=p.communicate(timeout=300)
+    if p.returncode or len(output)>65536: sys.exit(2)
+    receipt=json.loads(output)
+    fields={"installed","active","release_version","source_commit","runtime_python","buddy_command","state_dir"}
+    if type(receipt) is not dict or set(receipt)!=fields or receipt["active"] is not True: sys.exit(2)
+    for key in ("installed","runtime_python","buddy_command"):
+        value=pathlib.Path(receipt[key]).resolve()
+        if not value.is_relative_to((root/"runtime").resolve()): sys.exit(2)
+    if pathlib.Path(receipt["state_dir"]).resolve()!=(root/"state").resolve(): sys.exit(2)
+    print(json.dumps(receipt))
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid,signal.SIGKILL);p.communicate();sys.exit(2)
+'''
+
 
 class SSHRunner:
     def __init__(self, *, executable: str | None = None, port: int = 22):
@@ -218,3 +277,35 @@ class SSHRunner:
             raise HostError("remote-receipt-invalid") from None
         return {**receipt, "target": _target(target), "remote_directory": remote_directory,
                 "artifact": remote_directory + "/release.zip", "installed": False}
+
+    def install(self, target: str, remote_directory: str, *, sha256: str, python: str = "python3", cancel=None) -> dict:
+        """Explicitly install an uploaded offline bundle within its private root."""
+        remote_directory = _remote_path(remote_directory)
+        if type(sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            raise HostError("artifact-hash-invalid")
+        output = _exchange(self._command(target, python, _INSTALL, (remote_directory, sha256)), b"",
+                           timeout=330, maximum=65_536, cancel=cancel)
+        try:
+            value = json.loads(output)
+            fields = {"installed", "active", "release_version", "source_commit", "runtime_python", "buddy_command", "state_dir"}
+            if type(value) is not dict or set(value) != fields or value["active"] is not True:
+                raise ValueError()
+            for key in fields - {"active", "source_commit"}:
+                if type(value[key]) is not str or len(value[key]) > 4096:
+                    raise ValueError()
+            if value["source_commit"] is not None and (type(value["source_commit"]) is not str or not re.fullmatch(r"[0-9a-f]{40}", value["source_commit"])):
+                raise ValueError()
+            for key in ("installed", "runtime_python", "buddy_command"):
+                if not PurePosixPath(_remote_path(value[key])).is_relative_to(PurePosixPath(remote_directory) / "runtime"):
+                    raise ValueError()
+            if _remote_path(value["state_dir"]) != remote_directory + "/state":
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError, HostError):
+            raise HostError("remote-receipt-invalid") from None
+        return {"target": _target(target), "remote_directory": remote_directory, "installed": True,
+                "sha256": sha256, "receipt": value}
+
+    def deploy(self, target: str, artifact: Path, remote_directory: str, *, sha256: str, python: str = "python3", cancel=None) -> dict:
+        """Upload AND install only after this explicit deploy action."""
+        self.upload(target, artifact, remote_directory, sha256=sha256, python=python, cancel=cancel)
+        return self.install(target, remote_directory, sha256=sha256, python=python, cancel=cancel)

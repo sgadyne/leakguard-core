@@ -34,13 +34,14 @@ def main(argv=None) -> int:
     remote.add_argument("--port", type=int, default=22)
     remote.add_argument("--max-seconds", type=int, default=30)
     remote.add_argument("--max-files", type=int, default=100)
-    upload = commands.add_parser("ssh-upload")
-    upload.add_argument("target")
-    upload.add_argument("artifact", type=Path)
-    upload.add_argument("remote_directory")
-    upload.add_argument("--sha256", required=True)
-    upload.add_argument("--python", default="python3")
-    upload.add_argument("--port", type=int, default=22)
+    for name in ("ssh-upload", "ssh-deploy"):
+        upload = commands.add_parser(name)
+        upload.add_argument("target")
+        upload.add_argument("artifact", type=Path)
+        upload.add_argument("remote_directory")
+        upload.add_argument("--sha256", required=True)
+        upload.add_argument("--python", default="python3")
+        upload.add_argument("--port", type=int, default=22)
     args = parser.parse_args(argv)
     try:
         if args.command == "capabilities":
@@ -56,7 +57,9 @@ def main(argv=None) -> int:
             result = SSHRunner(port=args.port).run(args.target, args.root, python=args.python,
                 config_path=args.config_path, max_seconds=args.max_seconds, max_files=args.max_files)
         else:
-            result = SSHRunner(port=args.port).upload(args.target, args.artifact, args.remote_directory,
+            runner = SSHRunner(port=args.port)
+            action = runner.deploy if args.command == "ssh-deploy" else runner.upload
+            result = action(args.target, args.artifact, args.remote_directory,
                 sha256=args.sha256, python=args.python)
         sys.stdout.write(json.dumps(result, ensure_ascii=True, sort_keys=True) + "\n")
         return 0

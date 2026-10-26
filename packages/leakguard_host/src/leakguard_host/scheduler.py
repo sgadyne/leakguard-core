@@ -260,6 +260,22 @@ class HostService:
         for job in self._state["jobs"].values():
             if job["source_id"] == source_id and job["state"] in _ACTIVE:
                 return job
+        if self._current is not None and self._job(self._current)["source_id"] == source_id:
+            raise HostError("source-busy")
+        prior_jobs = [job for job in self._state["jobs"].values() if job["source_id"] == source_id]
+        reset = getattr(self._store, "reset_cycle", None)
+        abandoned = any(job["state"] in {"cancelled", "failed"} for job in prior_jobs)
+        try:
+            if callable(reset):
+                reset("audit:host-" + source_id)
+            elif abandoned:
+                raise HostError("state-reset-unavailable")
+            if abandoned:
+                self._store.invalidate_scope(source["root"], reason="source-unavailable")
+        except HostError:
+            raise
+        except Exception as error:
+            raise HostError("state-cycle-busy" if getattr(error, "code", None) == "state-cycle-busy" else "state-reset-failed") from None
         # Retain a bounded history; engine evidence belongs to the ScanStore.
         final = [key for key, job in self._state["jobs"].items() if job["state"] in _FINAL]
         for key in final[:max(0, len(self._state["jobs"]) - 199)]:
@@ -304,12 +320,17 @@ class HostService:
 
     def _available(self, source: dict) -> str:
         path = Path(source["root"])
+        try:
+            if path.resolve() != path:
+                return "source-changed"
+        except (OSError, RuntimeError):
+            return "unreadable"
         status = navigation.path_status(path)
         if status != "available":
             return status
         try:
             info = path.stat()
-            if source["root_identity"] is not None and source["root_identity"] != [info.st_dev, info.st_ino]:
+            if source["kind"] == "local" and source["root_identity"] is not None and source["root_identity"] != [info.st_dev, info.st_ino]:
                 return "source-changed"
             if source["mount_marker"] is not None and navigation.mount_marker(path) != source["mount_marker"]:
                 return "offline"
@@ -416,9 +437,13 @@ class HostService:
 
     def status(self) -> dict:
         with self._lock:
+            try:
+                store_status = self._state_store.status() if callable(getattr(self._state_store, "status", None)) else {}
+            except Exception:
+                store_status = {}
             return {"scheduler": "running" if self._thread and self._thread.is_alive() else "stopped",
                     "active_job": self._current, "observation_available": self._storage_error is None,
-                    "unattended_available": bool(getattr(self._state_store, "unattended_available", False)),
+                    "unattended_available": store_status.get("unattended_available") is True,
                     "storage_error": self._storage_error, "sources": len(self._state["sources"]),
                     "pending_jobs": sum(job["state"] in _ACTIVE for job in self._state["jobs"].values()),
                     "slice_seconds": self._limits.deadline_seconds, "slice_max_files": self._limits.max_files}

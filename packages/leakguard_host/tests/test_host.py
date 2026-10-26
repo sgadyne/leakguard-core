@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import hashlib
 from pathlib import Path
 import plistlib
 import subprocess
@@ -9,13 +10,14 @@ import sys
 from tempfile import TemporaryDirectory
 import threading
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from leakguard_core import ScanConfig, ScanReport, CoverageSummary, PolicyDecision
 from leakguard_core.models import CoverageIssue, DecisionVerdict, ErrorCode
 from leakguard_core.scan_store import MemoryScanStore
 from leakguard_host import HostError, HostService, SSHRunner, browse, service_spec
-from leakguard_host.ssh import _exchange
+from leakguard_host.ssh import _exchange, _INSTALL
 
 
 class SessionStore(MemoryScanStore):
@@ -200,6 +202,32 @@ class HostTests(unittest.TestCase):
         with self.assertRaisesRegex(HostError, "ssh-execution-failed") as raised:
             _exchange([sys.executable, "-c", "import sys;sys.stderr.write('SYNTHETIC_VALUE');sys.exit(1)"], b"", timeout=2, maximum=100)
         self.assertNotIn("SYNTHETIC_VALUE", str(raised.exception))
+
+    def test_remote_bundle_rejects_traversal_before_writing(self):
+        self.root.chmod(0o700)
+        artifact = self.root / "release.zip"
+        with zipfile.ZipFile(artifact, "w") as archive:
+            archive.writestr("LeakGuard/../../escape", "SYNTHETIC_VALUE")
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        result = subprocess.run([sys.executable, "-c", _INSTALL, str(self.root), digest], capture_output=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root.parent / "escape").exists())
+        self.assertEqual(list((self.root / "content").iterdir()), [])
+
+    def test_remote_bundle_install_receipt_stays_inside_chosen_prefix(self):
+        self.root.chmod(0o700)
+        artifact = self.root / "release.zip"
+        installer = '''import json,pathlib,sys
+root=pathlib.Path(sys.argv[sys.argv.index('--prefix')+1])
+state=pathlib.Path(sys.argv[sys.argv.index('--state-dir')+1])
+print(json.dumps(dict(installed=str(root/'releases/test'),active=True,release_version='test',source_commit=None,runtime_python=str(root/'releases/test/bin/python'),buddy_command=str(root/'releases/test/bin/buddy'),state_dir=str(state))))
+'''
+        with zipfile.ZipFile(artifact, "w") as archive:
+            archive.writestr("LeakGuard/release.json", "{}")
+            archive.writestr("LeakGuard/deploy/installer.py", installer)
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        output = _exchange([sys.executable, "-c", _INSTALL, str(self.root), digest], b"", timeout=5, maximum=4096)
+        self.assertEqual(json.loads(output)["state_dir"], str(self.root / "state"))
 
 
 if __name__ == "__main__":

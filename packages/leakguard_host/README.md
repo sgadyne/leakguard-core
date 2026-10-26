@@ -53,6 +53,12 @@ required. Passwords and credential-vault access are never accepted.
 
 `SSHRunner.upload(target, artifact, remote_directory, sha256=...)` transfers a
 chosen release ZIP into a **new** private remote directory and verifies its hash.
-Uploading does not install or execute it. Remote release installation is provided
-by the subsequent explicit deploy action. SSH process output is bounded; stderr
-and arbitrary command output are never returned to Buddy.
+Uploading does not install or execute it. `SSHRunner.deploy(...)` is the explicit
+upload-and-install action: it verifies the ZIP hash again, rejects traversal,
+symlinks, duplicate/encrypted members and oversized archives, extracts into a new
+private directory, then invokes the bundled offline installer with an explicit
+private prefix and state directory. It returns a validated install receipt with
+`runtime_python` for a subsequent `run` call. Deployment requires a POSIX remote
+host with Python3.11+ and the offline release's supported dependencies. Installation
+does not enable services, mounts, hooks, or credential-vault access. SSH process
+output is bounded; stderr and arbitrary command output never enter the response.

@@ -70,7 +70,11 @@ def _mounts() -> list[dict]:
                     decode = lambda item: item.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
                     target, filesystem = decode(fields[4]), extra[0]
                     if target == "/" or filesystem in {"nfs", "nfs4", "cifs", "smb3", "fuse.sshfs"} or target.startswith(("/mnt/", "/media/", "/run/media/")):
-                        marker = hashlib.sha256((fields[0] + "|" + fields[2] + "|" + target + "|" + filesystem).encode()).hexdigest()
+                        # Mount/device IDs change on a legitimate reconnect.
+                        # Bind to the selected endpoint/root instead, so an
+                        # unmounted local fallback is rejected and the SAME
+                        # share can reconnect without a new source selection.
+                        marker = hashlib.sha256((extra[1] + "|" + decode(fields[3]) + "|" + target + "|" + filesystem).encode()).hexdigest()
                         values.append({"path": target, "filesystem": filesystem, "marker": marker})
         except (OSError, ValueError, IndexError):
             pass
@@ -103,7 +107,7 @@ def mount_marker(path: str | Path) -> str | None:
     matches = [item for item in _mounts() if target.is_relative_to(Path(item["path"]))]
     if not matches:
         return None
-    return max(matches, key=lambda item: len(item["path"]))["marker"]
+    return max(enumerate(matches), key=lambda value: (len(value[1]["path"]), value[0]))[1]["marker"]
 
 
 def capabilities() -> dict:
