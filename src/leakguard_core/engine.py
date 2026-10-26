@@ -1311,7 +1311,9 @@ class ScanService:
         detector_severity = severity
         inventory_review = mode is m.ScanMode.INVENTORY and detector_id == 'gitleaks' and rule in self.config.get('review_only_rules', ())
         effective_severity = 'review' if inventory_review else severity
-        classification = 'heuristic' if rule == 'generic-api-key' else 'credential-candidate'
+        informational = ((detector_id == 'plugin-sensitive-basics' and rule.startswith('pii-'))
+                         or (detector_id == 'plugin-firm-example' and rule.startswith('firm-')))
+        classification = 'heuristic' if rule == 'generic-api-key' or informational else 'credential-candidate'
         final_severity = effective_severity
         proof_id = None
         if detector_id == 'gitleaks':
