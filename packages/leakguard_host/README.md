@@ -22,6 +22,11 @@ can resume them. Completed evidence remains in the core store. Pause, cancel,
 and offline roots retain incomplete coverage. One worker serializes slices and
 one active job is admitted for each source. Schedules are opt-in, at least 60
 seconds apart. Offline retry grows from 5 seconds to one hour.
+Three unchanged budget-only slices without file or directory progress pause the
+job with `scan-progress-stalled` and incomplete coverage. Successful directory
+enumeration and durable cursor advancement count as progress even when a slice
+contains no scanned files. Unexpected worker failures are visible in status and
+pause admitted work before shutdown.
 
 `roots()` lists home/common folders and native mount metadata. `browse(path,
 root=selected_root, cursor=..., limit=100)` pages at most 500 rows and inspects

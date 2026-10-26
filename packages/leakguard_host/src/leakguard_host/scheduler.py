@@ -53,6 +53,32 @@ def _interval(value) -> int | None:
     return value
 
 
+class _SliceStore:
+    """Observe progress while forwarding to the sole application-owned sink."""
+    def __init__(self, store):
+        self._store = store
+        self.advanced = False
+
+    def __getattr__(self, name):
+        method = getattr(self._store, name)
+        if name == "finish_directory":
+            def finish(*args, **kwargs):
+                result = method(*args, **kwargs)
+                if kwargs.get("success") is True:
+                    self.advanced = True
+                return result
+            return finish
+        if name == "set_directory_progress":
+            def progress(claim, value):
+                previous = self._store.get_directory_progress(claim)
+                result = method(claim, value)
+                if value is not None and value != previous:
+                    self.advanced = True
+                return result
+            return progress
+        return method
+
+
 class HostService:
     def __init__(self, *, config: ScanConfig, scan_store: object,
                  state_store: HostStateStore | None = None, limits: ScanLimits | None = None,
@@ -383,6 +409,7 @@ class HostService:
                 self._current = job_id
             status = self._available(source)
             report = None
+            slice_store = _SliceStore(self._store)
             failure = None
             if status != "available":
                 failure = status
@@ -398,7 +425,7 @@ class HostService:
                 values["exclude_roots"] = list(values.get("exclude_roots", ())) + source["exclusions"]
                 try:
                     config = ScanConfig.from_mapping(values)
-                    with self._scanner_factory(config=config, store=self._store) as scanner:
+                    with self._scanner_factory(config=config, store=slice_store) as scanner:
                         report = scanner.audit(scope, limits=self._limits, use_cache=True, cancel=lambda: self._cancelled(job_id))
                 except Exception:
                     failure = "scan-failed"
@@ -433,7 +460,7 @@ class HostService:
                             job.update(state="failed", last_error=sorted(codes - {"budget-exhausted", "cancelled"})[0], coverage="incomplete")
                         else:
                             pending = (report.coverage.pending_files, report.coverage.pending_directories)
-                            stalled = report.counts.results == 0 and pending == previous_pending
+                            stalled = report.counts.results == 0 and pending == previous_pending and not slice_store.advanced
                             job["stalled_slices"] = job.get("stalled_slices", 0) + 1 if stalled else 0
                             job.update(state="paused" if job["stalled_slices"] >= 3 else "queued",
                                        last_error="scan-progress-stalled" if job["stalled_slices"] >= 3 else None)
