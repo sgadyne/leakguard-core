@@ -128,3 +128,77 @@ class ExecutionTests(unittest.TestCase):
         service.close()
         self.assertEqual(inspect.call_count, 1)
         self.assertEqual(len(report.results), 5)
+
+    def test_path_and_audit_enumerators_share_worker_callback_serialization(self):
+        for mode in ('paths', 'audit'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix='leakguard-execution-') as folder:
+                root = Path(folder)
+                for number in range(5):
+                    (root / f'{number}.txt').write_text('synthetic')
+                lock = threading.Lock()
+                active = 0
+                maximum = 0
+                def callback():
+                    nonlocal active, maximum
+                    with lock:
+                        active += 1
+                        maximum = max(maximum, active)
+                    time.sleep(0.002)
+                    with lock:
+                        active -= 1
+                    return False
+                def detect(text, *, cancel, **kwargs):
+                    for _ in range(4):
+                        cancel()
+                    return ()
+                store = MemoryScanStore()
+                service = engine.ScanService({'audit_scopes': {'synthetic': str(root)}}, store=store)
+                with patch.object(backends, 'detect', side_effect=detect):
+                    report = (service.audit('synthetic', limits=m.ScanLimits(5, 10), cancel=callback)
+                              if mode == 'audit' else service.scan_paths((root,), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(5, 10), cancel=callback))
+                self.assertTrue(report.coverage.required_complete)
+                self.assertEqual(maximum, 1)
+                service.close(); store.close()
+
+    def test_path_and_audit_cancellation_callbacks_stay_latched(self):
+        for mode in ('paths', 'audit'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix='leakguard-execution-') as folder:
+                root = Path(folder); (root / 'source.txt').write_text('synthetic')
+                calls = 0
+                def callback():
+                    nonlocal calls
+                    calls += 1
+                    return calls == 1
+                store = MemoryScanStore()
+                service = engine.ScanService({'audit_scopes': {'synthetic': str(root)}}, store=store)
+                report = (service.audit('synthetic', limits=m.ScanLimits(5, 10), cancel=callback)
+                          if mode == 'audit' else service.scan_paths((root,), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(5, 10), cancel=callback))
+                self.assertFalse(report.coverage.required_complete)
+                self.assertEqual(calls, 1)
+                self.assertTrue(any(issue.code is m.ErrorCode.CANCELLED for issue in report.issues))
+                service.close(); store.close()
+
+    def test_waiting_callback_is_not_invoked_after_concurrent_cancellation(self):
+        from leakguard_core.execution import Cancellation
+        entered = threading.Event()
+        callback_calls = []
+        cancellation = Cancellation(lambda: callback_calls.append(1) or True)
+        class Gate:
+            def __enter__(self):
+                entered.set()
+                gate.acquire()
+            def __exit__(self, *args):
+                gate.release()
+        gate = threading.Lock()
+        cancellation._lock = Gate()
+        gate.acquire()
+        answers = []
+        waiter = threading.Thread(target=lambda: answers.append(cancellation()))
+        waiter.start()
+        self.assertTrue(entered.wait(timeout=2))
+        cancellation.stop()
+        gate.release()
+        waiter.join(timeout=2)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(answers, [True])
+        self.assertEqual(callback_calls, [])

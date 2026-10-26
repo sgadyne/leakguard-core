@@ -25,7 +25,7 @@ class Cancellation:
             return True
         if self._callback is not None:
             with self._lock:
-                if self._callback():
+                if not self._stopped.is_set() and self._callback():
                     self._stopped.set()
         return self._stopped.is_set()
 

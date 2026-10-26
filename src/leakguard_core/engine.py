@@ -558,6 +558,9 @@ class ScanService:
         return self._run(inputs, policy=policy, limits=limits, use_cache=use_cache, cancel=cancel)
 
     def scan_paths(self, paths, *, policy, limits, use_cache=True, cancel=None):
+        from .execution import Cancellation
+        if not isinstance(cancel, Cancellation):
+            cancel = Cancellation(cancel)
         from itertools import islice
         from . import models as m
         from .sources import (directory_signature, AcquisitionError, FilesystemBoundary,
@@ -717,6 +720,9 @@ class ScanService:
         return self._work_batch('watch', None, limits=limits, use_cache=use_cache, cancel=cancel, ingest=True)
 
     def _work_batch(self, scope, root, *, limits, use_cache, cancel, ingest=False):
+        from .execution import Cancellation
+        if not isinstance(cancel, Cancellation):
+            cancel = Cancellation(cancel)
         from . import models as m
         from .scan_store import StateError, DirectoryProgress
         from .sources import (directory_signature, AcquisitionError, FilesystemBoundary,
