@@ -100,11 +100,24 @@ def _parser() -> argparse.ArgumentParser:
 
 def _doctor(config: dict[str, object], output_format: str) -> int:
     import shutil
-    import sqlite3
+    from .scan_store import SQLiteScanStore
     from ._supervision import worker_capabilities
     execution = worker_capabilities(config['worker_policy'])
-    with sqlite3.connect(':memory:') as connection:
-        checkpoint = all(hasattr(connection, name) for name in ('serialize', 'deserialize'))
+    probes = []
+    checkpoint = False
+    try:
+        # Probe the actual memory-only factory, including TEMP_STORE compile
+        # options and journal settings; method existence alone is insufficient.
+        original = SQLiteScanStore.from_memory()
+        probes.append(original)
+        restored = SQLiteScanStore.from_memory(original.serialize())
+        probes.append(restored)
+        checkpoint = True
+    except Exception:
+        pass
+    finally:
+        for probe in probes:
+            probe.close()
     selected = config.get('gitleaks_executable') or os.environ.get('LEAKGUARD_GITLEAKS') or 'gitleaks'
     backend_available = bool(shutil.which(selected))
     healthy = execution['available'] and checkpoint and backend_available
