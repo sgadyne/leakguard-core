@@ -187,7 +187,8 @@ leakguard-install uninstall
 Only use `leakguard-install uninstall --purge-data` when the user explicitly
 wants to delete the private state directory too.
 
-The alpha does not auto-update or publish telemetry. Native macOS is available
-for the documented Python 3.13 bridge run; Windows has no runner yet and must
-remain marked unverified. Bundle compatibility is checked at install time, but
-the bundle SHA-256 is an integrity value, not a signature.
+The alpha does not auto-update or publish telemetry. Check the release receipts
+for exact native installation, service, and keyring results. A complete offline
+bundle or a static script check does not establish native execution. Bundle
+compatibility is checked at install time, but the bundle SHA-256 is an integrity
+value, not a signature.
