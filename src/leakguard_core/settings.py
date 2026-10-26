@@ -26,6 +26,10 @@ DEFAULTS = {
     'required_formats': [],
     'omissions': [],
     'extractor_overrides': {},
+    'worker_policy': 'strict',
+    'scan_workers': 2,
+    'detection_profile': 'credentials',
+    'extension_registry': None,
 }
 
 
@@ -90,6 +94,15 @@ def validate(mapping):
             fail(key)
         if key == 'max_file_bytes' and type(value) is not int:
             fail(key)
+    if type(result['worker_policy']) is not str or result['worker_policy'] not in {'strict', 'supervised-alpha'}:
+        fail('worker_policy')
+    if type(result['scan_workers']) is not int or result['scan_workers'] not in {1, 2}:
+        fail('scan_workers')
+    if type(result['detection_profile']) is not str or result['detection_profile'] not in {'credentials', 'sensitive', 'firm'}:
+        fail('detection_profile')
+    registry = result['extension_registry']
+    if registry is not None and (not text(registry) or not pathlib.Path(registry).is_absolute()):
+        fail('extension_registry')
     for key in ('review_only_rules', 'required_formats'):
         if not texts(result[key], 80) or any(not token(item) for item in result[key]):
             fail(key)

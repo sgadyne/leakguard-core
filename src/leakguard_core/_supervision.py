@@ -28,6 +28,99 @@ class WorkerResult:
     returncode: int
 
 
+WORKER_POLICIES = frozenset({'strict', 'supervised-alpha'})
+
+
+def worker_capabilities(policy: str = 'strict') -> dict[str, object]:
+    """Describe the selected policy without claiming an RSS check is a hard cap.
+
+    This is an explicit doctor/API action, not an import-time platform probe.
+    Actual worker startup still verifies that the required primitive works.
+    """
+    if policy not in WORKER_POLICIES:
+        raise WorkerError('worker-input-invalid')
+    supported = os.name in {'posix', 'nt'}
+    hard = supported and sys.platform != 'darwin'
+    watchdog = False
+    if policy == 'supervised-alpha':
+        try:
+            import psutil
+            psutil.Process().memory_info()
+            watchdog = True
+        except Exception:
+            pass
+    return {
+        'policy': policy,
+        'platform': sys.platform,
+        'hard_memory_cap': hard,
+        'memory_enforcement': ('rss-watchdog' if not hard and watchdog else
+                               'platform-hard-limit' if hard else 'unavailable'),
+        'rss_watchdog_available': watchdog,
+        'available': supported and (hard or watchdog),
+        'bounded_input_output': supported,
+        'wall_timeout': supported,
+        'descendant_cleanup': ('windows-job' if os.name == 'nt' else
+                               'owned-process-group' if os.name == 'posix' else 'unavailable'),
+        'backend_memory_enforcement': ('rss-watchdog' if watchdog else 'go-soft-limit'),
+    }
+
+
+class _RSSWatchdog:
+    """Sample owned process RSS. This can overshoot and is never a hard limit."""
+
+    def __init__(self, maximum):
+        try:
+            import psutil
+            psutil.Process().memory_info()
+        except Exception:
+            raise WorkerError('resource-bound-unavailable') from None
+        self.psutil = psutil
+        self.maximum = maximum
+        self.root = None
+        self.known = {}
+        self.next_sample = 0.0
+
+    def attach(self, pid):
+        try:
+            self.root = self.psutil.Process(pid)
+        except self.psutil.NoSuchProcess:
+            pass
+        except self.psutil.Error:
+            raise WorkerError('resource-bound-unavailable') from None
+
+    def check(self):
+        now = time.monotonic()
+        if self.root is None or now < self.next_sample:
+            return
+        self.next_sample = now + 0.05
+        try:
+            processes = [self.root, *self.root.children(recursive=True)]
+            if len(processes) > 256:
+                raise WorkerError('worker-memory-limit')
+            total = 0
+            for process in processes:
+                try:
+                    self.known[(process.pid, process.create_time())] = process
+                    total += process.memory_info().rss
+                except (self.psutil.NoSuchProcess, self.psutil.ZombieProcess):
+                    continue
+            if total > self.maximum:
+                raise WorkerError('worker-memory-limit')
+        except (self.psutil.NoSuchProcess, self.psutil.ZombieProcess):
+            pass
+        except self.psutil.Error:
+            raise WorkerError('resource-bound-unavailable') from None
+
+    def cleanup(self):
+        # Process identities held by psutil prevent killing a reused PID. The
+        # process-group/job cleanup remains the primary descendant primitive.
+        for process in reversed(tuple(self.known.values())):
+            try:
+                process.kill()
+            except self.psutil.Error:
+                pass
+
+
 def worker_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     # Do not forward operator secrets to explicitly configured script checks.
     keep = ('PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL')
@@ -66,7 +159,8 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
                max_input_bytes: int = 80_000_000,
                env: Mapping[str, str] | None = None,
                cwd: str | os.PathLike | None = None,
-               cancel: Callable[[], bool] | None = None) -> WorkerResult:
+               cancel: Callable[[], bool] | None = None,
+               worker_policy: str = 'strict') -> WorkerResult:
     """Execute fixed argv with bounded output, timeout, and owned group cleanup."""
     started = time.monotonic()
     if (isinstance(argv, (str, bytes)) or not argv or any(type(x) is not str or not x or '\x00' in x for x in argv)
@@ -77,8 +171,18 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
         raise WorkerError('worker-input-invalid')
     if memory_bytes is not None and (type(memory_bytes) is not int or memory_bytes <= 0):
         raise WorkerError('worker-input-invalid')
+    if type(worker_policy) is not str or worker_policy not in WORKER_POLICIES:
+        raise WorkerError('worker-input-invalid')
     if os.name not in {'posix', 'nt'}:
         raise WorkerError('resource-bound-unavailable')
+    # Darwin does not provide a usable RLIMIT_AS contract for these workers.
+    # The alpha policy is an explicit alternative; strict never falls back.
+    if sys.platform == 'darwin' and memory_bytes is not None and worker_policy == 'strict':
+        raise WorkerError('resource-bound-unavailable')
+    watchdog = (_RSSWatchdog(memory_bytes or 512 * 1024 * 1024)
+                if worker_policy == 'supervised-alpha' and (sys.platform == 'darwin' or memory_bytes is None)
+                else None)
+    hard_memory = None if watchdog is not None and sys.platform == 'darwin' else memory_bytes
     job = None
     if os.name == 'nt':
         try:
@@ -88,7 +192,7 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
             raise WorkerError('resource-bound-unavailable') from None
     try:
         command = ([sys.executable, '-I', '-S', '-c', _POSIX_LAUNCH,
-                    str(memory_bytes or 0), *argv] if os.name == 'posix' else list(argv))
+                    str(hard_memory or 0), *argv] if os.name == 'posix' else list(argv))
         process = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, cwd=cwd, env=dict(env) if env is not None else worker_environment(),
@@ -151,6 +255,8 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
     deadline = started + timeout
     failure = None
     try:
+        if watchdog is not None:
+            watchdog.attach(process.pid)
         while process.poll() is None:
             if overflow.is_set():
                 failure = 'worker-output-limit'; break
@@ -158,7 +264,11 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
                 failure = 'cancelled'; break
             if time.monotonic() >= deadline:
                 failure = 'worker-timeout'; break
+            if watchdog is not None:
+                watchdog.check()
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+    except WorkerError as error:
+        failure = error.code
     except BaseException:
         failure = 'cancelled'
     finally:
@@ -173,6 +283,8 @@ def run_worker(argv: Sequence[str], data: bytes, *, timeout: float,
             job.terminate()
         elif process.poll() is None:
             process.kill()
+        if watchdog is not None:
+            watchdog.cleanup()
         process.wait()
         if job is not None:
             job.close()

@@ -83,7 +83,7 @@ _EXTRACT_CODES = frozenset({
     'input-limit', 'unsupported-format', 'format-mismatch', 'ambiguous-format',
     'decode-failed', 'encrypted', 'no-text', 'dependency-unavailable', 'extract-failed',
     'extract-timeout', 'extract-crashed', 'extract-output-limit', 'extract-part-limit',
-    'resource-bound-unavailable', 'cancelled',
+    'resource-bound-unavailable', 'worker-memory-limit', 'cancelled',
 })
 
 
@@ -110,7 +110,7 @@ def sniff(data: bytes, logical_path: str) -> tuple[str, str | None]:
 
 
 def extract(data: bytes, logical_path: str, *, limits=None, timeout: float | None = None,
-            plugins=(), extractor_overrides=None, cancel=None) -> ExtractionResult:
+            plugins=(), extractor_overrides=None, cancel=None, worker_policy='strict') -> ExtractionResult:
     bounds = ExtractionLimits.from_scan_limits(limits)
     if type(data) is not bytes or len(data) > bounds.max_file_bytes:
         return ExtractionResult('unknown', 'error', issues=('input-limit',))
@@ -132,7 +132,7 @@ def extract(data: bytes, logical_path: str, *, limits=None, timeout: float | Non
         selected_format = hint or (manifest.formats[0] if manifest is not None else 'extension')
         try:
             return registry.extract_component(instance, data, logical_path, format_id=selected_format,
-                                              limits=limits, timeout=timeout, cancel=cancel)
+                                              limits=limits, timeout=timeout, cancel=cancel, worker_policy=worker_policy)
         except registry.PluginError as error:
             return ExtractionResult(selected_format, 'error', issues=(error.code,))
     if issue:
@@ -154,10 +154,10 @@ def extract(data: bytes, logical_path: str, *, limits=None, timeout: float | Non
                              json.dumps(request, separators=(',', ':')).encode(),
                              timeout=timeout if timeout is not None else getattr(limits, 'extract_timeout_seconds', 25),
                              max_output_bytes=bounds.max_ipc_bytes, max_input_bytes=bounds.max_ipc_bytes,
-                             memory_bytes=bounds.worker_memory_bytes, env=env, cancel=cancel)
+                             memory_bytes=bounds.worker_memory_bytes, env=env, cancel=cancel, worker_policy=worker_policy)
     except WorkerError as error:
         code = {'worker-timeout': 'extract-timeout', 'worker-output-limit': 'extract-output-limit',
-                'resource-bound-unavailable': 'resource-bound-unavailable', 'cancelled': 'cancelled'}.get(error.code, 'extract-crashed')
+                'resource-bound-unavailable': 'resource-bound-unavailable', 'worker-memory-limit': 'worker-memory-limit', 'cancelled': 'cancelled'}.get(error.code, 'extract-crashed')
         return ExtractionResult(format_id, 'error', issues=(code,))
     if process.returncode:
         return ExtractionResult(format_id, 'error', issues=('extract-crashed',))

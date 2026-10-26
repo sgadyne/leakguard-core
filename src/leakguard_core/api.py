@@ -121,6 +121,12 @@ class Scanner:
         service = ScanService(config.to_mapping(), state_dir=state_dir, store=store)
         return cls(service)
 
+    def capabilities(self) -> dict[str, object]:
+        """Report selected execution policy and actual platform primitives."""
+        self._ensure_open()
+        from ._supervision import worker_capabilities
+        return worker_capabilities(self._service.config["worker_policy"])
+
     def scan(
         self,
         inputs: Iterable[FileInput | BytesInput],
@@ -277,7 +283,8 @@ _SAFE_CONFIG_FIELDS = frozenset({
     "watch_scopes", "scope_aliases", "profiles", "priority_paths", "exclude_roots",
     "exclude_components", "plugins", "credential_store", "gitleaks_executable",
     "gitleaks_config", "script_checks", "required_formats", "omissions",
-    "extractor_overrides", "configuration",
+    "extractor_overrides", "worker_policy", "scan_workers", "detection_profile",
+    "extension_registry", "configuration",
 })
 
 

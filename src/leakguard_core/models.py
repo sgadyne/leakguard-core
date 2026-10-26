@@ -100,6 +100,8 @@ class ErrorCode(StringEnum):
     EXTRACT_OUTPUT_LIMIT = "extract-output-limit"
     EXTRACT_PART_LIMIT = "extract-part-limit"
     RESOURCE_BOUND_UNAVAILABLE = "resource-bound-unavailable"
+    WORKER_MEMORY_LIMIT = "worker-memory-limit"
+    SUPERVISED_ALPHA_POLICY = "supervised-alpha-policy"
     DETECTOR_FAILED = "detector-failed"
     DETECTOR_TIMEOUT = "detector-timeout"
     DETECTOR_OUTPUT_INVALID = "detector-output-invalid"

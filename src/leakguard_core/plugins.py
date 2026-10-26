@@ -29,7 +29,7 @@ class PluginError(RuntimeError):
         self.code = code if code in {'plugin-invalid', 'plugin-timeout', 'plugin-crashed',
                                    'detector-output-invalid', 'detector-output-limit',
                                    'extract-output-limit', 'extract-part-limit',
-                                   'resource-bound-unavailable', 'cancelled', 'encrypted', 'no-text',
+                                   'resource-bound-unavailable', 'worker-memory-limit', 'cancelled', 'encrypted', 'no-text',
                                    'unsupported-format', 'decode-failed', 'extract-failed',
                                    'dependency-unavailable'} else 'plugin-invalid'
         super().__init__(self.code)
@@ -219,7 +219,7 @@ def _manifest_from_wire(value):
     return PluginManifest(**data)
 
 
-def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None):
+def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None, worker_policy='strict'):
     maximum = getattr(limits, 'max_ipc_bytes', 80_000_000)
     request = {'module': spec['module'], 'options': spec.get('options', {}),
                'component': spec.get('component'), 'operation': operation, **payload}
@@ -232,7 +232,7 @@ def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None
                              timeout=timeout if timeout is not None else getattr(limits, 'detector_timeout_seconds', 45),
                              max_output_bytes=maximum, max_input_bytes=maximum,
                              memory_bytes=getattr(limits, 'worker_memory_bytes', 512 * 1024 * 1024),
-                             env=worker_environment(), cancel=cancel)
+                             env=worker_environment(), cancel=cancel, worker_policy=worker_policy)
         if process.returncode:
             raise PluginError('plugin-crashed')
         response = _loads(process.stdout)
@@ -243,7 +243,7 @@ def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None
         return response
     except WorkerError as error:
         raise PluginError({'worker-timeout': 'plugin-timeout', 'worker-output-limit': 'detector-output-limit',
-                           'resource-bound-unavailable': 'resource-bound-unavailable', 'cancelled': 'cancelled'}.get(error.code, 'plugin-crashed')) from None
+                           'resource-bound-unavailable': 'resource-bound-unavailable', 'worker-memory-limit': 'worker-memory-limit', 'cancelled': 'cancelled'}.get(error.code, 'plugin-crashed')) from None
     except PluginError:
         raise
     except BaseException as error:
@@ -252,7 +252,7 @@ def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None
         raise PluginError() from None
 
 
-def load(specifications, *, timeout=10, limits=None):
+def load(specifications, *, timeout=10, limits=None, worker_policy='strict'):
     if type(specifications) not in {list, tuple} or len(specifications) > 100:
         raise PluginError()
     loaded = []
@@ -262,7 +262,7 @@ def load(specifications, *, timeout=10, limits=None):
                     or type(spec['module']) is not str or not _MODULE.fullmatch(spec['module'])
                     or type(spec.get('options', {})) is not dict):
                 raise PluginError()
-            response = _request(spec, 'inspect', {}, timeout=timeout, limits=limits)
+            response = _request(spec, 'inspect', {}, timeout=timeout, limits=limits, worker_policy=worker_policy)
             if set(response) != {'api_version', 'manifest', 'has_extract'} or type(response['api_version']) is not int or response['api_version'] not in {1, 2} or type(response['has_extract']) is not bool:
                 raise PluginError()
             manifest = _manifest_from_wire(response['manifest']) if response['manifest'] is not None else None
@@ -300,7 +300,7 @@ def _validated_findings(items, text, manifest=None, maximum=100_000):
         yield item
 
 
-def detect(instances, text, path, part, *, format_id='text', timeout=None, limits=None, cancel=None):
+def detect(instances, text, path, part, *, format_id='text', timeout=None, limits=None, cancel=None, worker_policy='strict'):
     maximum = getattr(limits, 'max_findings', 100_000)
     for instance in instances:
         if getattr(instance, 'manifest', None) is not None and instance.manifest.kind != 'detector':
@@ -309,7 +309,7 @@ def detect(instances, text, path, part, *, format_id='text', timeout=None, limit
             if isinstance(instance, LoadedPlugin):
                 response = _request({'module': instance.module, 'options': instance.options}, 'detect',
                                     {'text': text, 'path': str(path), 'part': part, 'format_id': format_id,
-                                     'max_findings': maximum}, timeout=timeout, limits=limits, cancel=cancel)
+                                     'max_findings': maximum}, timeout=timeout, limits=limits, cancel=cancel, worker_policy=worker_policy)
                 if set(response) != {'findings'} or type(response['findings']) is not list:
                     raise PluginError('detector-output-invalid')
                 if len(response['findings']) > maximum:
@@ -323,8 +323,10 @@ def detect(instances, text, path, part, *, format_id='text', timeout=None, limit
                 # In-memory instances exist only for the deprecated internal API;
                 # persistent configured deployment always uses LoadedPlugin.
                 if getattr(instance, 'manifest', None) is not None:
+                    from .script_checks import ScriptDetector
+                    extra = {'worker_policy': worker_policy} if isinstance(instance, ScriptDetector) else {}
                     items = instance.detect(text, DetectionContext(str(path), part, format_id),
-                                            timeout=timeout if timeout is not None else 45, limits=limits, cancel=cancel)
+                                            timeout=timeout if timeout is not None else 45, limits=limits, cancel=cancel, **extra)
                 else:
                     items = instance.detect(text, path, part)
             yield from _validated_findings(items, text, getattr(instance, 'manifest', None), maximum)
@@ -356,7 +358,7 @@ def _validate_extraction(result, manifest, bounds):
     return parts
 
 
-def extract(instances, data, path, *, format_id=None, overrides=None, timeout=None, limits=None, cancel=None):
+def extract(instances, data, path, *, format_id=None, overrides=None, timeout=None, limits=None, cancel=None, worker_policy='strict'):
     bounds = ExtractionLimits.from_scan_limits(limits)
     for instance in instances:
         manifest = getattr(instance, 'manifest', None)
@@ -369,7 +371,7 @@ def extract(instances, data, path, *, format_id=None, overrides=None, timeout=No
         if isinstance(instance, LoadedPlugin):
             if not instance.has_extract:
                 continue
-            result = extract_component(instance, data, path, format_id=format_id, timeout=timeout, limits=limits, cancel=cancel)
+            result = extract_component(instance, data, path, format_id=format_id, timeout=timeout, limits=limits, cancel=cancel, worker_policy=worker_policy)
             if result.disposition == 'unsupported':
                 continue
             if result.issues or result.disposition != 'extracted':
@@ -401,7 +403,7 @@ def load_scripts(specifications):
     return [ScriptDetector.from_mapping(spec) for spec in specifications]
 
 
-def extract_component(instance, data, path, *, format_id=None, timeout=None, limits=None, cancel=None):
+def extract_component(instance, data, path, *, format_id=None, timeout=None, limits=None, cancel=None, worker_policy='strict'):
     """Run one explicitly selected extractor, preserving disposition and issues."""
     from .extraction import ExtractionResult, TextPart
     if not isinstance(instance, LoadedPlugin) or not instance.has_extract:
@@ -419,7 +421,7 @@ def extract_component(instance, data, path, *, format_id=None, timeout=None, lim
     response = _request({'module': instance.module, 'options': instance.options}, 'extract',
                         {'data': base64.b64encode(data).decode('ascii'), 'path': str(path),
                          'format_id': format_id or (manifest.formats[0] if manifest else 'extension'),
-                         'limits': asdict(bounds)}, timeout=timeout, limits=limits, cancel=cancel)
+                         'limits': asdict(bounds)}, timeout=timeout, limits=limits, cancel=cancel, worker_policy=worker_policy)
     if set(response) != {'parts', 'disposition', 'issues'}:
         raise PluginError()
     disposition = response['disposition']

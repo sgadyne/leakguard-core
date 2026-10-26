@@ -41,7 +41,7 @@ class ScriptDetector:
                 artifacts.append('unavailable')
         return hashlib.sha256(json.dumps([self.argv, artifacts], separators=(',', ':')).encode()).hexdigest()
 
-    def detect(self, text, path, part=None, *, format_id='text', timeout=45, limits=None, cancel=None):
+    def detect(self, text, path, part=None, *, format_id='text', timeout=45, limits=None, cancel=None, worker_policy='strict'):
         if isinstance(path, DetectionContext):
             context = path
         else:
@@ -55,7 +55,7 @@ class ScriptDetector:
                                     timeout=timeout, max_output_bytes=getattr(limits, 'max_ipc_bytes', 80_000_000),
                                     max_input_bytes=getattr(limits, 'max_ipc_bytes', 80_000_000),
                                     memory_bytes=getattr(limits, 'worker_memory_bytes', 512 * 1024 * 1024),
-                                    env=worker_environment(), cwd=scratch, cancel=cancel)
+                                    env=worker_environment(), cwd=scratch, cancel=cancel, worker_policy=worker_policy)
             if output.returncode:
                 raise PluginError('plugin-crashed')
             value = _loads(output.stdout)
@@ -71,7 +71,7 @@ class ScriptDetector:
             return tuple(_validated_findings(findings, text, self.manifest, maximum))
         except WorkerError as error:
             raise PluginError({'worker-timeout': 'plugin-timeout', 'worker-output-limit': 'detector-output-limit',
-                               'resource-bound-unavailable': 'resource-bound-unavailable', 'cancelled': 'cancelled'}.get(error.code, 'plugin-crashed')) from None
+                               'resource-bound-unavailable': 'resource-bound-unavailable', 'worker-memory-limit': 'worker-memory-limit', 'cancelled': 'cancelled'}.get(error.code, 'plugin-crashed')) from None
         except PluginError:
             raise
         except Exception:
