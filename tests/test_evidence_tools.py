@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 import venv
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -96,6 +97,33 @@ class IndependentLabelTests(unittest.TestCase):
 
 
 class ProductJourneyArtifactTests(unittest.TestCase):
+    def test_release_provenance_binds_source_commit_and_artifact_hash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            artifact = Path(folder) / "release.zip"
+            manifest = {
+                "source_commit": "a" * 40,
+                "release_version": "0.2.0-alpha.1",
+                "target_platform": "linux-x86_64",
+                "target_python": "3.13",
+                "release_quality": "complete",
+                "packages": [
+                    {"name": name, "version": "0.2.0"}
+                    for name in check_product_journey._PACKAGES
+                ],
+                "backend_artifacts": [
+                    {"platform": "linux-x86_64", "sha256": "b" * 64},
+                ],
+            }
+            with zipfile.ZipFile(artifact, "w") as archive:
+                archive.writestr("LeakGuard/release.json", json.dumps(manifest))
+            provenance = check_product_journey._bundle_provenance(artifact)
+            self.assertTrue(provenance["available"])
+            self.assertEqual(provenance["source_commit"], "a" * 40)
+            self.assertEqual(provenance["artifact_sha256"],
+                             hashlib.sha256(artifact.read_bytes()).hexdigest())
+            self.assertEqual(provenance["package_versions"],
+                             {name: "0.2.0" for name in check_product_journey._PACKAGES})
+
     def test_artifact_review_allows_only_declared_source_and_encrypted_payloads(self):
         with tempfile.TemporaryDirectory() as folder:
             product = Path(folder) / "product"

@@ -29,6 +29,7 @@ import threading
 import time
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 import uuid
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -223,7 +224,9 @@ for name in names:
         versions[name] = metadata.version(name)
     except metadata.PackageNotFoundError:
         versions[name] = None
-print(json.dumps({'prefix': sys.prefix, 'executable': sys.executable, 'versions': versions}))
+python_version = f'{sys.version_info.major}.{sys.version_info.minor}'
+print(json.dumps({'prefix': sys.prefix, 'executable': sys.executable,
+                  'python_version': python_version, 'versions': versions}))
 """
     try:
         result = subprocess.run([str(python), "-c", probe], stdin=subprocess.DEVNULL,
@@ -247,8 +250,101 @@ print(json.dumps({'prefix': sys.prefix, 'executable': sys.executable, 'versions'
     versions = data["versions"]
     if any(type(versions.get(name)) is not str for name in _PACKAGES):
         raise JourneyFailure("installed-package-missing")
+    if type(data.get("python_version")) is not str:
+        raise JourneyFailure("installed-runtime-probe-failed")
     return {"python": Path(data["executable"]).name,
+            "python_version": data["python_version"],
             "versions": {name: versions[name] for name in _PACKAGES}}
+
+
+def _bundle_provenance(artifact: str | Path | None) -> dict:
+    if artifact is None:
+        return {"available": False}
+    path = Path(artifact).expanduser().absolute()
+    if path.is_symlink():
+        raise JourneyFailure("release-artifact-invalid")
+    try:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1_073_741_824:
+            raise JourneyFailure("release-artifact-invalid")
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        with zipfile.ZipFile(path) as archive:
+            manifests = [item for item in archive.infolist()
+                         if item.filename == "LeakGuard/release.json" and not item.is_dir()]
+            if len(manifests) != 1 or manifests[0].file_size > 1_000_000:
+                raise JourneyFailure("release-manifest-invalid")
+            with archive.open(manifests[0]) as stream:
+                raw = stream.read(1_000_001)
+        if len(raw) > 1_000_000:
+            raise JourneyFailure("release-manifest-invalid")
+
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate manifest key")
+                result[key] = value
+            return result
+
+        manifest = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+    except JourneyFailure:
+        raise
+    except (OSError, ValueError, UnicodeError, zipfile.BadZipFile, RuntimeError):
+        raise JourneyFailure("release-manifest-invalid") from None
+    if type(manifest) is not dict:
+        raise JourneyFailure("release-manifest-invalid")
+    source_commit = manifest.get("source_commit")
+    release_version = manifest.get("release_version")
+    target_platform = manifest.get("target_platform")
+    target_python = manifest.get("target_python")
+    quality = manifest.get("release_quality")
+    if (type(source_commit) is not str or not re.fullmatch(r"[0-9a-fA-F]{7,64}", source_commit)
+            or type(release_version) is not str or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,80}", release_version)
+            or type(target_platform) is not str or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", target_platform)
+            or type(target_python) is not str or not re.fullmatch(r"3\.[0-9]{1,2}", target_python)
+            or quality != "complete"):
+        raise JourneyFailure("release-manifest-invalid")
+    packages = manifest.get("packages")
+    if type(packages) is not list:
+        raise JourneyFailure("release-manifest-invalid")
+    normalized = {}
+    for row in packages:
+        if type(row) is not dict:
+            raise JourneyFailure("release-manifest-invalid")
+        name, version = row.get("name"), row.get("version")
+        if type(name) is not str or type(version) is not str:
+            raise JourneyFailure("release-manifest-invalid")
+        key = re.sub(r"[-_.]+", "-", name).lower()
+        if key in normalized:
+            raise JourneyFailure("release-manifest-invalid")
+        normalized[key] = version
+    package_versions = {name: normalized.get(name) for name in _PACKAGES}
+    if any(type(version) is not str for version in package_versions.values()):
+        raise JourneyFailure("release-manifest-packages-missing")
+    backends = manifest.get("backend_artifacts")
+    backend = next((item for item in backends if type(item) is dict
+                    and item.get("platform") == target_platform), None) if type(backends) is list else None
+    backend_sha256 = backend.get("sha256") if backend else None
+    if type(backend_sha256) is not str or not re.fullmatch(r"[0-9a-f]{64}", backend_sha256):
+        raise JourneyFailure("release-manifest-backend-missing")
+    return {
+        "available": True,
+        "source_commit": source_commit.lower(),
+        "artifact_sha256": digest.hexdigest(),
+        "artifact_bytes": info.st_size,
+        "release_version": release_version,
+        "target_platform": target_platform,
+        "target_python": target_python,
+        "release_quality": quality,
+        "package_versions": package_versions,
+        "backend_sha256": backend_sha256,
+    }
 
 
 def _child_env() -> dict[str, str]:
@@ -432,8 +528,17 @@ def _artifact_review(product: Path, logs: bytes, bodies: list[tuple[str, bytes, 
 
 
 def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
-                timeout: float, worker_policy: str) -> dict:
+                timeout: float, worker_policy: str,
+                release_provenance: dict) -> dict:
     runtime = _runtime_probe(python, buddy, min(timeout, 30))
+    backend_digest = hashlib.sha256(backend.read_bytes()).hexdigest()
+    if release_provenance.get("available"):
+        if runtime["versions"] != release_provenance.get("package_versions"):
+            raise JourneyFailure("installed-runtime-manifest-mismatch")
+        if runtime["python_version"] != release_provenance.get("target_python"):
+            raise JourneyFailure("installed-runtime-python-mismatch")
+        if backend_digest != release_provenance.get("backend_sha256"):
+            raise JourneyFailure("installed-backend-manifest-mismatch")
     fixture, expected_rule, fixture_id = _load_fixture()
     product = work / "product"
     product.mkdir(mode=0o700)
@@ -478,11 +583,14 @@ def _do_journey(*, python: Path, buddy: Path, backend: Path, work: Path,
     checks: dict[str, bool] = {}
     details: dict = {"synthetic_case_id": fixture_id, "expected_rule": expected_rule,
                      "fixture_sha256": fixture_digest, "worker_policy": worker_policy,
-                     "runtime": runtime}
+                     "runtime": runtime, "release_provenance": release_provenance}
     log_buffers: list[bytes] = []
     http_bodies: list[tuple[str, bytes, bool]] = []
     active: BuddyProcess | None = None
     client: BuddyClient | None = None
+    if release_provenance.get("available"):
+        checks["installed_runtime_matches_release_manifest"] = True
+        checks["installed_backend_matches_release_manifest"] = True
 
     def start_and_authenticate() -> tuple[BuddyProcess, BuddyClient, str]:
         nonlocal active
@@ -765,7 +873,7 @@ def _safe_path(value: str, *, label: str, executable: bool = False) -> Path:
     return path if label == "python" else resolved
 
 
-def run(args) -> dict:
+def run(args, *, release_provenance: dict | None = None) -> dict:
     work = Path(args.work).expanduser().absolute()
     if work.is_symlink():
         raise JourneyFailure("work-path-symlink")
@@ -792,11 +900,14 @@ def run(args) -> dict:
     backend = _safe_path(args.gitleaks, label="backend", executable=True)
     if args.worker_policy not in {"strict", "supervised-alpha"}:
         raise JourneyFailure("worker-policy-invalid")
+    if release_provenance is None:
+        release_provenance = _bundle_provenance(getattr(args, "artifact", None))
     started = dt.datetime.now(dt.timezone.utc)
     before = time.monotonic()
     try:
         result = _do_journey(python=python, buddy=buddy, backend=backend, work=work,
-                             timeout=float(args.timeout_seconds), worker_policy=args.worker_policy)
+                             timeout=float(args.timeout_seconds), worker_policy=args.worker_policy,
+                             release_provenance=release_provenance)
     finally:
         product = work / "product"
         if product.exists() and not product.is_symlink():
@@ -830,12 +941,14 @@ def main(argv=None) -> int:
     parser.add_argument("--python", required=True, help="Python executable in the installed private runtime")
     parser.add_argument("--buddy", required=True, help="Installed leakguard-buddy executable")
     parser.add_argument("--gitleaks", required=True, help="Pinned Gitleaks backend executable")
+    parser.add_argument("--artifact", help="Immutable installed release ZIP; records source commit and verifies runtime packages/backend against its manifest")
     parser.add_argument("--work", required=True, help="New, empty, explicitly-owned work directory")
     parser.add_argument("--output", help="Redacted JSON receipt path inside --work")
     parser.add_argument("--worker-policy", choices=("strict", "supervised-alpha"),
                         default="supervised-alpha" if sys.platform == "darwin" else "strict")
     parser.add_argument("--timeout-seconds", type=int, default=60)
     args = parser.parse_args(argv)
+    release_provenance: dict = {"available": False}
     started = dt.datetime.now(dt.timezone.utc)
     work_path = Path(args.work).expanduser().absolute()
     output: Path | None
@@ -854,19 +967,22 @@ def main(argv=None) -> int:
     try:
         if not 10 <= args.timeout_seconds <= 180:
             raise JourneyFailure("timeout-invalid")
-        value = run(args)
+        release_provenance = _bundle_provenance(args.artifact)
+        value = run(args, release_provenance=release_provenance)
         exit_code = 0 if value.get("outcome") == "passed" else 1
     except JourneyFailure as error:
         value = {"schema_version": 1, "lane": "evidence", "outcome": "failed",
                  "error_code": error.code, "checks": {}, "platform": platform.system().lower(),
                  "machine": platform.machine(), "started_utc": started.isoformat(),
-                 "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat()}
+                 "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                 "release_provenance": release_provenance}
         exit_code = 1
     except Exception:
         value = {"schema_version": 1, "lane": "evidence", "outcome": "failed",
                  "error_code": "journey-failed", "checks": {}, "platform": platform.system().lower(),
                  "machine": platform.machine(), "started_utc": started.isoformat(),
-                 "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat()}
+                 "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                 "release_provenance": release_provenance}
         exit_code = 2
     if "finished_utc" not in value:
         value["finished_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
