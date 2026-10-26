@@ -43,6 +43,7 @@ INSTALLED_TEST_TOOL_FILES = (
     "run_acceptance.py",
     "run_independent_labels.py",
     "check_product_journey.py",
+    "check_installed_core.py",
 )
 LOCAL_EXTENSION_PROJECTS = (
     ("examples/v2_detector", "leakguard-example-detector"),

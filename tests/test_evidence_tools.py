@@ -52,6 +52,11 @@ product_spec = importlib.util.spec_from_file_location("evidence_product_journey"
 check_product_journey = importlib.util.module_from_spec(product_spec)
 assert product_spec and product_spec.loader
 product_spec.loader.exec_module(check_product_journey)
+INSTALLED_CORE = ROOT / "tools" / "check_installed_core.py"
+installed_core_spec = importlib.util.spec_from_file_location("evidence_check_installed_core", INSTALLED_CORE)
+assert installed_core_spec and installed_core_spec.loader
+check_installed_core = importlib.util.module_from_spec(installed_core_spec)
+installed_core_spec.loader.exec_module(check_installed_core)
 
 
 class IndependentLabelTests(unittest.TestCase):
@@ -118,6 +123,7 @@ class AcceptanceStagingTests(unittest.TestCase):
         expected_tools = {
             "_safe_inputs.py", "benchmark_scan.py", "run_corpus.py",
             "run_acceptance.py", "run_independent_labels.py", "check_product_journey.py",
+            "check_installed_core.py",
         }
         self.assertEqual(set(run_acceptance.INSTALLED_TEST_TOOL_FILES), expected_tools)
         self.assertEqual(set(run_acceptance.INSTALLED_TEST_DEPLOY_FILES),
@@ -143,6 +149,31 @@ class AcceptanceStagingTests(unittest.TestCase):
                              "check_product_journey.py")
             self.assertEqual((deploy_dir / "default-config.json").read_text(),
                              "default-config.json")
+
+    def test_core_driver_allows_sibling_inputs_under_request_root(self):
+        with tempfile.TemporaryDirectory() as folder:
+            request_root = Path(folder)
+            config = request_root / "policy.json"
+            config.write_text('{"worker_policy":"supervised-alpha"}\n', encoding="ascii")
+            backend = request_root / "gitleaks"
+            backend.write_bytes(b"synthetic executable placeholder")
+            backend.chmod(0o700)
+            wheelhouse = request_root / "release" / "wheelhouse"
+            wheelhouse.mkdir(parents=True)
+            fixture_wheels = request_root / "fixture-wheels"
+            fixture_wheels.mkdir()
+            work = request_root / "core-check"
+            args = SimpleNamespace(
+                config=str(config), gitleaks=str(backend), wheelhouse=str(wheelhouse),
+                fixture_wheels=str(fixture_wheels), work=str(work),
+            )
+            with patch.object(
+                    check_installed_core, "_validate_release_wheels",
+                    side_effect=check_installed_core.DriverFailure("next-validation-stage")):
+                with self.assertRaises(check_installed_core.DriverFailure) as caught:
+                    check_installed_core._execute(args, {})
+            self.assertEqual(caught.exception.stage, "next-validation-stage")
+            self.assertTrue(work.is_dir())
 
     def test_local_extension_wheel_inventory_includes_both_optional_packs(self):
         self.assertEqual(dict(run_acceptance.LOCAL_EXTENSION_PROJECTS), {

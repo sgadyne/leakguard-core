@@ -258,13 +258,14 @@ def _execute(args, evidence: dict) -> dict:
     fixture_directory = _directory(args.fixture_wheels, "fixture-directory-invalid")
     evidence["worker_policy"] = WORKER_POLICY
 
-    work = Path(args.work).absolute()
+    work = Path(args.work).resolve()
     if work.is_symlink() or work.exists():
         raise DriverFailure("work-directory-not-new")
-    protected = [SOURCE_ROOT, wheelhouse, fixture_directory,
-                 config_input.parent, gitleaks_input.parent]
-    if any(work == item or work.is_relative_to(item) or item.is_relative_to(work)
-           for item in protected):
+    protected_dirs = [SOURCE_ROOT, wheelhouse, fixture_directory]
+    protected_files = [config_input, gitleaks_input]
+    if (any(work == item or work.is_relative_to(item) or item.is_relative_to(work)
+            for item in protected_dirs)
+            or any(item == work or item.is_relative_to(work) for item in protected_files)):
         raise DriverFailure("work-directory-overlap")
     work.mkdir(mode=0o700, parents=True)
     evidence["work_directory"] = str(work)
