@@ -166,6 +166,20 @@ class Scanner:
         from ._supervision import worker_capabilities
         return worker_capabilities(self._service.config["worker_policy"])
 
+    def work_identity(self, *, policy: ScanPolicy, limits: ScanLimits) -> dict[str, str]:
+        """Identify this prepared service's effective policy and runtime bytes.
+
+        A host can compare this value before resuming persisted jobs. The scan
+        itself still validates runtime artifacts before admission/publication.
+        """
+        self._ensure_open()
+        if type(policy) is not ScanPolicy or type(limits) is not ScanLimits:
+            raise TypeError('policy and limits must be ScanPolicy and ScanLimits')
+        from . import scan_policy
+        effective = scan_policy.effective_policy(policy, self._service.config)
+        return {'policy_id': scan_policy.policy_identity(config=self._service.config, policy=effective, limits=limits),
+                'runtime_id': self._service._runtime}
+
     def scan(
         self,
         inputs: Iterable[FileInput | BytesInput],
