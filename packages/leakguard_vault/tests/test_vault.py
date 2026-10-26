@@ -253,3 +253,24 @@ def test_material_capability_invalid_after_store_lock(tmp_path):
     assert snapshot.valid()
     store.close()
     assert snapshot.valid() is False
+
+
+@pytest.mark.skipif(not hasattr(__import__('os'), 'mkfifo'), reason='POSIX FIFO')
+def test_nonregular_envelope_is_rejected_without_blocking(tmp_path):
+    import os
+    import subprocess
+    import sys
+    fifo = tmp_path / 'substituted-envelope'
+    os.mkfifo(fifo, 0o600)
+    code = """from pathlib import Path
+import sys
+from leakguard_vault._files import read_bounded
+from leakguard_vault import VaultError
+try:
+ read_bounded(Path(sys.argv[1]),1000)
+except VaultError as error:
+ sys.exit(0 if error.code=='vault-format-invalid' else 2)
+sys.exit(3)
+"""
+    completed = subprocess.run([sys.executable, '-c', code, str(fifo)], capture_output=True, timeout=3)
+    assert completed.returncode == 0

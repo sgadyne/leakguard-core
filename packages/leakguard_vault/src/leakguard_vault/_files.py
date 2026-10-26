@@ -23,7 +23,8 @@ def _parent(path: Path) -> None:
 def read_bounded(path: Path, maximum: int) -> bytes:
     descriptor = None
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) |
+                             getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
             raise VaultError("vault-format-invalid")
