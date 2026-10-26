@@ -517,6 +517,7 @@ class ScanService:
             OBSERVATIONS.close_scope(self._observation_scope)
             if self._navigation is not None:
                 self._navigation.close()
+            plugins.close(getattr(self, '_plugins', ()))
             if self._owns_store:
                 self.store.close()
             raise
@@ -527,6 +528,7 @@ class ScanService:
             from ._result_cache import OBSERVATIONS
             OBSERVATIONS.close_scope(self._observation_scope)
             self._navigation.close()
+            plugins.close(self._plugins)
             if self._owns_store:
                 self.store.close()
 
@@ -542,6 +544,9 @@ class ScanService:
     def navigation_capabilities(self):
         return dict(self._navigation.capabilities(),
                     same_filesystem=self.config['navigation_same_filesystem'])
+
+    def plugin_session_metrics(self):
+        return plugins.session_metrics(self._plugins)
 
     def _material_snapshot(self, limits):
         try:
@@ -1449,7 +1454,9 @@ class ScanService:
                     for item in plugins.detect([instance], part.text, source.path, part.part_id, format_id=part.format_id, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), limits=limits, cancel=cancel, worker_policy=self.config.get('worker_policy', 'strict')):
                         if not admit_finding(part):
                             break
-                        findings.append(self._finding(snapshot, part, item.rule, item.line, item.line, item.severity, plugins.detector_id(instance), mode=policy.mode))
+                        analysis = getattr(item, 'analysis', None)
+                        end = part.text.count('\n', 0, analysis.end - 1) + 1 if analysis is not None else item.line
+                        findings.append(self._finding(snapshot, part, item.rule, item.line, end, item.severity, plugins.detector_id(instance), mode=policy.mode, analysis=analysis))
                 except Exception as error:
                     issues.append(m.CoverageIssue(self._error_code(getattr(error, 'code', 'detector-failed')), source, part.part_id, True))
                 if finding_admission_stopped:
@@ -1459,7 +1466,7 @@ class ScanService:
         rank = {'block': 3, 'review': 2, 'info': 1}
         merged = {}
         for finding in findings:
-            key = (finding.part_id, finding.start_line, finding.end_line, finding.rule)
+            key = finding.id if finding.analysis is not None else (finding.part_id, finding.start_line, finding.end_line, finding.rule)
             if key not in merged or rank[finding.severity.value] > rank[merged[key].severity.value]:
                 merged[key] = finding
         # _run_inner validates each detached source/context once, after all work
@@ -1478,7 +1485,7 @@ class ScanService:
                 return omission.id
         return None
 
-    def _finding(self, snapshot, part, rule, first, last, severity, detector_id, *, mode=None):
+    def _finding(self, snapshot, part, rule, first, last, severity, detector_id, *, mode=None, analysis=None):
         from . import models as m
         if isinstance(first, bool) or isinstance(last, bool) or not 1 <= first <= last <= part.text.count('\n') + 1:
             raise ValueError('detector-output-invalid')
@@ -1487,7 +1494,7 @@ class ScanService:
         effective_severity = 'review' if inventory_review else severity
         informational = ((detector_id == 'plugin-sensitive-basics' and rule.startswith('pii-'))
                          or (detector_id == 'plugin-firm-example' and rule.startswith('firm-')))
-        classification = 'heuristic' if rule == 'generic-api-key' or informational else 'credential-candidate'
+        classification = 'heuristic' if rule == 'generic-api-key' or informational or analysis is not None else 'credential-candidate'
         final_severity = effective_severity
         proof_id = None
         if detector_id == 'gitleaks':
@@ -1506,8 +1513,11 @@ class ScanService:
                 classification = 'heuristic' if rule == 'generic-api-key' else 'credential-candidate'
                 proof_id = None
         identity = [snapshot.source.kind.value, snapshot.source.path, snapshot.source.repository, snapshot.source.commit, snapshot.source.index_tree_oid, snapshot.content.digest, part.part_id, first, last, rule, detector_id]
+        if analysis is not None:
+            identity.append([analysis.start, analysis.end, analysis.entity_type, analysis.recognizer_id,
+                             analysis.analyzer_id, analysis.analyzer_version, analysis.model_id])
         finding_id = hashlib.sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
-        return m.FindingRecord(finding_id, snapshot.source, part.part_id, first, last, rule, detector_id, m.DetectorSeverity(detector_severity), m.FindingSeverity(final_severity), m.FindingClassification(classification), proof_id)
+        return m.FindingRecord(finding_id, snapshot.source, part.part_id, first, last, rule, detector_id, m.DetectorSeverity(detector_severity), m.FindingSeverity(final_severity), m.FindingClassification(classification), proof_id, analysis)
 
 
 def _legacy_origin(result):

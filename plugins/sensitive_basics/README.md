@@ -52,3 +52,10 @@ case sidecar with those firm-specific identifiers. Promote only rules that the
 organization has reviewed and wants to block. V2 plugins are trusted local code
 running with the scanner account's permissions; process supervision is not an
 operating-system sandbox.
+# Compatibility status
+
+New sensitive-data profiles should use the maintained Presidio adapter in
+[`../presidio_detector`](../presidio_detector), with firm recognizers registered
+through Presidio. This package remains available for existing profiles and
+baseline comparisons. The new profile does not enable both overlapping PII
+detectors. No installed configuration is migrated automatically.

@@ -166,7 +166,8 @@ class Scanner:
         from ._supervision import worker_capabilities
         return dict(worker_capabilities(self._service.config["worker_policy"]),
                     navigation=self._service.navigation_capabilities(),
-                    observation_cache=self._service.cache_metrics())
+                    observation_cache=self._service.cache_metrics(),
+                    plugin_sessions=self._service.plugin_session_metrics())
 
     def clear_memory_cache(self) -> None:
         """Clear this scanner's redacted L1 and fence late cache writers."""
@@ -346,6 +347,7 @@ _SAFE_CONFIG_FIELDS = frozenset({
     "extractor_overrides", "worker_policy", "scan_workers", "detection_profile",
     "extension_registry", "observation_backend", "observation_path", "configuration",
     "navigation_helper", "navigation_same_filesystem",
+    "worker_memory_bytes",
 })
 
 

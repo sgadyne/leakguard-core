@@ -292,6 +292,7 @@ def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases
             issues=(ConformanceIssue("setup", ConformanceCode.CASE_INVALID),),
         )
 
+    loaded = ()
     try:
         from . import plugins
         try:
@@ -326,6 +327,9 @@ def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases
             passed_cases=0, failed_cases=count, skipped_cases=0,
             issues=(ConformanceIssue("setup", ConformanceCode.SETUP_FAILED),),
         )
+    finally:
+        if loaded:
+            plugins.close(loaded)
 
 
 def _plugin_issue(code: str, check_id: str, case_id: str | None,

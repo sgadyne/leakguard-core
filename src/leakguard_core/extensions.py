@@ -1137,6 +1137,7 @@ class ExtensionRegistry:
     def check(self, extension_id, *, worker_policy='strict'):
         from . import plugins, conformance
         entry = self._entry(extension_id)
+        handle = None
         deadline = time.monotonic() + 60
         def detect(*args, **kwargs):
             remaining = deadline - time.monotonic()
@@ -1172,6 +1173,9 @@ class ExtensionRegistry:
             raise
         except Exception:
             raise ExtensionError('extension-check-failed') from None
+        finally:
+            if handle is not None:
+                plugins.close((handle,))
 
     def enable(self, extension_id, *, profile='firm', worker_policy='strict'):
         _profile(profile)

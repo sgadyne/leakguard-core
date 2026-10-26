@@ -341,6 +341,33 @@ class RuntimeIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalysisMetadata:
+    """Versioned value-free locations and analyzer provenance for one text part."""
+    schema_version: int
+    start: int
+    end: int
+    entity_type: str
+    score: float | None
+    recognizer_id: str
+    analyzer_id: str
+    analyzer_version: str
+    model_id: str
+
+    def __post_init__(self):
+        if (type(self.schema_version) is not int or self.schema_version != 1
+                or type(self.start) is not int or type(self.end) is not int
+                or not 0 <= self.start < self.end):
+            raise ValueError('analysis-location-invalid')
+        if (self.score is not None and (type(self.score) not in {int, float}
+                or not math.isfinite(self.score) or not 0 <= self.score <= 1)):
+            raise ValueError('analysis-score-invalid')
+        for name in ('entity_type', 'recognizer_id', 'analyzer_id', 'analyzer_version', 'model_id'):
+            value = getattr(self, name)
+            if type(value) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:+-]{0,199}', value):
+                raise ValueError('analysis-provenance-invalid')
+
+
+@dataclass(frozen=True, slots=True)
 class FindingRecord:
     id: str
     source: SourceRef
@@ -353,6 +380,7 @@ class FindingRecord:
     severity: FindingSeverity
     classification: FindingClassification
     proof_id: str | None = None
+    analysis: AnalysisMetadata | None = None
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[0-9a-f]{64}", self.id):
@@ -372,6 +400,8 @@ class FindingRecord:
         _require_enum("severity", self.severity, FindingSeverity)
         _require_enum("classification", self.classification, FindingClassification)
         _require_optional_string("proof_id", self.proof_id)
+        if self.analysis is not None and type(self.analysis) is not AnalysisMetadata:
+            raise TypeError('analysis must be AnalysisMetadata')
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,13 +663,17 @@ def _runtime_dict(item: RuntimeIdentity) -> dict[str, object]:
 
 
 def _finding_dict(item: FindingRecord) -> dict[str, object]:
-    return {
+    result = {
         "id": item.id, "source": _source_dict(item.source), "part_id": item.part_id,
         "start_line": item.start_line, "end_line": item.end_line, "rule": item.rule,
         "detector_id": item.detector_id, "detector_severity": item.detector_severity.value,
         "severity": item.severity.value, "classification": item.classification.value,
         "proof_id": item.proof_id,
     }
+    if item.analysis is not None:
+        from dataclasses import asdict
+        result['analysis'] = asdict(item.analysis)
+    return result
 
 
 def _issue_dict(item: CoverageIssue) -> dict[str, object]:

@@ -33,6 +33,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_files=args.max_files,
             max_file_bytes=config_values["max_file_bytes"],
             detector_timeout_seconds=config_values["scan_timeout_seconds"],
+            worker_memory_bytes=config_values['worker_memory_bytes'],
         )
         with Scanner.open(config=config, state_dir=state_dir) as scanner:
             if args.command == "scan":
@@ -129,11 +130,18 @@ def _doctor(config: dict[str, object], output_format: str) -> int:
     except NavigationError as error:
         navigation = {'backend': 'rust-ignore', 'status': 'unavailable', 'code': error.code}
         navigation_available = False
-    healthy = execution['available'] and checkpoint and backend_available and navigation_available
+    from . import plugins
+    try:
+        extensions = plugins.preflight(config.get('plugins', ()), worker_policy=config['worker_policy'],
+                                        memory_bytes=config['worker_memory_bytes'])
+    except plugins.PluginError as error:
+        extensions = ({'component': 'configured-component', 'ready': False, 'code': error.code},)
+    healthy = execution['available'] and checkpoint and backend_available and navigation_available and all(item['ready'] for item in extensions)
     result = {'schema_version': 1, 'healthy': healthy, 'execution': execution,
               'sqlite_serialization': checkpoint, 'backend_available': backend_available,
               'detection_profile': config['detection_profile'],
-              'scan_workers': config['scan_workers'], 'navigation': navigation}
+              'scan_workers': config['scan_workers'], 'navigation': navigation,
+              'extensions': extensions}
     if output_format == 'json':
         print(json.dumps(result, sort_keys=True, separators=(',', ':')))
     else:

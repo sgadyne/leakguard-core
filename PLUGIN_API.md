@@ -130,6 +130,42 @@ supervision does not create an OS sandbox or guarantee network denial.
 
 ## Compatibility and trust
 
+### Core 0.2.1a1: warm sessions and result schema 2
+
+Legacy `Finding(rule, line, severity)` and request workers remain unchanged.
+An opt-in v2 manifest may set `worker_lifetime="session"` and `result_schema=2`.
+Session inspection uses static metadata; the actual factory is constructed once
+in an owned bounded worker and reused across serialized requests. A session is
+recycled after 1,000 requests, on failure, resource-policy change or scanner close.
+`close()` on the plugin is called on normal shutdown; owned process/job cleanup
+also covers parser children and a private session temporary/cache directory.
+Direct registry callers must call `plugins.close(handles)`; `Scanner` and
+conformance/extension checks own that cleanup automatically.
+
+Schema 2 detectors may return `NewFinding(..., analysis=AnalysisMetadata(...))`.
+The closed metadata schema has `schema_version=1`, `start`, `end`, `entity_type`,
+`score`, `recognizer_id`, `analyzer_id`, `analyzer_version` and `model_id`.
+Offsets are Unicode codepoints relative to the independently extracted part;
+`end` is exclusive. The core validates offsets/line agreement and preserves
+distinct spans on the same line. Score is finite in [0,1] or absent and does not
+determine severity. Entity/provenance labels are bounded static identifiers;
+matched text, explanations, arbitrary dictionaries and document titles are not
+accepted. Public finding JSON includes `analysis` only when present; old stored
+reports and their closed three-field plugin findings remain readable.
+
+Schema 2 also makes format dispatch explicit: nonempty `formats`/`part_kinds`
+allowlists are enforced before execution; an empty detector list means all
+extracted text formats/part kinds. Existing schema-1 compatibility behavior is
+preserved. New adapters declare their complete intended document-text coverage.
+Extractor format/part declarations remain enforced.
+
+Framework dependencies and operator-selected model/artifact identities belong
+in explicit configuration. Unknown dependency closure still disables plugin
+semantic caching. Required models are not automatically downloaded or silently
+substituted. `worker_memory_bytes` config controls the CLI's explicit worker
+budget; SDK callers supply the same limit through `ScanLimits`. Mac supervised
+RSS policy remains an explicit watchdog rather than a hard memory cap.
+
 V1 `API_VERSION = 1`, `create_plugin(options)` and the `detect(text, path, part)`
 signature remain supported. V1 plugins without a verifiable runtime manifest can
 execute but are not eligible for semantic cache reuse. V1 extensions do not gain

@@ -622,11 +622,7 @@ def _source_data(source):
 
 
 def _finding_data(finding):
-    return {'id': finding.id, 'source': _source_data(finding.source), 'part_id': finding.part_id,
-            'start_line': finding.start_line, 'end_line': finding.end_line, 'rule': finding.rule,
-            'detector_id': finding.detector_id, 'detector_severity': finding.detector_severity.value,
-            'severity': finding.severity.value, 'classification': finding.classification.value,
-            'proof_id': finding.proof_id}
+    return m._finding_dict(finding)
 
 
 def _query_row(finding, result):
@@ -676,8 +672,10 @@ def _time(value):
 
 
 def _finding_from(value):
-    v = _exact(value, 'id source part_id start_line end_line rule detector_id detector_severity severity classification proof_id')
-    return m.FindingRecord(v['id'], _source_from(v['source']), v['part_id'], v['start_line'], v['end_line'], v['rule'], v['detector_id'], m.DetectorSeverity(v['detector_severity']), m.FindingSeverity(v['severity']), m.FindingClassification(v['classification']), v['proof_id'])
+    fields = 'id source part_id start_line end_line rule detector_id detector_severity severity classification proof_id'
+    v = _exact(value, fields + (' analysis' if type(value) is dict and 'analysis' in value else ''))
+    analysis = m.AnalysisMetadata(**_exact(v['analysis'], 'schema_version start end entity_type score recognizer_id analyzer_id analyzer_version model_id')) if 'analysis' in v else None
+    return m.FindingRecord(v['id'], _source_from(v['source']), v['part_id'], v['start_line'], v['end_line'], v['rule'], v['detector_id'], m.DetectorSeverity(v['detector_severity']), m.FindingSeverity(v['severity']), m.FindingClassification(v['classification']), v['proof_id'], analysis)
 
 
 def _issue_from(value):

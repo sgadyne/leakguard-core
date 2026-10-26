@@ -16,12 +16,16 @@ from typing import Protocol
 
 from ._supervision import WorkerError, run_worker, worker_environment
 from ._python import core_command, extension_paths
+from .models import AnalysisMetadata
 from .extraction import (Extraction, ExtractedPart, ExtractionContext, ExtractionLimits)
 
 API_VERSION = 1
 CORE_API_MINOR = 0
 _TOKEN = re.compile(r'[a-z][a-z0-9-]{0,79}\Z')
 _MODULE = re.compile(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z')
+_EXTRACT_ISSUES = frozenset({'encrypted', 'no-text', 'unsupported-format', 'decode-failed',
+                            'extract-failed', 'dependency-unavailable', 'extract-output-limit',
+                            'extract-part-limit', 'extract-timeout'})
 
 
 class PluginError(RuntimeError):
@@ -31,6 +35,7 @@ class PluginError(RuntimeError):
                                    'extract-output-limit', 'extract-part-limit',
                                    'resource-bound-unavailable', 'worker-memory-limit', 'cancelled', 'encrypted', 'no-text',
                                    'unsupported-format', 'decode-failed', 'extract-failed',
+                                   'extract-timeout',
                                    'dependency-unavailable'} else 'plugin-invalid'
         super().__init__(self.code)
 
@@ -40,6 +45,12 @@ class Finding:
     rule: str
     line: int
     severity: str = 'review'
+
+
+@dataclass(frozen=True)
+class NewFinding(Finding):
+    """Opt-in result_schema=2; offsets are Unicode codepoints, end exclusive."""
+    analysis: AnalysisMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -119,11 +130,15 @@ class PluginManifest:
     api_major: int = 2
     api_minor: int = 0
     requires_core: tuple[int, int] = (0, 0)
+    worker_lifetime: str = 'request'
+    result_schema: int = 1
 
     def __post_init__(self):
         if (type(self.id) is not str or not _TOKEN.fullmatch(self.id)
                 or type(self.implementation_version) is not str or not 1 <= len(self.implementation_version) <= 200
                 or self.kind not in {'detector', 'extractor'}
+                or self.worker_lifetime not in {'request', 'session'}
+                or type(self.result_schema) is not int or self.result_schema not in {1, 2}
                 or type(self.rules) is not tuple or any(type(x) is not RuleSpec for x in self.rules)
                 or len(self.rules) > 10_000 or len({x.id for x in self.rules}) != len(self.rules)
                 or type(self.options_schema) is not OptionSchema
@@ -157,6 +172,95 @@ class LoadedPlugin:
     api_version: int = 1
     manifest: PluginManifest | None = None
     has_extract: bool = False
+    session: object = field(default=None, repr=False, compare=False)
+
+
+class _PluginSession:
+    def __init__(self):
+        import threading
+        self.lock = threading.RLock()
+        self.worker = None
+        self.signature = None
+        self.starts = 0
+        self.requests = 0
+        self.closed = False
+
+    def request(self, data, *, timeout, maximum, memory, policy, cancel):
+        from ._session import FramedWorker
+        with self.lock:
+            if self.closed:
+                raise WorkerError('worker-start-failed')
+            signature = (memory, policy)
+            if (self.worker is None or self.worker._closed.is_set() or self.signature != signature
+                    or self.worker.process.poll() is not None or self.requests and self.requests % 1000 == 0):
+                if self.worker is not None:
+                    self.worker.close()
+                self.worker = FramedWorker(core_command('leakguard_core.plugin_worker', '--session',
+                    search_paths=extension_paths()), memory_bytes=memory, worker_policy=policy)
+                self.signature = signature
+                self.starts += 1
+            worker = self.worker
+        try:
+            result = worker.request(data, timeout=timeout, maximum=maximum, cancel=cancel)
+            with self.lock:
+                self.requests += 1
+            return result
+        except BaseException:
+            with self.lock:
+                if self.worker is worker and worker._closed.is_set():
+                    self.worker = None
+            raise
+
+    def close(self):
+        # Interrupt an active request without waiting for its serialization lock.
+        self.closed = True
+        with self.lock:
+            worker = self.worker
+        if worker is not None:
+            try:
+                worker.request(b'{"operation":"close"}', timeout=2, maximum=512)
+                worker.process.wait(timeout=.25)
+            except Exception:
+                pass
+            worker.close()
+
+
+def close(instances):
+    for instance in instances:
+        session = getattr(instance, 'session', None)
+        if session is not None:
+            session.close()
+
+
+def session_metrics(instances):
+    return tuple({'component': instance.manifest.id, 'starts': instance.session.starts,
+                  'requests': instance.session.requests, 'lifetime': 'session'}
+                 for instance in instances if isinstance(instance, LoadedPlugin)
+                 and instance.session is not None)
+
+
+def preflight(specifications, *, worker_policy='strict', memory_bytes=512 * 1024 * 1024):
+    """Explicit no-input capability probes through the owned worker boundary."""
+    from .models import ScanLimits
+    instances = []
+    statuses = []
+    try:
+        instances = load(specifications, worker_policy=worker_policy)
+        limits = ScanLimits(60, 1, worker_memory_bytes=memory_bytes)
+        for instance in instances:
+            component = instance.manifest.id if instance.manifest is not None else 'legacy-plugin'
+            try:
+                response = _request({'module': instance.module, 'options': instance.options},
+                    'preflight', {}, timeout=60, limits=limits, worker_policy=worker_policy,
+                    session=instance.session)
+                if type(response.get('ready')) is not bool:
+                    raise PluginError()
+                statuses.append(dict(response, component=component))
+            except PluginError as error:
+                statuses.append({'component': component, 'ready': False, 'code': error.code})
+        return tuple(statuses)
+    finally:
+        close(instances)
 
 
 def _unique(pairs):
@@ -202,7 +306,8 @@ def _manifest_wire(manifest):
 
 
 def _manifest_from_wire(value):
-    if type(value) is not dict or set(value) != set(PluginManifest.__dataclass_fields__):
+    fields = set(PluginManifest.__dataclass_fields__)
+    if type(value) is not dict or not fields - {'worker_lifetime', 'result_schema'} <= set(value) <= fields:
         raise PluginError()
     data = dict(value)
     data['rules'] = tuple(RuleSpec(**x) for x in data['rules'])
@@ -219,7 +324,7 @@ def _manifest_from_wire(value):
     return PluginManifest(**data)
 
 
-def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None, worker_policy='strict'):
+def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None, worker_policy='strict', session=None):
     maximum = getattr(limits, 'max_ipc_bytes', 80_000_000)
     request = {'module': spec['module'], 'options': spec.get('options', {}),
                'component': spec.get('component'), 'operation': operation, **payload}
@@ -228,14 +333,21 @@ def _request(spec, operation, payload, *, timeout=None, limits=None, cancel=None
         # Extension modules are explicitly selected trusted code. Preserve their
         # bounded parent search roots, while pinning the worker's own core and
         # standard-library imports before any caller-controlled directory.
-        process = run_worker(core_command('leakguard_core.plugin_worker', search_paths=extension_paths()), data,
+        if session is not None:
+            raw = session.request(data,
+                timeout=timeout if timeout is not None else getattr(limits, 'detector_timeout_seconds', 45),
+                maximum=maximum, memory=getattr(limits, 'worker_memory_bytes', 512 * 1024 * 1024),
+                policy=worker_policy, cancel=cancel)
+        else:
+            process = run_worker(core_command('leakguard_core.plugin_worker', search_paths=extension_paths()), data,
                              timeout=timeout if timeout is not None else getattr(limits, 'detector_timeout_seconds', 45),
                              max_output_bytes=maximum, max_input_bytes=maximum,
                              memory_bytes=getattr(limits, 'worker_memory_bytes', 512 * 1024 * 1024),
                              env=worker_environment(), cancel=cancel, worker_policy=worker_policy)
-        if process.returncode:
-            raise PluginError('plugin-crashed')
-        response = _loads(process.stdout)
+            if process.returncode:
+                raise PluginError('plugin-crashed')
+            raw = process.stdout
+        response = _loads(raw)
         if type(response) is not dict:
             raise PluginError()
         if set(response) == {'error'}:
@@ -268,7 +380,7 @@ def load(specifications, *, timeout=10, limits=None, worker_policy='strict'):
             manifest = _manifest_from_wire(response['manifest']) if response['manifest'] is not None else None
             if response['api_version'] == 2 and manifest is None:
                 raise PluginError()
-            loaded.append(LoadedPlugin(spec['module'], dict(spec.get('options', {})), response['api_version'], manifest, response['has_extract']))
+            loaded.append(LoadedPlugin(spec['module'], dict(spec.get('options', {})), response['api_version'], manifest, response['has_extract'], _PluginSession() if manifest is not None and manifest.worker_lifetime == 'session' else None))
         except PluginError:
             raise
         except Exception:
@@ -292,11 +404,17 @@ def _validated_findings(items, text, manifest=None, maximum=100_000):
         count += 1
         if count > maximum:
             raise PluginError('detector-output-limit')
-        if (type(item) is not Finding or type(item.rule) is not str or not _TOKEN.fullmatch(item.rule)
+        if (type(item) not in {Finding, NewFinding} or type(item.rule) is not str or not _TOKEN.fullmatch(item.rule)
                 or type(item.line) is not int or not 1 <= item.line <= line_count
                 or item.severity not in {'block', 'review'}
                 or rules is not None and (item.rule not in rules or rules[item.rule] == 'block' and item.severity != 'block')):
             raise PluginError('detector-output-invalid')
+        if type(item) is NewFinding:
+            if (manifest is None or manifest.result_schema != 2
+                    or type(item.analysis) is not AnalysisMetadata
+                    or item.analysis.end > len(text)
+                    or item.line != text.count('\n', 0, item.analysis.start) + 1):
+                raise PluginError('detector-output-invalid')
         yield item
 
 
@@ -305,20 +423,31 @@ def detect(instances, text, path, part, *, format_id='text', timeout=None, limit
     for instance in instances:
         if getattr(instance, 'manifest', None) is not None and instance.manifest.kind != 'detector':
             continue
+        manifest = getattr(instance, 'manifest', None)
+        if manifest is not None and manifest.result_schema == 2:
+            kind = part.rsplit('-', 1)[0] if part.rsplit('-', 1)[-1].isdigit() else part
+            if (manifest.formats and format_id not in manifest.formats
+                    or manifest.part_kinds and kind not in manifest.part_kinds):
+                continue
         try:
             if isinstance(instance, LoadedPlugin):
                 response = _request({'module': instance.module, 'options': instance.options}, 'detect',
                                     {'text': text, 'path': str(path), 'part': part, 'format_id': format_id,
-                                     'max_findings': maximum}, timeout=timeout, limits=limits, cancel=cancel, worker_policy=worker_policy)
+                                     'max_findings': maximum}, timeout=timeout, limits=limits, cancel=cancel, worker_policy=worker_policy, session=instance.session)
                 if set(response) != {'findings'} or type(response['findings']) is not list:
                     raise PluginError('detector-output-invalid')
                 if len(response['findings']) > maximum:
                     raise PluginError('detector-output-limit')
                 items = []
                 for value in response['findings']:
-                    if type(value) is not dict or set(value) != {'rule', 'line', 'severity'}:
+                    if type(value) is not dict or set(value) not in ({'rule', 'line', 'severity'}, {'rule', 'line', 'severity', 'analysis'}):
                         raise PluginError('detector-output-invalid')
-                    items.append(Finding(**value))
+                    if 'analysis' in value:
+                        data = dict(value)
+                        data['analysis'] = AnalysisMetadata(**data['analysis'])
+                        items.append(NewFinding(**data))
+                    else:
+                        items.append(Finding(**value))
             else:
                 # In-memory instances exist only for the deprecated internal API;
                 # persistent configured deployment always uses LoadedPlugin.
@@ -339,7 +468,7 @@ def detect(instances, text, path, part, *, format_id='text', timeout=None, limit
 def _validate_extraction(result, manifest, bounds):
     if type(result) is not Extraction or result.disposition not in {'extracted', 'unsupported', 'encrypted', 'no-text'} or isinstance(result.parts, (str, bytes, dict)):
         raise PluginError()
-    if type(result.issues) not in {tuple, list} or any(code not in {'encrypted', 'no-text', 'unsupported-format', 'decode-failed', 'extract-failed', 'dependency-unavailable'} for code in result.issues):
+    if type(result.issues) not in {tuple, list} or any(code not in _EXTRACT_ISSUES for code in result.issues):
         raise PluginError()
     total = 0; seen = set(); parts = []
     for item in result.parts:
@@ -421,13 +550,13 @@ def extract_component(instance, data, path, *, format_id=None, timeout=None, lim
     response = _request({'module': instance.module, 'options': instance.options}, 'extract',
                         {'data': base64.b64encode(data).decode('ascii'), 'path': str(path),
                          'format_id': format_id or (manifest.formats[0] if manifest else 'extension'),
-                         'limits': asdict(bounds)}, timeout=timeout, limits=limits, cancel=cancel, worker_policy=worker_policy)
+                         'limits': asdict(bounds)}, timeout=timeout, limits=limits, cancel=cancel, worker_policy=worker_policy, session=instance.session)
     if set(response) != {'parts', 'disposition', 'issues'}:
         raise PluginError()
     disposition = response['disposition']
     if disposition not in {'extracted', 'unsupported', 'encrypted', 'no-text'}:
         raise PluginError()
-    if type(response['issues']) is not list or any(type(code) is not str or code not in allowed for code in response['issues']):
+    if type(response['issues']) is not list or any(type(code) is not str or code not in _EXTRACT_ISSUES for code in response['issues']):
         raise PluginError()
     if type(response['parts']) is not list:
         raise PluginError()

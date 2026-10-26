@@ -28,6 +28,7 @@ DEFAULTS = {
     'extractor_overrides': {},
     'worker_policy': 'strict',
     'scan_workers': 2,
+    'worker_memory_bytes': 512 * 1024 * 1024,
     'detection_profile': 'credentials',
     'extension_registry': None,
     'observation_backend': 'legacy',
@@ -102,6 +103,8 @@ def validate(mapping):
         fail('worker_policy')
     if type(result['scan_workers']) is not int or result['scan_workers'] not in {1, 2}:
         fail('scan_workers')
+    if type(result['worker_memory_bytes']) is not int or not 64 * 1024 * 1024 <= result['worker_memory_bytes'] <= 4 * 1024 * 1024 * 1024:
+        fail('worker_memory_bytes')
     if type(result['navigation_same_filesystem']) is not bool:
         fail('navigation_same_filesystem')
     helper = result['navigation_helper']

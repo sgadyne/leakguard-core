@@ -296,6 +296,21 @@ def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manif
         module = spec['module']
         module_artifacts.append((module, _module_artifacts(module)))
         dependencies.extend(distributions.get(module.split('.')[0], ()))
+        options = spec.get('options', {})
+        # Explicit reviewed recognizer factories are behavior-bearing code,
+        # even when registered through an analyzer adapter's options.
+        for factory in options.get('recognizer-modules', ()):
+            if type(factory) is not str or ':' not in factory:
+                continue
+            selected = factory.split(':', 1)[0]
+            if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*', selected):
+                module_artifacts.append((selected, _module_artifacts(selected)))
+                dependencies.extend(distributions.get(selected.split('.')[0], ()))
+        java = options.get('java-path')
+        if type(java) is str and Path(java).is_absolute():
+            release = Path(java).resolve().parent.parent / 'release'
+            module_artifacts.append(('java-runtime', [
+                ('launcher', _file_identity(java)), ('release', _file_identity(release))]))
     manifests = []
     for manifest in plugin_manifests:
         _check_budget()
