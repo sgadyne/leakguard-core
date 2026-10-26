@@ -45,6 +45,11 @@ independent_spec = importlib.util.spec_from_file_location("evidence_independent_
 run_independent_labels = importlib.util.module_from_spec(independent_spec)
 assert independent_spec and independent_spec.loader
 independent_spec.loader.exec_module(run_independent_labels)
+PRODUCT_JOURNEY = ROOT / "tools" / "check_product_journey.py"
+product_spec = importlib.util.spec_from_file_location("evidence_product_journey", PRODUCT_JOURNEY)
+check_product_journey = importlib.util.module_from_spec(product_spec)
+assert product_spec and product_spec.loader
+product_spec.loader.exec_module(check_product_journey)
 
 
 class IndependentLabelTests(unittest.TestCase):
@@ -59,6 +64,84 @@ class IndependentLabelTests(unittest.TestCase):
             {item["expected_rule"] for item in positive},
             {"literal-client-secret", "literal-password"},
         )
+
+    def test_scoring_calls_detector_once_per_isolated_case(self):
+        from leakguard_core import backends
+
+        catalog, _raw = run_independent_labels._catalog()
+        cases = catalog["cases"]
+
+        def detect(text, **_kwargs):
+            case = next(item for item in cases if item["text"] == text)
+            if case["expected"] == "finding":
+                return [SimpleNamespace(rule=case["expected_rule"])]
+            return []
+
+        with tempfile.TemporaryDirectory() as folder:
+            backend = Path(folder) / "gitleaks"
+            backend.write_bytes(b"synthetic backend placeholder")
+            backend.chmod(0o700)
+            with patch.object(backends, "detect", side_effect=detect) as detector, \
+                    patch.object(run_independent_labels, "source_identity",
+                                 return_value=("a" * 40, "b" * 64)):
+                receipt = run_independent_labels.run(backend, timeout=2)
+
+        self.assertEqual(detector.call_count, 12)
+        self.assertEqual([call.args[0] for call in detector.call_args_list],
+                         [item["text"] for item in cases])
+        self.assertEqual(receipt["evaluation_boundary"], "isolated-input")
+        self.assertTrue(all(row["boundary"] == "isolated-input" for row in receipt["cases"]))
+        self.assertEqual(receipt["outcome"], "passed")
+
+
+class ProductJourneyArtifactTests(unittest.TestCase):
+    def test_artifact_review_allows_only_declared_source_and_encrypted_payloads(self):
+        with tempfile.TemporaryDirectory() as folder:
+            product = Path(folder) / "product"
+            state = product / "state"
+            source = product / "source"
+            state.mkdir(parents=True)
+            source.mkdir()
+            fixture = source / "case.txt"
+            fixture.write_bytes(b"synthetic labeled source line")
+            (product / "config.json").write_text('{"worker_policy":"strict"}\n', encoding="ascii")
+            (product / "config.json").chmod(0o600)
+            for name in ("observations.lgo", "credentials.lgv"):
+                (state / name).write_bytes(b"opaque encrypted synthetic payload")
+                (state / name).chmod(0o600)
+            rows = check_product_journey._artifact_review(
+                product, b"ready\n", [], fixture,
+                (b"synthetic labeled source line", b"synthetic vault value"),
+            )
+            self.assertEqual({Path(row["name"]).name for row in rows["files"]},
+                             {"config.json", "observations.lgo", "credentials.lgv"})
+            (product / "config.json").write_bytes(b"leaked synthetic vault value")
+            with self.assertRaises(check_product_journey.JourneyFailure) as caught:
+                check_product_journey._artifact_review(
+                    product, b"ready\n", [], fixture,
+                    (b"synthetic labeled source line", b"synthetic vault value"),
+                )
+            self.assertEqual(caught.exception.code, "synthetic-value-in-plaintext-state")
+
+    def test_artifact_review_rejects_synthetic_values_in_normal_http_responses(self):
+        with tempfile.TemporaryDirectory() as folder:
+            product = Path(folder) / "product"
+            state = product / "state"
+            source = product / "source"
+            state.mkdir(parents=True)
+            source.mkdir()
+            fixture = source / "case.txt"
+            fixture.write_bytes(b"synthetic labeled source line")
+            (state / "observations.lgo").write_bytes(b"opaque encrypted payload")
+            (state / "credentials.lgv").write_bytes(b"opaque encrypted payload")
+            (state / "observations.lgo").chmod(0o600)
+            (state / "credentials.lgv").chmod(0o600)
+            with self.assertRaises(check_product_journey.JourneyFailure) as caught:
+                check_product_journey._artifact_review(
+                    product, b"ready\n", [("/api/findings", b"synthetic vault value", False)],
+                    fixture, (b"synthetic labeled source line", b"synthetic vault value"),
+                )
+            self.assertEqual(caught.exception.code, "synthetic-value-in-http-response")
 
 
 class SafeInputTests(unittest.TestCase):

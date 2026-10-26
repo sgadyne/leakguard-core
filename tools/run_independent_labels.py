@@ -87,7 +87,6 @@ def run(backend: Path, timeout: float) -> dict:
     from leakguard_core import backends
 
     catalog, catalog_bytes = _catalog()
-    lines = [item["text"] for item in catalog["cases"]]
     if backend.is_symlink():
         raise ValueError("backend-invalid")
     backend = backend.resolve(strict=True)
@@ -98,16 +97,14 @@ def run(backend: Path, timeout: float) -> dict:
         raise ValueError("rules-invalid")
 
     started = time.monotonic()
-    matches = backends.detect("\n".join(lines), binary=backend, rules=RULES, timeout=timeout)
-    found_by_line = {}
-    for match in matches:
-        found_by_line.setdefault(match.start_line, set()).add(match.rule)
-
     case_rows = []
     counts = {name: 0 for name in ("true_positive", "false_positive", "true_negative", "false_negative")}
     failed = 0
-    for index, item in enumerate(catalog["cases"], 1):
-        rules = sorted(found_by_line.get(index, set()))
+    for item in catalog["cases"]:
+        # Keep each label boundary isolated. Concatenating unrelated cases lets
+        # a keyword in one example satisfy a context-sensitive rule in another.
+        matches = backends.detect(item["text"], binary=backend, rules=RULES, timeout=timeout)
+        rules = sorted({match.rule for match in matches})
         expected = item["expected"]
         predicted_positive = bool(rules)
         expected_positive = expected == "finding"
@@ -125,10 +122,11 @@ def run(backend: Path, timeout: float) -> dict:
         failed += not passed
         case_rows.append({
             "case_id": item["case_id"], "category": item["category"],
+            "boundary": "isolated-input",
             "expected": expected, "actual": "finding" if predicted_positive else "none",
             "expected_rule": expected_rule, "observed_rules": rules,
             "status": "passed" if passed else "failed",
-            "fixture_sha256": _sha(lines[index - 1].encode("utf-8")),
+            "fixture_sha256": _sha(item["text"].encode("utf-8")),
         })
 
     source_commit, source_digest = source_identity(ROOT)
@@ -136,6 +134,7 @@ def run(backend: Path, timeout: float) -> dict:
         "outcome": "passed" if failed == 0 else "failed",
         "source_commit": source_commit, "source_digest": source_digest,
         "catalog_sha256": _sha(catalog_bytes), "case_count": len(case_rows),
+        "evaluation_boundary": "isolated-input",
         "label_counts": {"positive": 6, "negative": 6},
         "counts": {**counts, "failed": failed},
         "cases": case_rows,
