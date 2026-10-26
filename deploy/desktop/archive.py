@@ -23,6 +23,8 @@ def main():
     args = parser.parse_args()
     app = args.app.resolve(strict=True)
     output = args.output.absolute()
+    if output.is_symlink() or output.resolve().is_relative_to(app):
+        parser.error("Archive output must be a separate directory outside the application")
     resources = app / ("Contents/Resources/buddy" if app.suffix == ".app" else "resources/buddy")
     manifest = json.loads((resources / "desktop-manifest.json").read_text())
     if bootstrap.records(resources) != manifest["files"] or bootstrap.runtime_identity(manifest) != manifest["runtimeId"]:
