@@ -18,6 +18,14 @@ def _darwin_test_worker_policy():
 
 
 class ExtensionTests(unittest.TestCase):
+    def setUp(self):
+        # The deprecated engine adapter reuses its module config, so select the
+        # native watchdog policy explicitly for every legacy scan in this class.
+        policy_config = patch.dict(
+            guard.CONFIG, {'worker_policy': _darwin_test_worker_policy()})
+        policy_config.start()
+        self.addCleanup(policy_config.stop)
+
     def test_explicit_credential_fields_across_text_formats(self):
         cases = [
             ('config.json', json.dumps({'client_secret': SYNTHETIC})),
@@ -71,7 +79,10 @@ class ExtensionTests(unittest.TestCase):
             root = pathlib.Path(folder)
             state = root / 'state'
             source = models.BytesInput(payload, 'opaque-unusual.bin')
-            service = guard.ScanService({'gitleaks_executable': str(guard.EXE)}, state_dir=state)
+            service = guard.ScanService({
+                'gitleaks_executable': str(guard.EXE),
+                'worker_policy': _darwin_test_worker_policy(),
+            }, state_dir=state)
             try:
                 optional = service.scan(
                     [source], policy=models.ScanPolicy.inventory(),
