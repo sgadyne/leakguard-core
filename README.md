@@ -1,5 +1,41 @@
 # LeakGuard Core
 
+## Install the current plugin-development checkpoint
+
+Start with the [Presidio/Tika setup and Windows corporate guide](docs/presidio-tika-checkpoint.md).
+Core `0.2.1a1` uses maintained Presidio recognizers plus explicitly registered
+[firm recognizer packages](plugins/presidio_detector/README.md#a-firm-owned-recognizer-package),
+with Gitleaks retained for credentials. Presidio defaults to **pattern-only**;
+no NER model is bundled. Tika is an **opt-in** local document parser requiring
+Java 17+ and the pinned Tika 4.1.0 archive. Native Windows execution remains
+unverified; this is a developer checkpoint with explicit prerequisites, not a
+self-contained all-platform installer.
+
+For an existing clone, use a new Python 3.11 environment and the approved
+target-specific wheelhouse prepared as described in the guide:
+
+```powershell
+git fetch origin feature/presidio-tika-checkpoint-20261026
+git switch -c review/presidio-tika FETCH_HEAD
+py -3.11 -m venv C:\Work\LeakGuardFrameworkTest\runtime
+$PY = 'C:\Work\LeakGuardFrameworkTest\runtime\Scripts\python.exe'
+$WH = 'C:\Approved\LeakGuardWheelhouse'
+& $PY -m pip install --no-index --find-links $WH --require-hashes `
+  -r plugins\presidio_detector\requirements-py311.lock
+& $PY -m pip install --no-index --find-links $WH `
+  (Join-Path $WH 'leakguard_core-0.2.1a1-py3-none-any.whl') `
+  (Join-Path $WH 'leakguard_presidio_detector-0.1.0a1-py3-none-any.whl') `
+  (Join-Path $WH 'leakguard_tika_extractor-0.1.0a1-py3-none-any.whl') `
+  (Join-Path $WH 'example_firm_presidio_recognizer-0.1.0-py3-none-any.whl')
+& $PY -m pip check
+```
+
+Then follow the guide's explicit private config, capability doctor and synthetic
+scan before firm files. The firm example returns native Presidio recognizers;
+the [adapter guide](plugins/presidio_detector/README.md) explains registration,
+entity allowlists, confidence thresholds and independent severity policy.
+Python traversal remains the default and needs no Rust compiler.
+
 The integrated Password Buddy alpha adds a private local UI, encrypted vault and observations, host jobs, and offline deployment. Start with [the alpha guide](docs/ALPHA.md) and [installation instructions](docs/INSTALL.md). Exact native platform claims live in each release’s receipts.
 
 Offline secret scanning, Git guards and local file inventory. The engine uses Gitleaks as a subprocess and supports explicitly configured detector/extractor plugins. Configured module-backed plugins run in supervised workers. Source files are never moved or changed by a scan. Reports contain locations, rules and evidence classifications, never matched values or source snippets.
