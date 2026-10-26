@@ -6,6 +6,8 @@ Frozen 2026-10-26. Coordinate any change with the root integrator before another
 
 Use same-origin fetch, credentials:same-origin, application/json bodies and X-Buddy-CSRF on POST/PATCH/DELETE. Parse errors as `{error:string}`, map known codes to helpful text, retain a stable code under Details and never show raw exception text or echo secrets. Abort stale GETs and fence all results by session/store/reveal generation. No source/finding/credential data in persisted UI state. Theme and nonsecret desktop preference keys may persist.
 
+Ordinary blur (including a native file picker) clears revealed/copied payloads and fences pending reveals, but may retain masked form drafts. Lock, hide, navigation and disconnect clear all secret/passphrase form inputs as well. This avoids a backup file picker erasing an otherwise valid masked restore form.
+
 Poll /api/status every 2 seconds while visible and 5 seconds hidden. Poll sources/jobs only while scan storage is unlocked; avoid overlapping polls and pause ordinary fetches while disconnected. Refresh the affected collection after acknowledged mutation, not optimistically. Do not turn temporary network failures into fabricated locked/empty states. Credential list is refetched after unlock/save/update/delete/restore; never poll reveal.
 
 Known new server work for Sol shell:
