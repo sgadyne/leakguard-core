@@ -1,5 +1,6 @@
 """Offline integration checks using synthetic secrets and disposable Git repos."""
 import io
+import errno
 import os
 import json
 import pathlib
@@ -15,6 +16,10 @@ from leakguard_core import engine as guard
 
 SYNTHETIC = 'SyntheticOnly~M7kQ2vR9xL4nD8pS6aH3zB5cF1eG'
 HEX_FIXTURE = 'fd3862a9b10ce475d8263f9a1e70bc456a21d7fb940c8e5132f6d9a0b347ce85'
+
+
+def _darwin_test_worker_policy():
+    return 'supervised-alpha' if sys.platform == 'darwin' else 'strict'
 
 
 def command(repo, *args, input=None):
@@ -154,11 +159,22 @@ class IntegrationTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == 'nt', 'invalid UTF-8 filename bytes are POSIX-specific')
     def test_git_index_preserves_weird_filename_and_typed_line_range(self):
+        self._assert_git_filename_and_line(b'space-\xc3\xa9\ninvalid-\xff.txt', raw_bytes=True)
+
+    @unittest.skipIf(os.name == 'nt', 'newline filenames are POSIX-specific')
+    def test_git_index_preserves_unicode_newline_filename_and_line(self):
+        self._assert_git_filename_and_line('space-λ\nfile.txt'.encode('utf-8'))
+
+    def _assert_git_filename_and_line(self, relative_bytes, *, raw_bytes=False):
         from leakguard_core import models
-        relative_bytes = b'space-\xc3\xa9\ninvalid-\xff.txt'
         relative_path = os.fsdecode(relative_bytes)
         full_path = os.fsencode(self.repo) + os.sep.encode() + relative_bytes
-        descriptor = os.open(full_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            descriptor = os.open(full_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as error:
+            if raw_bytes and error.errno in {errno.EILSEQ, errno.EINVAL}:
+                self.skipTest('test filesystem rejects invalid UTF-8 filename bytes')
+            raise
         try:
             os.write(descriptor, ('first line\nsecond line\nclient_secret = "' + SYNTHETIC + '"\n').encode())
         finally:
@@ -265,6 +281,7 @@ class IntegrationTests(unittest.TestCase):
             service = guard.ScanService({
                 'gitleaks_executable': str(guard.EXE),
                 'gitleaks_config': str(guard.RULES),
+                'worker_policy': _darwin_test_worker_policy(),
             }, state_dir=pathlib.Path(state))
             try:
                 return service.scan_git(
@@ -360,7 +377,8 @@ class IntegrationTests(unittest.TestCase):
         module = self.repo / 'noop_fixture.py'
         module.write_text('API_VERSION=1\nclass Detector:\n def detect(self,text,path,part): return []\ndef create_plugin(options): return Detector()\n')
         config = self.repo / 'plugin-config.json'
-        config.write_text(json.dumps({'plugins': [{'module': 'noop_fixture'}]}))
+        config.write_text(json.dumps({'plugins': [{'module': 'noop_fixture'}],
+                                      'worker_policy': _darwin_test_worker_policy()}))
         paths = str(self.repo) + os.pathsep + os.environ.get('PYTHONPATH', '')
         with patch.dict(os.environ, {'LEAKGUARD_CONFIG': str(config), 'PYTHONPATH': paths}):
             self.test_staged_ast_metadata_uses_index_source_and_keeps_hex_keys_blocking()

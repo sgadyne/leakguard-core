@@ -138,7 +138,10 @@ class PublicApiTests(unittest.TestCase):
             reference = root / "private-reference.json"
             reference.write_text(json.dumps({"secret": marker}), encoding="utf-8")
             executable = Path(os.environ.get("LEAKGUARD_GITLEAKS", str(engine.EXE))).resolve()
-            config = ScanConfig.from_mapping({"gitleaks_executable": str(executable)})
+            config = ScanConfig.from_mapping({
+                "gitleaks_executable": str(executable),
+                "worker_policy": "supervised-alpha" if sys.platform == "darwin" else "strict",
+            })
             limits = ScanLimits(45, 10)
             policy = ScanPolicy.inventory()
 

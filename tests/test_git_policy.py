@@ -1,7 +1,9 @@
 """Required Git extraction failures are policy-visible synthetic regressions."""
 import io
+import errno
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -211,10 +213,23 @@ class GitPathIdentityTests(unittest.TestCase):
     @unittest.skipIf(__import__('os').name == 'nt', 'POSIX pathname bytes')
     def test_trailing_space_newline_and_undecodable_root_bytes_are_preserved(self):
         import os
+        self._assert_repository_root(os.fsdecode(b'repository-\xff \n'), raw_bytes=True)
+
+    @unittest.skipIf(__import__('os').name == 'nt', 'POSIX newline pathname')
+    def test_unicode_root_with_trailing_space_and_newline_is_preserved(self):
+        self._assert_repository_root('repository-λ \n')
+
+    def _assert_repository_root(self, name, *, raw_bytes=False):
+        import os
         from leakguard_core import models as m
         from leakguard_core.git_scanning import path_output
-        name = os.fsdecode(b'repository-\xff \n')
-        moved = self.repo / name; moved.mkdir()
+        moved = self.repo / name
+        try:
+            moved.mkdir()
+        except OSError as error:
+            if raw_bytes and error.errno in {errno.EILSEQ, errno.EINVAL}:
+                self.skipTest('test filesystem rejects invalid UTF-8 directory bytes')
+            raise
         (self.repo / '.git').rename(moved / '.git')
         self.repo = moved
         (self.repo / 'candidate.txt').write_text('ordinary text\n')
@@ -225,7 +240,8 @@ class GitPathIdentityTests(unittest.TestCase):
             self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW)
             self.assertEqual(report.results[0].source.repository, str(self.repo.resolve()))
             self.assertEqual(path_output(os.fsencode(str(self.repo)) + b'\n'), str(self.repo))
-            self.assertIn('\\udcff', report.to_json())
+            if raw_bytes:
+                self.assertIn('\\udcff', report.to_json())
         finally:
             service.close()
 
@@ -350,7 +366,8 @@ class FinalGitAcceptanceTests(unittest.TestCase):
             extension = Path(folder)
             (extension / 'trusted_hook_fixture.py').write_text("API_VERSION=1\nfrom leakguard_core.plugins import Finding\nclass Detector:\n def detect(self,text,path,part): return [Finding('synthetic-hook-plugin',1,'block')]\ndef create_plugin(options): return Detector()\n")
             config = extension / 'config.json'
-            config.write_text(json.dumps({'plugins': [{'module': 'trusted_hook_fixture'}]}))
+            config.write_text(json.dumps({'plugins': [{'module': 'trusted_hook_fixture'}],
+                                          'worker_policy': 'supervised-alpha' if sys.platform == 'darwin' else 'strict'}))
             (self.repo / 'candidate.txt').write_text('ordinary clean content\n')
             self.git('add', 'candidate.txt')
             self.git('config', 'core.hooksPath', '.git/hooks')
