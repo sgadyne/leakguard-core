@@ -251,6 +251,10 @@ class HostTests(unittest.TestCase):
         linux = service_spec(command, self.root, platform="linux")
         self.assertIn("$$HOME%%", linux["content"])
         self.assertIn("LEAKGUARD_STATE_DIR=", linux["content"])
+        special_state = service_spec(command, self.root / "literal$state%", platform="linux")
+        self.assertIn('Environment="LEAKGUARD_STATE_DIR=' + str(self.root / "literal$state%%") + '"', special_state["content"])
+        with self.assertRaisesRegex(HostError, "service-state-invalid"):
+            service_spec(command, self.root / "unsafe\nService=extra", platform="linux")
         self.assertFalse(mac["native_verified"])
         windows = service_spec(command, self.root, platform="windows")
         self.assertIn("<UserId>", windows["content"])
