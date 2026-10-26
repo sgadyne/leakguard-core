@@ -158,6 +158,7 @@
     const observation = status.observations || {};
     renderObservationGate(observation);
     renderKeyringStatus(observation);
+    renderObservationCapacity(observation);
     if (!observation.unlocked) {
       const stats = byId("source-stats"); clear(stats);
       stats.append(stat("Configured sources", "—", "Unlock encrypted scan storage to continue"), stat("Active jobs", "—", ""), stat("Files checked", "—", ""), stat("Successful scans", "—", ""));
@@ -188,6 +189,33 @@
     const actions = node("div", "gate-actions");
     actions.append(button(status.created ? "Unlock scan storage" : "Create encrypted storage", "observation-unlock", "primary"));
     gate.append(actions);
+  }
+
+  function renderObservationCapacity(observation) {
+    const card = byId("observation-capacity"); clear(card);
+    const capacity = Number(observation.capacity_bytes);
+    const used = Number(observation.serialized_bytes);
+    if (!observation.unlocked || !Number.isFinite(capacity) || capacity <= 0 || !Number.isFinite(used) || used < 0) {
+      card.classList.add("hidden");
+      return;
+    }
+    card.classList.remove("hidden");
+    const row = node("div", "capacity-line");
+    const details = node("div", "capacity-details");
+    const percent = Math.min(100, Math.round(used / capacity * 100));
+    details.append(node("strong", "", `Encrypted scan storage: ${formatBytes(used)} of ${formatBytes(capacity)} (${percent}%)`));
+    details.append(node("span", observation.healthy === false ? "capacity-warning" : "muted", observation.healthy === false ? "Storage health needs attention." : "Current encrypted checkpoint size and alpha capacity limit."));
+    const progress = node("progress", "capacity-progress");
+    progress.max = capacity;
+    progress.value = Math.min(used, capacity);
+    progress.setAttribute("aria-label", "Encrypted scan storage usage");
+    row.append(details, progress); card.append(row);
+  }
+
+  function formatBytes(value) {
+    if (value < 1024) return `${Math.round(value)} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
   }
 
   function renderSources(rows) {
@@ -323,6 +351,11 @@
 
   async function loadVault() {
     const status = await request("/api/vault/status");
+    if (!status.unlocked) {
+      scrubRevealed();
+      const revealDialog = byId("reveal-dialog");
+      if (revealDialog.open) revealDialog.close();
+    }
     const gate = byId("vault-gate"); clear(gate);
     const list = byId("vault-list"); clear(list);
     if (!status.created) {
@@ -536,11 +569,20 @@
     byId("vault-dialog").showModal();
   }
 
-  function closeDialog(dialog) {
-    if (dialog.id === "reveal-dialog") { clear(byId("reveal-content")); revealed = null; }
+  function scrubRevealed() {
+    clear(byId("reveal-content"));
+    revealed = null;
+  }
+
+  function scrubDialog(dialog) {
+    if (dialog.id === "reveal-dialog") scrubRevealed();
     if (dialog.id === "vault-dialog") byId("credential-form").reset();
     if (dialog.id === "unlock-dialog") byId("unlock-passphrase").value = "";
     if (dialog.id === "backup-dialog") { byId("backup-form").reset(); byId("restore-form").reset(); }
+  }
+
+  function closeDialog(dialog) {
+    scrubDialog(dialog);
     dialog.close();
   }
 
@@ -624,7 +666,12 @@
       else if (action === "credential-unlock") {
         const status = await request("/api/vault/status"); openUnlock(status.created ? "vault" : "vault-create");
       }
-      else if (action === "credential-lock") { await request("/api/vault/lock", "POST", {}); await loadVault(); notify("Credential vault locked."); }
+      else if (action === "credential-lock") {
+        scrubRevealed();
+        const revealDialog = byId("reveal-dialog");
+        if (revealDialog.open) revealDialog.close();
+        await request("/api/vault/lock", "POST", {}); await loadVault(); notify("Credential vault locked.");
+      }
       else if (action === "vault-add") { const status = await request("/api/vault/status"); if (!status.unlocked) { openUnlock(status.created ? "vault" : "vault-create"); return; } openCredential(); }
       else if (action === "vault-backup") {
         const status = await request("/api/vault/status");
@@ -809,9 +856,13 @@
 
   byId("plugin-profile").addEventListener("change", () => loadPlugins().catch((error) => notify(error.message, true)));
 
-  document.querySelectorAll("dialog").forEach((dialog) => dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) closeDialog(dialog);
-  }));
+  document.querySelectorAll("dialog").forEach((dialog) => {
+    dialog.addEventListener("cancel", () => scrubDialog(dialog));
+    dialog.addEventListener("close", () => scrubDialog(dialog));
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) closeDialog(dialog);
+    });
+  });
 
   const initialPage = location.hash.slice(1);
   bootstrap().then(() => {

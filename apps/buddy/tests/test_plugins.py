@@ -1,6 +1,8 @@
 import unittest
+from pathlib import Path
+import tempfile
 
-from leakguard_buddy.backend import BuddyOperationError, _safe_wheel_filename
+from leakguard_buddy.backend import BuddyBackend, BuddyOperationError, _safe_wheel_filename
 
 
 class PluginUploadTests(unittest.TestCase):
@@ -26,6 +28,28 @@ class PluginUploadTests(unittest.TestCase):
             with self.subTest(filename=filename), self.assertRaises(BuddyOperationError) as raised:
                 _safe_wheel_filename(filename)
             self.assertEqual(raised.exception.code, "plugin-invalid")
+
+
+class ObservationStatusTests(unittest.TestCase):
+    def test_status_exposes_active_checkpoint_capacity(self):
+        class Store:
+            def status(self):
+                return {
+                    "unlocked": True,
+                    "healthy": True,
+                    "serialized_bytes": 1024,
+                    "capacity_bytes": 64 * 1024 * 1024,
+                }
+
+        with tempfile.TemporaryDirectory(prefix="buddy-status-test-") as name:
+            backend = object.__new__(BuddyBackend)
+            backend.observation_path = Path(name) / "absent-observations.lgo"
+            backend._observation_store = Store()
+            backend._startup_observation_error = None
+            status = backend.observation_status()
+        self.assertTrue(status["healthy"])
+        self.assertEqual(status["serialized_bytes"], 1024)
+        self.assertEqual(status["capacity_bytes"], 64 * 1024 * 1024)
 
 
 if __name__ == "__main__":

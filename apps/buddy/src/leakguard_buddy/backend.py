@@ -171,6 +171,7 @@ class BuddyBackend:
 
     def observation_status(self) -> dict[str, Any]:
         created = self.observation_path.is_file()
+        store_status = self._observation_store.status() if self._observation_store is not None else {}
         keyring = self._observation_keyring_status() if created else {
             "unattended_available": False, "keyring_enabled": False,
             "native_backend": None, "error_code": "observation-keyring-not-enabled",
@@ -183,6 +184,9 @@ class BuddyBackend:
             "native_backend": keyring.get("native_backend"),
             "keyring_error": keyring.get("error_code"),
             "startup_error": self._startup_observation_error,
+            "healthy": store_status.get("healthy"),
+            "serialized_bytes": store_status.get("serialized_bytes"),
+            "capacity_bytes": store_status.get("capacity_bytes"),
         }
 
     def _observation_keyring_status(self) -> dict[str, Any]:
