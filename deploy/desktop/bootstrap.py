@@ -64,6 +64,7 @@ def records(root):
                 continue
             item = {"path": relative, "mode": stat.S_IMODE(info.st_mode)}
             if stat.S_ISLNK(info.st_mode):
+                item["mode"] = 0o777  # Symlink access bits are ignored; macOS ditto normalizes them.
                 target = os.readlink(path)
                 if Path(target).is_absolute() or not path.resolve(strict=True).is_relative_to(root):
                     fail("payload-symlink-escape")

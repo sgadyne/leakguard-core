@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import stat
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -63,6 +64,20 @@ class ResourceBoundary(unittest.TestCase):
         link.unlink()
         link.symlink_to(self.root)
         self.rejected(lambda: bootstrap.records(self.resources), "payload-symlink-escape")
+
+    def test_macos_symlink_mode_normalization_preserves_regular_modes(self):
+        if os.name == "nt":
+            self.skipTest("Windows symlink privileges are not assumed")
+        link = self.resources / "python/bin/python"
+        link.symlink_to("python3")
+        expected = bootstrap.records(self.resources)
+        original = Path.lstat
+        def macos_lstat(path):
+            info = original(path)
+            return os.stat_result((stat.S_IFLNK | 0o755, *tuple(info)[1:])) if path == link else info
+        with patch.object(Path, "lstat", macos_lstat):
+            self.assertEqual(bootstrap.records(self.resources), expected)
+        self.assertEqual(next(row for row in expected if row["path"].endswith("/python"))["mode"], 0o777)
 
     def test_unsafe_manifest_and_duplicate_paths_rejected(self):
         self.manifest["pythonExecutable"] = "../outside"
