@@ -6,7 +6,7 @@ instance for multiple parts so spaCy and recognizer state are reused.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from bisect import bisect_right
+from bisect import bisect_left
 from decimal import Decimal, InvalidOperation
 import hashlib
 import importlib
@@ -72,6 +72,7 @@ MANIFEST = PluginManifest(
     options_schema=OptionSchema(fields=_OPTION_FIELDS),
     dependencies=(
         DistributionSpec(name="presidio-analyzer"),
+        DistributionSpec(name="tldextract"),
     ),
     deterministic=True,
     external_state="none",
@@ -83,6 +84,27 @@ MANIFEST = PluginManifest(
 
 class PresidioConfigurationError(ValueError):
     """Safe configuration error; messages never include the input being scanned."""
+
+
+def _offline_email_recognizer(base_recognizer, suffix_extractor):
+    from presidio_analyzer.predefined_recognizers.generic.email_recognizer import EmailRecognizer
+
+    class OfflineEmailRecognizer(EmailRecognizer):
+        def __init__(self):
+            self._offline_suffix_extractor = suffix_extractor
+            super().__init__(
+                patterns=base_recognizer.patterns,
+                context=base_recognizer.context,
+                supported_language=base_recognizer.supported_language,
+                supported_entity=base_recognizer.supported_entities[0],
+                name=base_recognizer.name,
+            )
+
+        def validate_result(self, pattern_text: str):
+            result = self._offline_suffix_extractor(pattern_text)
+            return result.fqdn != ""
+
+    return OfflineEmailRecognizer()
 
 
 def _parse_threshold(value: object) -> float:
@@ -320,6 +342,8 @@ def _load_custom_recognizers(config: dict[str, Any], language: str, entities: tu
 def _build_analyzer(config: dict[str, Any]):
     from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
     from presidio_analyzer.nlp_engine import NlpEngineProvider
+    from presidio_analyzer.predefined_recognizers.generic.email_recognizer import EmailRecognizer
+    from tldextract import TLDExtract
 
     language = config["language"]
     if config["ner_mode"] == "required":
@@ -344,6 +368,11 @@ def _build_analyzer(config: dict[str, Any]):
             raise PresidioConfigurationError("configured Presidio model does not support language")
     registry = RecognizerRegistry(supported_languages=[language])
     registry.load_predefined_recognizers(nlp_engine=nlp_engine, languages=[language])
+    offline_suffix_extractor = TLDExtract(suffix_list_urls=(), cache_dir=None, fallback_to_snapshot=True)
+    for recognizer in tuple(registry.recognizers):
+        if isinstance(recognizer, EmailRecognizer) and recognizer.supported_language == language:
+            registry.remove_recognizer(recognizer.name, language)
+            registry.add_recognizer(_offline_email_recognizer(recognizer, offline_suffix_extractor))
     custom = _load_custom_recognizers(config, language, config["entities"])
     assigned_ids = {}
     custom_origins = {}
@@ -442,7 +471,7 @@ class PresidioDetector:
                 deduplicated[key] = (score, recognizer_id)
         for (entity_type, start, end), score in sorted(deduplicated.items(), key=lambda item: (item[0][1], item[0][2], item[0][0])):
             score, recognizer_id = score
-            line = bisect_right(newline_positions, start) + 1
+            line = bisect_left(newline_positions, start) + 1
             severity = "block" if entity_type in self._config["block_entities"] else "review"
             yield NewFinding(
                 rule=STATIC_RULE_ID,

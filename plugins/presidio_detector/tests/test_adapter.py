@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import socket
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,6 +52,44 @@ def test_pattern_only_emits_value_free_character_locations():
         assert MANIFEST.result_schema == 2
         assert MANIFEST.worker_lifetime == "session"
         assert detector.capabilities()["ner_enabled"] is False
+    finally:
+        detector.close()
+
+
+def test_builtin_email_recognizer_works_with_egress_denied(monkeypatch):
+    def reject_network(*_args, **_kwargs):
+        raise AssertionError("network access attempted")
+
+    monkeypatch.setattr(socket.socket, "connect", reject_network)
+    monkeypatch.setattr(socket, "create_connection", reject_network)
+    detector = create_plugin({"entities": ["EMAIL_ADDRESS"], "ner-mode": "pattern-only"})
+    try:
+        findings = _findings(detector, "contact=person@example.com")
+        assert len(findings) == 1
+        assert findings[0].analysis.entity_type == "EMAIL_ADDRESS"
+    finally:
+        detector.close()
+
+
+def test_newline_start_offset_uses_core_line_convention():
+    detector = create_plugin({"entities": ["EMAIL_ADDRESS"], "ner-mode": "pattern-only"})
+
+    class FixedResultAnalyzer:
+        def analyze(self, **_kwargs):
+            return [SimpleNamespace(
+                entity_type="EMAIL_ADDRESS",
+                start=1,
+                end=2,
+                score=0.5,
+                recognition_metadata={},
+            )]
+
+    detector._analyzer = FixedResultAnalyzer()
+    try:
+        findings = _findings(detector, "a\nb")
+        assert len(findings) == 1
+        assert findings[0].analysis.start == 1
+        assert findings[0].line == 1
     finally:
         detector.close()
 

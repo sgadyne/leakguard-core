@@ -27,6 +27,10 @@ parts in the worker session; model files are not rehashed per part. Presidio's
 spaCy engine can download missing models automatically, so this preflight
 deliberately fails before that path is reached. Model files must follow the deployment's
 licensing and distribution review; they are outside this package.
+The built-in email recognizer keeps Presidio's regex and context rules, but
+uses an AnalyzerEngine-owned `tldextract` configured with no suffix-list URLs,
+no cache directory, and its packaged snapshot. Email validation therefore
+does not fetch or cache public-suffix data.
 
 ## Explicit configuration
 
