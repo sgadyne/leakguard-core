@@ -487,7 +487,7 @@ def _aggregate_checks(benchmarks: list[dict], part_curve: list[dict],
         "cache_reuse_failures": cache_reuse_failures,
         "coverage_failures": coverage_failures
         + sum(not item["covered_text_surfaces_complete"] for item in part_curve),
-        "installed_hook_failures": sum(
+        "source_hook_failures": sum(
             item["clean_exit_code"] != 0 or not item["positive_blocked"]
             or not item["positive_output_redacted"] for item in hook_rows
         ),
@@ -635,8 +635,8 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
         "worker_policy": worker_policy,
         "file_counts": list(file_counts), "hook_repetitions": hook_repetitions,
         "file_curve": benchmarks,
-        "part_curve": part_curve, "hook_latency": hook_rows,
-        "hook_latency_summary": _hook_latency_summary(hook_rows),
+        "part_curve": part_curve, "source_hook_latency": hook_rows,
+        "source_hook_latency_summary": _hook_latency_summary(hook_rows),
         "scan_workers_tested": list(WORKER_COUNTS),
         "service_open_seconds": round(sum(service_open_seconds_by_workers.values()), 6),
         "service_open_seconds_by_workers": service_open_seconds_by_workers,
@@ -654,12 +654,13 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
             "parent_lifetime_high_water_bytes": "Parent process lifetime RSS high-water, not per-operation peak.",
             "largest_waited_child_lifetime_high_water_bytes": "Largest waited-for child process lifetime RSS high-water per getrusage(RUSAGE_CHILDREN); not cumulative or a process-tree total.",
             "sampled_process_tree_peak_bytes": "Approximate peak sum of VmRSS for the benchmark process and observed descendants, sampled every 20ms on Linux. It can miss shorter-lived children and double-count shared pages.",
-            "hook_latency_summary": "Median and nearest-rank p95 for repeated installed clean and blocked synthetic commits; no optimization or speedup claim is implied.",
+            "source_hook_latency_summary": "Median and nearest-rank p95 for synthetic clean and blocked commits through hooks generated from this source checkout; this is not installed-release latency.",
             "service_open_seconds": "ScanService constructor time, recorded separately from scan calls.",
             "worker_policy": "Explicit worker policy selected from the bounded config; empty config means strict.",
         },
         "known_measurement_gaps": {
             "sqlite_lock_time": "unavailable: lock acquisition/hold time is not instrumented",
+            "installed_hook_latency": "unavailable: hook samples execute this source checkout, not a separately installed immutable release",
         },
         "checks": checks,
     }

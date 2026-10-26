@@ -465,7 +465,7 @@ class BenchmarkAggregationTests(unittest.TestCase):
 
         self.assertEqual(checks, {
             "equivalence_failures": 0, "cache_reuse_failures": 0,
-            "coverage_failures": 0, "installed_hook_failures": 0,
+            "coverage_failures": 0, "source_hook_failures": 0,
             "scan_identity_failures": 0,
         })
         self.assertTrue(all(row["consistent_within_case"] for row in identities))
