@@ -111,10 +111,10 @@ LogLevel ERROR
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
+            # Fixture private keys have no purpose after either outcome.
+            (root / "client").unlink(missing_ok=True)
+            (root / "host").unlink(missing_ok=True)
     assert hashlib.sha256((source / "example.txt").read_bytes()).hexdigest() == original
-    # Secret test keys have no continued purpose after this bounded receipt.
-    (root / "client").unlink()
-    (root / "host").unlink()
     print(json.dumps({"ssh_loopback": "passed", "external_ssh": "unverified", "redacted_findings": 1,
                       "upload_hash": "verified", "source_unchanged": True, "daemon_stopped": process.poll() is not None,
                       "offline_bundle_deploy": "passed" if deployed else "not-performed",
