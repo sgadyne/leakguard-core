@@ -187,3 +187,18 @@ def test_cycle_reset_preserves_evidence_and_refuses_live_owner(tmp_path, memory)
         assert store.cycle_status(new_lease)['pending_directories'] == 1
     finally:
         store.close()
+
+
+def test_read_only_keyring_probe_and_unchanged_close(tmp_path):
+    path = tmp_path / 'observations.lgo'
+    store = EncryptedScanStore.create(path, PASS)
+    store.close()
+    original = path.read_bytes()
+    keys_before = sorted(p.name for p in tmp_path.iterdir())
+    status = EncryptedScanStore.keyring_status(path)
+    assert status['unattended_available'] is False
+    assert status['error_code'] == 'observation-keyring-not-enabled'
+    assert sorted(p.name for p in tmp_path.iterdir()) == keys_before
+    reopened = EncryptedScanStore.open(path, PASS)
+    reopened.close()
+    assert path.read_bytes() == original

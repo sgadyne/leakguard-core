@@ -27,6 +27,7 @@ class EncryptedScanStore:
         self._closed = False
         self._poisoned = False
         self._unattended_verified = False
+        self._dirty = plain is None
         self._max_bytes = max_bytes
         material_key = hmac.new(key, b"leakguard:observation-material-identity:v1", hashlib.sha256).digest()
         self._store = SQLiteScanStore.from_memory(plain, config=config, max_bytes=max_bytes, material_key=material_key)
@@ -38,6 +39,7 @@ class EncryptedScanStore:
                 self._store._memory_material_key = envelope._unb64(saved_key[0], 32)
             else:
                 self._persist_material_key()
+                self._dirty = True
             self._store.conn.commit()
         except Exception:
             self._store.close()
@@ -73,6 +75,26 @@ class EncryptedScanStore:
         except Exception:
             lock.close()
             raise
+
+    @classmethod
+    def keyring_status(cls, path: Path):
+        """Read-only doctor probe: no lock file, key writes or checkpoints."""
+        from .keyring import NativeKeyring
+        status = {"unattended_available": False, "keyring_enabled": False,
+                  "native_backend": None, "error_code": None}
+        try:
+            value = read_bounded(path, envelope.MAX_FILE)
+            header, _, _ = envelope.parse(value, "observations")
+            status["keyring_enabled"] = "keyring" in header
+            if not status["keyring_enabled"]:
+                raise VaultError("observation-keyring-not-enabled")
+            provider = NativeKeyring()
+            status["native_backend"] = provider.status()["native_backend"]
+            envelope.decrypt_with_key(value, "observations", provider.load(header["id"]))
+            status["unattended_available"] = True
+        except VaultError as error:
+            status["error_code"] = error.code
+        return status
 
     @classmethod
     def open_keyring(cls, path: Path, *, keyring=None, config=None, max_bytes=envelope.MAX_STATE):
@@ -118,6 +140,8 @@ class EncryptedScanStore:
                 self._store.set_deadline(self._deadlines.get(threading.get_ident()))
                 if name in _MUTATIONS and self._size() >= self._max_bytes:
                     raise StateError("state-capacity-limit")
+                if name in _MUTATIONS:
+                    self._dirty = True
                 try:
                     return getattr(self._store, name)(*args, **kwargs)
                 except StateError:
@@ -140,6 +164,7 @@ class EncryptedScanStore:
             header, value = envelope.encode(self._header, bytes(self._key), plain)
             atomic_write(self._path, value, replace=replace)
             self._header = header
+            self._dirty = False
         except VaultError as error:
             self._poisoned = True
             raise StateError("state-capacity-limit" if error.code == "vault-capacity-limit" else "state-checkpoint-failed") from None
@@ -214,7 +239,7 @@ class EncryptedScanStore:
             if self._closed:
                 return {"unlocked": False, "unattended_available": False, "capacity_bytes": self._max_bytes}
             self._store.set_deadline(None)
-            return {"unlocked": True, "healthy": not self._poisoned, "unattended_available": self._unattended_verified,
+            return {"unlocked": True, "healthy": not self._poisoned, "unattended_available": self._unattended_verified and not self._poisoned,
                     "keyring_enabled": "keyring" in self._header,
                     "serialized_bytes": self._size(), "capacity_bytes": self._max_bytes}
 
@@ -293,7 +318,7 @@ class EncryptedScanStore:
             if self._closed:
                 return
             try:
-                if not self._poisoned:
+                if not self._poisoned and self._dirty:
                     self._checkpoint()
             finally:
                 self._dispose()
