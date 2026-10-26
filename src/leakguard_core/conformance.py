@@ -34,7 +34,7 @@ _EXTRACTION_CODES = frozenset({
     "input-limit", "unsupported-format", "format-mismatch", "ambiguous-format",
     "decode-failed", "encrypted", "no-text", "dependency-unavailable", "extract-failed",
     "extract-timeout", "extract-crashed", "extract-output-limit", "extract-part-limit",
-    "resource-bound-unavailable", "cancelled",
+    "resource-bound-unavailable", "worker-memory-limit", "cancelled",
 })
 
 
@@ -250,24 +250,26 @@ class ConformanceReport:
         return json.dumps(self.to_dict(), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
-def check_detector(module: str, options: Mapping, cases: Sequence[DetectorCase]) -> ConformanceReport:
+def check_detector(module: str, options: Mapping, cases: Sequence[DetectorCase], *, worker_policy='strict') -> ConformanceReport:
     """Check an explicitly configured detector through the core plugin adapter.
 
     Adapter execution is deliberately delegated to the core plugin worker; this
     module never imports an extension or invokes extension code itself.
     """
-    return _check_component(ConformanceKind.DETECTOR, module, options, cases)
+    return _check_component(ConformanceKind.DETECTOR, module, options, cases, worker_policy=worker_policy)
 
 
-def check_extractor(module: str, options: Mapping, cases: Sequence[ExtractorCase]) -> ConformanceReport:
+def check_extractor(module: str, options: Mapping, cases: Sequence[ExtractorCase], *, worker_policy='strict') -> ConformanceReport:
     """Check an explicitly configured extractor through the core plugin adapter."""
-    return _check_component(ConformanceKind.EXTRACTOR, module, options, cases)
+    return _check_component(ConformanceKind.EXTRACTOR, module, options, cases, worker_policy=worker_policy)
 
 
-def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases: Sequence) -> ConformanceReport:
+def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases: Sequence, *, worker_policy='strict') -> ConformanceReport:
     # This thin bridge intentionally depends on the public core registry contract
     # that owns supervised loading, manifest validation and output sanitization.
     try:
+        if type(worker_policy) is not str or worker_policy not in {'strict', 'supervised-alpha'}:
+            raise ValueError
         if type(module) is not str or len(module) > 240 or not _MODULE.fullmatch(module):
             raise ValueError
         normalized_options = _validated_options(options)
@@ -293,7 +295,7 @@ def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases
     try:
         from . import plugins
         try:
-            loaded = plugins.load([{"module": module, "options": normalized_options}])
+            loaded = plugins.load([{"module": module, "options": normalized_options}], worker_policy=worker_policy)
         except plugins.PluginError as error:
             count = len(normalized_cases)
             issue = _plugin_issue(error.code, "component-load", None, kind)
@@ -314,8 +316,8 @@ def _check_component(kind: ConformanceKind, module: str, options: Mapping, cases
                 issues=(ConformanceIssue("component-kind", ConformanceCode.COMPONENT_INVALID),),
             )
         if kind is ConformanceKind.DETECTOR:
-            return _check_detector_loaded(plugins, handle, component_id, normalized_cases)
-        return _check_extractor_loaded(plugins, handle, component_id, normalized_cases)
+            return _check_detector_loaded(plugins, handle, component_id, normalized_cases, worker_policy=worker_policy)
+        return _check_extractor_loaded(plugins, handle, component_id, normalized_cases, worker_policy=worker_policy)
     except Exception:
         # Never surface an extension exception, option, input, or traceback.
         count = len(normalized_cases)
@@ -354,7 +356,7 @@ def _plugin_issue(code: str, check_id: str, case_id: str | None,
 
 
 def _check_detector_loaded(plugins, handle, component_id: str,
-                          cases: tuple[DetectorCase, ...]) -> ConformanceReport:
+                          cases: tuple[DetectorCase, ...], *, worker_policy=None) -> ConformanceReport:
     issues = []
     passed = 0
     for case in cases:
@@ -362,6 +364,7 @@ def _check_detector_loaded(plugins, handle, component_id: str,
             actual = tuple(plugins.detect(
                 [handle], case.text, case.logical_path, case.part_id,
                 format_id=case.format_id, timeout=_CONFORMANCE_TIMEOUT_SECONDS,
+                **({'worker_policy': worker_policy} if worker_policy is not None else {}),
             ))
             actual_rows = tuple(sorted((item.rule, item.line, item.line, item.severity) for item in actual))
             expected_rows = tuple(sorted(
@@ -382,7 +385,7 @@ def _check_detector_loaded(plugins, handle, component_id: str,
 
 
 def _check_extractor_loaded(plugins, handle, component_id: str,
-                            cases: tuple[ExtractorCase, ...]) -> ConformanceReport:
+                            cases: tuple[ExtractorCase, ...], *, worker_policy=None) -> ConformanceReport:
     """Use the registry's disposition-aware helper, added with plugin SDK support."""
     runner = getattr(plugins, "extract_component", None)
     if not callable(runner):
@@ -397,7 +400,8 @@ def _check_extractor_loaded(plugins, handle, component_id: str,
         try:
             result = runner(handle, case.data, case.logical_path,
                             format_id=case.expected_format, limits=ExtractionLimits(),
-                            timeout=_CONFORMANCE_TIMEOUT_SECONDS)
+                            timeout=_CONFORMANCE_TIMEOUT_SECONDS,
+                            **({'worker_policy': worker_policy} if worker_policy is not None else {}))
             parts = tuple(ExpectedPart.from_text(part.part_id, part.text) for part in result.parts)
             matched = (
                 result.format_id == case.expected_format
@@ -549,6 +553,7 @@ def main(argv=None) -> int:
     parser.add_argument("--module", required=True, help="explicit component import path")
     parser.add_argument("--cases", required=True, help="author case JSON file")
     parser.add_argument("--options", help="optional JSON object file for component options")
+    parser.add_argument("--worker-policy", choices=("strict", "supervised-alpha"), default="strict")
     try:
         args = parser.parse_args(argv)
         kind = ConformanceKind(args.kind)
@@ -557,8 +562,8 @@ def main(argv=None) -> int:
         if type(options) is not dict:
             raise _CliSetupError
         cases = _detector_cases(case_data) if kind is ConformanceKind.DETECTOR else _extractor_cases(case_data)
-        report = (check_detector(args.module, options, cases) if kind is ConformanceKind.DETECTOR
-                  else check_extractor(args.module, options, cases))
+        report = (check_detector(args.module, options, cases, worker_policy=args.worker_policy) if kind is ConformanceKind.DETECTOR
+                  else check_extractor(args.module, options, cases, worker_policy=args.worker_policy))
     except SystemExit as error:
         # argparse's built-in help is static, successful output rather than a
         # machine-readable run receipt. Keep its standard exit-0 behavior.
