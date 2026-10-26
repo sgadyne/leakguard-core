@@ -31,9 +31,10 @@ keywords = ["password", "passwd", "passphrase", "pwd"]
 [[rules]]
 id = "xml-password"
 description = "Literal password in XML application settings"
-regex = '''(?i)\b(?:key|name)\s*=\s*["'](?:[^"'\r\n]{0,40}[_:.])?(?:password|passwd|pwd)["']\s+value\s*=\s*["']([^"'\r\n]{8,120})["']'''
+regex = '''(?i)\b((?:key|name)\s*=\s*["'](?:[^"'\r\n]{0,40}[_:.])?(?:password|passwd|pwd)["']\s+value\s*=\s*["'][^"'\r\n]{1,120}["'])'''
 secretGroup = 1
+entropy = 0
 keywords = ["password", "passwd", "pwd"]
   [[rules.allowlists]]
   regexTarget = "secret"
-  regexes = ['''(?i)^(?:\$\{[a-z_][a-z0-9_]*\}|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password)$''']
+  regexes = ['''(?i)^(?:key|name)\s*=\s*["'](?:[^"'\r\n]{0,40}[_:.])?(?:password|passwd|pwd)["']\s+value\s*=\s*["'](?:\$\{[a-z_][a-z0-9_]*\}|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password|change[-_ ]?me|replace[-_ ]?me|not[-_ ]?a[-_ ]?secret|test|none|null|undefined)["']$''']

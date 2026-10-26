@@ -6,34 +6,46 @@ bundle. It does not change a Git hook until a user selects a repository and
 enables that hook.
 
 The examples use POSIX shell syntax. Windows has not been validated in this
-release; its private runtime command paths are `Scripts\leakguard-extensions.exe`
-and `Scripts\leakguard.exe`. Keep the registry, config and script under a
+release; its private runtime command paths are
+`venv\Scripts\leakguard-extensions.exe`, `venv\Scripts\leakguard.exe` and
+`venv\Scripts\python.exe`. Keep the registry, config and script under a
 user-private directory with access limited to that account.
 
 ## 1. Install the local bundle
 
 Install LeakGuard from the approved offline bundle with its platform installer.
-The runtime and all dependencies stay under the user's private installation.
-For the remaining commands, set these paths to the actual installation and
-local bundle locations:
+The installer prints JSON containing `installed` (the absolute versioned
+release directory) and `runtime_python`; retain that install receipt. Set
+`RELEASE` to its `installed` path, so the wheelhouse and extension tool come
+from the same immutable release. The installed release wheelhouse is
+`$RELEASE/wheelhouse`. Set `SIDECARS` to a private folder containing any
+reviewed option-specific case JSON files; these sidecars are delivered
+separately from the wheelhouse, which contains only hash-pinned wheels.
 
 ```sh
-PY=/absolute/path/to/leakguard/runtime/bin/python
-EXT=/absolute/path/to/leakguard/runtime/bin/leakguard-extensions
-CLI=/absolute/path/to/leakguard/runtime/bin/leakguard
+RELEASE=/absolute/path/from-install-receipt/releases/0.2.0-alpha.1
+RELEASE_WHEELHOUSE="$RELEASE/wheelhouse"
+PY="$RELEASE/venv/bin/python"
+EXT="$RELEASE/venv/bin/leakguard-extensions"
+CLI="$RELEASE/venv/bin/leakguard"
 STATE=/absolute/path/to/user-private/leakguard
 CORE_CONFIG=/absolute/path/to/user-private/leakguard/sources.json
-SENSITIVE_WHEEL=/absolute/path/to/release/plugins/leakguard_sensitive_basics-0.1.0-py3-none-any.whl
-FIRM_WHEEL=/absolute/path/to/reviewed/leakguard_firm_example-0.1.0-py3-none-any.whl
-SENSITIVE_PROMOTED_CASES=/absolute/path/to/release/sensitive-basics/cases-promoted.json
-FIRM_PROMOTED_CASES=/absolute/path/to/reviewed/firm_plugin/cases-promoted.json
+SIDECARS=/absolute/path/to/reviewed-sidecars
+SENSITIVE_WHEEL="$RELEASE_WHEELHOUSE/leakguard_sensitive_basics-0.1.0-py3-none-any.whl"
+FIRM_WHEEL="$RELEASE_WHEELHOUSE/leakguard_firm_example-0.1.0-py3-none-any.whl" # replace with your reviewed firm wheel
+SENSITIVE_PROMOTED_CASES="$SIDECARS/sensitive-basics-cases-promoted.json"
+FIRM_PROMOTED_CASES="$SIDECARS/firm-cases-promoted.json"
 WORKER_POLICY="" # On macOS, set to: --worker-policy supervised-alpha
 ```
 
-Keep the option-specific case files beside the reviewed wheel in the approved
-offline release bundle. The wheel's default conformance cases cover its default
-options; a promotion or custom identifier prefix needs a matching reviewed
-`--cases` file because it changes expected findings.
+If you just installed the bundle, copy `RELEASE` from the install receipt's
+`installed` value. To install an extension after an update or rollback, point
+it at the release selected by that operation. Keep option-specific case files
+in the approved offline handoff beside the bundle, outside `wheelhouse` so they
+do not alter the installer's hash-pinned wheel set. The wheel's default
+conformance cases cover its default options; a promotion or custom identifier
+prefix needs a matching reviewed `--cases` file because it changes expected
+findings.
 
 `sources.json` is the local source configuration already used by the firm. Keep
 the chosen roots and exclusions there; do not store passwords or personal
