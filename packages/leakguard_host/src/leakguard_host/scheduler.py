@@ -278,7 +278,7 @@ class HostService:
 
     def jobs(self) -> list[dict]:
         with self._lock:
-            return deepcopy(list(self._state["jobs"].values()))
+            return deepcopy(sorted(self._state["jobs"].values(), key=lambda job: (job["created_at"], job["id"]), reverse=True))
 
     def job(self, job_id: str) -> dict:
         with self._lock:
@@ -295,7 +295,8 @@ class HostService:
             raise HostError("source-busy")
         prior_jobs = [job for job in self._state["jobs"].values() if job["source_id"] == source_id]
         reset = getattr(self._store, "reset_cycle", None)
-        abandoned = any(job["state"] in {"cancelled", "failed"} for job in prior_jobs)
+        latest = max(prior_jobs, key=lambda job: (job["created_at"], job["id"])) if prior_jobs else None
+        abandoned = latest is not None and latest["state"] in {"cancelled", "failed"}
         try:
             if callable(reset):
                 reset("audit:host-" + source_id)
@@ -308,7 +309,8 @@ class HostService:
         except Exception as error:
             raise HostError("state-cycle-busy" if getattr(error, "code", None) == "state-cycle-busy" else "state-reset-failed") from None
         # Retain a bounded history; engine evidence belongs to the ScanStore.
-        final = [key for key, job in self._state["jobs"].items() if job["state"] in _FINAL]
+        final = sorted((key for key, job in self._state["jobs"].items() if job["state"] in _FINAL),
+                       key=lambda key: (self._state["jobs"][key]["created_at"], key))
         for key in final[:max(0, len(self._state["jobs"]) - 199)]:
             del self._state["jobs"][key]
         now = _timestamp(self._clock())
