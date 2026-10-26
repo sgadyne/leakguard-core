@@ -411,14 +411,27 @@ class AbsenceProof:
             return False
         if not self.anchor.valid():
             return False
+        descriptor = None
         try:
-            os.stat(self.anchor.source_path, follow_symlinks=False)
-        except FileNotFoundError:
-            # A missing intermediate/unmounted/replaced directory cannot authorize
-            # a negative. The same recorded traversal must still be available.
-            return self.anchor.valid()
-        except OSError:
+            boundary = FilesystemBoundary(root)
+            descriptor = boundary.directory_fd(source.parent)
+            try:
+                if descriptor is None:
+                    boundary.check(source.parent, directory=True)
+                    os.stat(source, follow_symlinks=False)
+                else:
+                    os.stat(source.name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                # Bind the negative to the same nofollow traversal as acquisition.
+                # A moved directory linked back to its original inode must not
+                # turn an out-of-scope deletion into an in-scope absence proof.
+                boundary.check(source.parent, directory=True)
+                return self.anchor.valid()
+        except (AcquisitionError, OSError):
             return False
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         return False
 
 

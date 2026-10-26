@@ -16,13 +16,15 @@ class PathAliasTests(unittest.TestCase):
             actual.mkdir()
             alias = base / 'alias'
             alias.symlink_to(actual, target_is_directory=True)
-            source = alias / 'candidate.txt'
+            root = alias / 'scope'
+            root.mkdir()
+            source = root / 'candidate.txt'
             source.write_text('synthetic')
             anchor = capture_anchor(source)
             self.assertEqual(anchor.source_path, str(source.absolute()))
             self.assertTrue(anchor.valid())
             source.unlink()
-            self.assertTrue(confirm_absence(source, alias, anchor).valid())
+            self.assertTrue(confirm_absence(source, root, anchor).valid())
 
     def test_retargeted_alias_cannot_prove_absence(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-path-retarget-') as temporary:

@@ -7,11 +7,31 @@ from unittest.mock import patch
 
 from leakguard_core import backends, engine, models as m
 from leakguard_core.scan_store import MemoryScanStore
-from leakguard_core.sources import AcquisitionError, FilesystemBoundary, acquire_file, scoped_scandir, _bounded_file
+from leakguard_core.sources import AcquisitionError, FilesystemBoundary, acquire_file, capture_anchor, confirm_absence, scoped_scandir, _bounded_file
 
 
 @unittest.skipIf(os.name == 'nt', 'native Windows reparse validation requires its runner')
 class SourceBoundaryTests(unittest.TestCase):
+    def test_same_inode_link_cannot_authorize_out_of_scope_absence(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-absence-boundary-') as temporary:
+            base = Path(temporary).resolve()
+            root, outside = base / 'scope', base / 'outside'
+            root.mkdir(); outside.mkdir()
+            child = root / 'nested'; child.mkdir()
+            source = child / 'candidate.txt'; source.write_text('synthetic')
+            anchor = capture_anchor(source)
+            source.unlink()
+            proof = confirm_absence(source, root, anchor)
+            self.assertTrue(proof.valid())
+            moved = outside / 'nested'
+            child.rename(moved)
+            child.symlink_to(moved, target_is_directory=True)
+            # Following inode identity alone would accept this replacement.
+            self.assertTrue(anchor.valid())
+            self.assertFalse(proof.valid())
+            with self.assertRaises(AcquisitionError):
+                confirm_absence(source, root, anchor)
+
     def test_changed_ancestor_rejected_before_source_read_or_directory_enumeration(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-boundary-') as temporary:
             base = Path(temporary).resolve()
