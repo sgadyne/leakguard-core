@@ -213,3 +213,24 @@ in normal application mode.
 - Tray opens Sources; no fictitious global Pause schedules action.
 - Phase 2 must resolve direct finding lookup/page-row detail, native lifecycle,
   standalone resources, session/CSP bootstrap and honest capability gates.
+## Phase 2 decision — frozen 2026-10-26
+
+Implementation is now authorized against the frozen
+[architecture](../design/desktop-v0/architecture.md),
+[UI/native contracts](../design/desktop-v0/contracts.md) and
+[three-lane task prompts](../design/desktop-v0/tasks.md).
+These override earlier tentative runtime, tray and ownership choices.
+
+Electron owns one native shell and one private backend. The separate Password
+Buddy desktop profile never auto-attaches to legacy LeakGuard state. Bundle
+standalone CPython and offline wheels; prepare a stable per-user private venv
+for existing plugin/Git behavior. Buddy is a new 0.1.0a2 wheel with generated
+flat React assets, with honest manifest provenance. Main/preload uses a narrow
+private JSONL control channel and exact-origin IPC; renderer API remains
+same-origin cookie/CSRF authenticated with per-response style nonces.
+
+Sol A owns shell/backend; Luna owns React/static files; Sol B owns standalone
+runtime/package tooling and integration harness. Root alone merges and performs
+native Mac acceptance. Windows packages remain native-unverified until tested.
+Native OS session-lock behavior is not verified by simulated events, and Simon's
+OS session must not be locked without coordinating that exact action.
