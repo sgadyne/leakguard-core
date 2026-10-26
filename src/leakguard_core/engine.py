@@ -826,9 +826,10 @@ class ScanService:
                             return
                         if progress_supported and not exhausted:
                             self.store.set_directory_progress(claim, DirectoryProgress(before, position, prefix.hexdigest()))
-                        self.store.finish_directory(claim, success=True if exhausted else None, signature=before if exhausted else None)
+                        self.store.finish_directory(claim, success=True if exhausted else None if progress_supported else False, signature=before if exhausted else None)
                         if not exhausted:
-                            issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, required=True))
+                            code = m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED if progress_supported else m.ErrorCode.INPUT_LIMIT
+                            issues.append(m.CoverageIssue(code, required=True))
                             if cancel and cancel():
                                 return
                             # Drain the newly queued files before this partial

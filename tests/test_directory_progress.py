@@ -89,6 +89,25 @@ class DirectoryProgressTests(unittest.TestCase):
             self.assertTrue(report.coverage.required_complete)
             service.close()
 
+    def test_store_without_progress_extension_fails_explicitly_and_drains_files(self):
+        class LegacyStore:
+            def __init__(self):
+                self.store = MemoryScanStore()
+            def __getattr__(self, name):
+                if name in {'get_directory_progress', 'set_directory_progress'}:
+                    raise AttributeError(name)
+                return getattr(self.store, name)
+        with tempfile.TemporaryDirectory(prefix='leakguard-progress-') as folder:
+            root = Path(folder)
+            for number in range(4):
+                (root / f'{number}.txt').write_text('synthetic')
+            service = engine.ScanService({'audit_scopes': {'synthetic': str(root)}}, store=LegacyStore())
+            report = service.audit('synthetic', limits=m.ScanLimits(5, 10, max_directory_entries=2))
+            self.assertEqual(len(report.results), 2)
+            self.assertFalse(report.coverage.required_complete)
+            self.assertTrue(any(i.required and i.code is m.ErrorCode.INPUT_LIMIT for i in report.issues))
+            service.close()
+
     def test_progress_methods_reject_expired_or_unowned_claims(self):
         for kind in ('memory', 'sqlite'):
             with self.subTest(store=kind), tempfile.TemporaryDirectory(prefix='leakguard-progress-') as folder:
