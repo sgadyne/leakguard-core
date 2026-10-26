@@ -97,6 +97,23 @@ class IndependentLabelTests(unittest.TestCase):
 
 
 class AcceptanceStagingTests(unittest.TestCase):
+    def test_wheel_pip_install_and_check_target_the_runtime_being_tested(self):
+        base_python = Path("/private/base/bin/python3.11")
+        venv_python = Path("/private/work/installed-venv/bin/python")
+        for use_venv, expected in ((True, venv_python), (False, base_python)):
+            with self.subTest(use_venv=use_venv):
+                install = run_acceptance._pip_target_command(
+                    base_python, venv_python, use_venv,
+                    "install", "--target", "/private/site-packages", "wheel.whl",
+                )
+                check = run_acceptance._pip_target_command(
+                    base_python, venv_python, use_venv, "check",
+                )
+                prefix = [sys.executable, "-m", "pip", "--python", str(expected)]
+                self.assertEqual(install, [*prefix, "install", "--target",
+                                           "/private/site-packages", "wheel.whl"])
+                self.assertEqual(check, [*prefix, "check"])
+
     def test_unrelated_test_root_receives_required_harness_and_deploy_files(self):
         expected_tools = {
             "_safe_inputs.py", "benchmark_scan.py", "run_corpus.py",

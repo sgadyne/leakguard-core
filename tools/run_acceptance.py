@@ -125,6 +125,13 @@ def _command(argv, *, cwd: Path, env: dict[str, str], stage: str,
     return process
 
 
+def _pip_target_command(target_python: Path, target: Path, use_venv: bool,
+                        *arguments: str) -> list[str]:
+    """Build a pip --python command for the interpreter acceptance will run."""
+    interpreter = target if use_venv else target_python
+    return [sys.executable, "-m", "pip", "--python", str(interpreter), *arguments]
+
+
 def _parse_unittest_summary(stderr: str, stdout: str = "") -> dict | None:
     """Parse unittest's stderr summary; discard arbitrary test stdout."""
     del stdout
@@ -473,8 +480,12 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     install_env = _environment(config=config, state=work / "state", gitleaks=gitleaks,
                                global_gitconfig=work / "gitconfig", base=env)
     (work / "state").mkdir(mode=0o700)
-    pip_install = [sys.executable, "-m", "pip", "--python", str(target_python),
-                   "install", "--disable-pip-version-check", "--target", str(target_site)]
+    # Install and dependency checks must inspect the same interpreter used to
+    # execute the staged suite. In fallback mode `target` is target_python.
+    pip_install = _pip_target_command(
+        target_python, target, use_venv,
+        "install", "--disable-pip-version-check", "--target", str(target_site),
+    )
     _command([*pip_install, str(wheels[0])], cwd=work, env=install_env, stage="core-wheel-install")
     if args.documents_extra:
         _command([*pip_install[:-2], "--target", str(target_site), "--upgrade",
@@ -483,11 +494,11 @@ def _wheel_acceptance(work: Path, args, config: Path, gitleaks: Path) -> dict:
     _command([*pip_install[:-2], "--target", str(target_site), "--no-deps",
               *map(str, extension_wheels)], cwd=work, env=install_env,
              stage="extension-wheel-install")
-    # pip --python re-executes pip under target_python, so dependency markers
-    # use the requested target runtime rather than the builder interpreter.
+    # pip --python re-executes pip under the selected acceptance interpreter,
+    # so dependency markers and `pip check` see the installed runtime.
     check_env = dict(install_env, PYTHONPATH=str(target_site))
-    _command([sys.executable, "-m", "pip", "--python", str(target_python), "check"], cwd=work, env=check_env,
-             stage="dependency-check")
+    _command(_pip_target_command(target_python, target, use_venv, "check"),
+             cwd=work, env=check_env, stage="dependency-check")
 
     installed_tests = work / "installed-tests"
     installed_tests.mkdir(mode=0o700)
