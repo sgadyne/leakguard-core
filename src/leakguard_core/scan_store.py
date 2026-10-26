@@ -314,7 +314,7 @@ class MemoryScanStore:
         fresh = current is None or current['completed'] is not None
         generation = (current['generation'] + 1) if current and fresh else current['generation'] if current else 1
         owner = uuid.uuid4().hex
-        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None, 'started': datetime.now(timezone.utc).isoformat() if fresh else current['started'], 'has_checked': bool(current and not fresh and current.get('has_checked'))}
+        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None, 'started': datetime.now(timezone.utc).isoformat() if fresh else current['started'], 'has_checked': bool(current and not fresh and current.get('has_checked')), 'work_identity': current.get('work_identity') if current else None}
         self.cycles[scope] = cycle
         lease = WorkLease(scope, generation, owner)
         for key, work in self.work.items():
@@ -323,6 +323,22 @@ class MemoryScanStore:
         if fresh and root is not None:
             self.enqueue_work(lease, ((str(root), 'directory', 10),))
         return lease
+
+    @_synchronized
+    def bind_cycle_identity(self, lease, identity, *, root):
+        if (not self.lease_valid(lease) or type(identity) is not str
+                or not __import__('re').fullmatch('[0-9a-f]{64}', identity)):
+            raise StateError()
+        cycle = self.cycles[lease.scope]
+        if cycle.get('work_identity') == identity:
+            return False
+        self.invalidate_scope(root)
+        for key in tuple(self.work):
+            if key[:2] == (lease.scope, lease.generation):
+                del self.work[key]
+        cycle.update(work_identity=identity, started=datetime.now(timezone.utc).isoformat(), has_checked=False)
+        self.enqueue_work(lease, ((str(__import__('pathlib').Path(root).absolute()), 'directory', 10),))
+        return True
 
     @_synchronized
     def lease_valid(self, lease):
@@ -705,7 +721,7 @@ CREATE INDEX IF NOT EXISTS scan_runs_repository ON scan_runs(repository,finished
 CREATE INDEX IF NOT EXISTS scan_runs_finished ON scan_runs(finished_at DESC);
 CREATE TABLE IF NOT EXISTS source_anchors(input_key TEXT PRIMARY KEY,payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scan_cache(cache_key TEXT PRIMARY KEY,scan_id TEXT NOT NULL REFERENCES input_scans(scan_id));
-CREATE TABLE IF NOT EXISTS audit_cycles(scope TEXT PRIMARY KEY,generation INTEGER,started TEXT,completed TEXT,failed INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_until REAL);
+CREATE TABLE IF NOT EXISTS audit_cycles(scope TEXT PRIMARY KEY,generation INTEGER,started TEXT,completed TEXT,failed INTEGER NOT NULL DEFAULT 0,owner TEXT,lease_until REAL,work_identity TEXT);
 CREATE TABLE IF NOT EXISTS audit_work(scope TEXT,generation INTEGER,path TEXT,kind TEXT,priority INTEGER,attempts INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,claimed TEXT,verified INTEGER NOT NULL DEFAULT 0,directory_signature TEXT,directory_checked INTEGER NOT NULL DEFAULT 0,directory_progress TEXT,PRIMARY KEY(scope,generation,path,kind));
 '''
 
@@ -752,6 +768,7 @@ def open_database(state_dir):
             'files': [('priority', 'INTEGER NOT NULL DEFAULT 100')],
             'audit_work': [('done', 'INTEGER NOT NULL DEFAULT 0'), ('claimed', 'TEXT'), ('verified', 'INTEGER NOT NULL DEFAULT 0'), ('directory_signature', 'TEXT'), ('directory_checked', 'INTEGER NOT NULL DEFAULT 0'), ('directory_progress', 'TEXT')],
             'current_inputs': [('reserved_at', 'TEXT')],
+            'audit_cycles': [('work_identity', 'TEXT')],
         }.items():
             present = {row[1] for row in conn.execute('PRAGMA table_info(' + table + ')')}
             for column, declaration in additions:
@@ -1053,6 +1070,31 @@ class SQLiteScanStore:
     @_bounded_sql
     def lease_valid(self, lease):
         return self._lease_valid(lease)
+
+    @_bounded_sql
+    def bind_cycle_identity(self, lease, identity, *, root):
+        if type(identity) is not str or not __import__('re').fullmatch('[0-9a-f]{64}', identity):
+            raise StateError()
+        from pathlib import Path
+        root = str(Path(root).absolute())
+        prefix = root.rstrip('/\\') + __import__('os').sep
+        with self.conn:
+            if not self._lease_valid(lease):
+                raise StateError()
+            row = self.conn.execute('SELECT work_identity FROM audit_cycles WHERE scope=? AND generation=? AND owner=?',
+                                    (lease.scope, lease.generation, lease.owner)).fetchone()
+            if row is None:
+                raise StateError()
+            if row[0] == identity:
+                return False
+            self.conn.execute("UPDATE finding_state SET state='unknown',payload=json_set(payload,'$.state','unknown','$.state_reason','source-unavailable','$.resolved_at',NULL) WHERE state IN ('active','unknown') AND (path=? OR substr(path,1,?)=?)", (root, len(prefix), prefix))
+            self.conn.execute("UPDATE finding_current SET payload=(SELECT s.payload FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id) WHERE EXISTS(SELECT 1 FROM finding_state s WHERE s.input_key=finding_current.input_key AND s.finding_id=finding_current.finding_id AND s.state IN ('active','unknown') AND (s.path=? OR substr(s.path,1,?)=?))", (root, len(prefix), prefix))
+            self.conn.execute('DELETE FROM audit_work WHERE scope=? AND generation=?', (lease.scope, lease.generation))
+            self.conn.execute('INSERT INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,10)',
+                              (lease.scope, lease.generation, root, 'directory'))
+            self.conn.execute('UPDATE audit_cycles SET work_identity=?,started=?,failed=0 WHERE scope=? AND generation=? AND owner=?',
+                              (identity, datetime.now(timezone.utc).isoformat(), lease.scope, lease.generation, lease.owner))
+        return True
 
     @_bounded_sql
     def acquire_cycle(self, scope, root, *, lease_seconds):

@@ -86,3 +86,22 @@ def ordered_work(inputs, *, prepare, execute, workers, max_items, stop):
             pool.shutdown(wait=True, cancel_futures=True)
         if hasattr(iterator, 'close'):
             iterator.close()
+
+
+def work_identity(*, config, runtime, policy, limits):
+    """Semantic audit identity, independent of scheduling/output slice budgets.
+
+    Acquisition, extraction, detector timeout and worker bounds still participate.
+    A shorter scheduling slice or a different file worker count can resume the
+    same work; changed rules/runtime/profile must establish a fresh audit cycle.
+    """
+    from dataclasses import replace
+    from . import scan_policy
+    normalized = dict(config)
+    normalized['scan_workers'] = 1
+    semantic_limits = replace(limits, deadline_seconds=1, max_files=1,
+                              max_directory_entries=1, max_report_bytes=2048,
+                              max_findings=1)
+    effective = scan_policy.effective_policy(policy, normalized)
+    return {'policy_id': scan_policy.policy_identity(config=normalized, policy=effective, limits=semantic_limits),
+            'runtime_id': runtime}

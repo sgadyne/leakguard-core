@@ -713,6 +713,8 @@ class ScanService:
                 self.store.set_deadline(deadline)
             except Exception:
                 return self._state_failure_report(m.ScanPolicy.inventory(), limits)
+        if root is not None and not hasattr(self.store, 'bind_cycle_identity'):
+            return failure(m.ErrorCode.WORK_IDENTITY_UNAVAILABLE)
         if root is not None and not root.is_dir():
             try:
                 self.store.invalidate_scope(root)
@@ -730,6 +732,12 @@ class ScanService:
         if lease is None:
             return failure(m.ErrorCode.STATE_FAILED)
         try:
+            if root is not None:
+                from .execution import work_identity
+                identity = work_identity(config=self.config, runtime=self._runtime,
+                                         policy=m.ScanPolicy.inventory(), limits=limits)
+                digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                self.store.bind_cycle_identity(lease, digest, root=root)
             if ingest:
                 issues.extend(self._ingest_queue(lease))
             elif root is not None:
