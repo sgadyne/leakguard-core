@@ -1,0 +1,21 @@
+{
+  "cases": [
+    {
+      "case_id": "synthetic-reserved-email",
+      "text": "contact=person@example.com",
+      "logical_path": "fixtures/contact.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [
+        {"rule": "presidio-entity", "start_line": 1, "end_line": 1, "severity": "review"}
+      ]
+    },
+    {
+      "case_id": "build-number-negative",
+      "text": "build=2.2.365\nrelease=2026-10-26",
+      "logical_path": "fixtures/build.txt",
+      "format_id": "text",
+      "part_id": "text"
+    }
+  ]
+}
