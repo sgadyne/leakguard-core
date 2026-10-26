@@ -55,6 +55,15 @@ class BuddyBackend:
             defaults, self.base_config_path = settings.load()
         self.state_dir = Path(state_dir).expanduser().absolute() if state_dir else settings.state_directory().absolute()
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        from .ownership import ProfileOwnership
+        self._ownership = ProfileOwnership(self.state_dir / ".buddy-owner.lock")
+        try:
+            self._initialize(defaults, ScanConfig, EncryptedScanStore, CredentialVault)
+        except BaseException:
+            self._ownership.close()
+            raise
+
+    def _initialize(self, defaults, ScanConfig, EncryptedScanStore, CredentialVault):
         try:
             os.chmod(self.state_dir, 0o700)
         except OSError:
@@ -137,14 +146,21 @@ class BuddyBackend:
             raise RuntimeError("credential-vault-locked")
         return self._credential_session
 
-    def close(self) -> None:
+    def prepare_close(self) -> None:
+        """Stop owned workers and stores; a failed stop retains every owner."""
         with self._lock:
             self._stop_host()
+            self._vault.lock()
             self._credential_session = None
-            try:
-                self._vault.lock()
-            except Exception:
-                pass
+
+    def release_ownership(self) -> None:
+        ownership = getattr(self, "_ownership", None)
+        if ownership is not None:
+            ownership.close()
+
+    def close(self) -> None:
+        self.prepare_close()
+        self.release_ownership()
 
     def _stop_host(self) -> None:
         host, store = self._host, self._observation_store
@@ -431,6 +447,7 @@ class BuddyBackend:
     def reveal_path(self, source_id: str, path: str):
         return self._require_host().reveal(path, source_id=source_id)
 
+    @_backend_locked
     def git_hooks_status(self, repository: str):
         from leakguard_core import hooks
         result = self._hook_call(hooks.repository_status, repository)
@@ -456,6 +473,7 @@ class BuddyBackend:
             "base_config_path": str(self.base_config_path),
         }
 
+    @_backend_locked
     def git_hooks_install(self, repository: str, profile: str):
         from leakguard_core import hooks
         if profile not in {"credentials", "sensitive", "firm"}:
@@ -479,6 +497,7 @@ class BuddyBackend:
         _atomic_private_write(self.hook_profiles_dir / f"{key}.json", json.dumps(metadata, ensure_ascii=True, sort_keys=True).encode("utf-8"))
         return {**result, "profile": profile, "effective_config_path": str(profile_path), "worker_policy": effective.get("worker_policy", "strict")}
 
+    @_backend_locked
     def git_hooks_uninstall(self, repository: str):
         from leakguard_core import hooks
         result = self._hook_call(hooks.uninstall_repository, repository)
@@ -523,8 +542,8 @@ class BuddyBackend:
     @_backend_locked
     def credential_lock(self):
         with self._lock:
-            self._credential_session = None
             self._vault.lock()
+            self._credential_session = None
 
     @_backend_locked
     def credential_entries(self):
@@ -577,6 +596,7 @@ class BuddyBackend:
             self._credential_session = session
             return self.credential_status()
 
+    @_backend_locked
     def plugins(self):
         registry = self._extension_registry()
         entries = [_wire(entry) for entry in registry.list()]
@@ -586,6 +606,7 @@ class BuddyBackend:
                 entry["enabled"] = active_profile in entry.get("profiles", [])
         return {"plugins": entries, "active_profile": active_profile}
 
+    @_backend_locked
     def plugin_install(self, payload: dict[str, Any]):
         if payload.get("reviewed") is not True:
             raise BuddyOperationError("plugin-review-required")
@@ -599,12 +620,14 @@ class BuddyBackend:
             result = self._extension_registry().install_wheel(wheel)
             return _wire(result)
 
+    @_backend_locked
     def plugin_set_enabled(self, payload: dict[str, Any], enabled: bool):
         registry = self._extension_registry()
         method = registry.enable if enabled else registry.disable
         result = method(payload["id"], profile=payload["profile"], **({"worker_policy": self._config_values.get("worker_policy", "strict")} if enabled else {}))
         return _wire(result)
 
+    @_backend_locked
     def plugin_conformance(self, payload: dict[str, Any]):
         return _wire(self._extension_registry().check(payload["id"], worker_policy=self._config_values.get("worker_policy", "strict")))
 

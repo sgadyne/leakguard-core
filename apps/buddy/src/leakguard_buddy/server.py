@@ -49,7 +49,7 @@ _SAFE_BACKEND_ERRORS = {
     "hook-configuration-invalid", "hook-directory-shared", "hook-target-changed",
     "hook-target-nonregular", "hook-write-failed", "hook-import-path-limit",
     "git-command-failed", "git-path-invalid", "repository-not-found", "hook-operation-failed",
-    "plugin-review-required",
+    "plugin-review-required", "backend-stopping", "worker-still-running",
 }
 _STATIC = Path(__file__).with_name("static")
 
@@ -83,6 +83,9 @@ class BuddyHTTPServer(http.server.ThreadingHTTPServer):
         self.sessions: dict[bytes, Session] = {}
         self.session_lock = threading.RLock()
         self.bootstrap_rotator = None
+        self.quiescing = False
+        self.active_requests = 0
+        self.request_condition = threading.Condition()
         super().__init__(address, BuddyRequestHandler)
         self.expected_host = f"127.0.0.1:{self.server_address[1]}"
         self.origin = f"http://{self.expected_host}"
@@ -177,8 +180,19 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                     raise ApiError(400, "request-invalid")
                 body = self._read_json() if method in {"POST", "PATCH", "DELETE"} else {}
                 query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True) if parsed.query else {}
-                payload, status = self._api(method, parsed.path, query, body, session)
-                self._send_json(status, payload)
+                with self.server.request_condition:
+                    if self.server.quiescing and (method != "GET" or parsed.path not in {
+                        "/api/session", "/api/status", "/api/vault/status", "/api/observations/status"
+                    }):
+                        raise ApiError(503, "backend-stopping")
+                    self.server.active_requests += 1
+                try:
+                    payload, status = self._api(method, parsed.path, query, body, session)
+                    self._send_json(status, payload)
+                finally:
+                    with self.server.request_condition:
+                        self.server.active_requests -= 1
+                        self.server.request_condition.notify_all()
                 return
             raise ApiError(404, "not-found")
         except ApiError as error:
@@ -260,6 +274,10 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
     def _api(self, method: str, path: str, query: dict[str, list[str]], body: dict[str, Any], session: Session) -> tuple[Any, int]:
         app = self.server.backend
         if method == "GET":
+            if path == "/api/session":
+                if query:
+                    raise ApiError(400, "request-invalid")
+                return {"csrf": session.csrf, "api_version": 1}, 200
             if path == "/api/status":
                 return app.status(), 200
             if path == "/api/roots":
@@ -410,8 +428,16 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
             data = (_STATIC / name).read_bytes()
         except OSError:
             raise ApiError(404, "not-found") from None
+        nonce = secrets.token_urlsafe(24)
+        if name == "index.html":
+            sentinel = b"__BUDDY_STYLE_NONCE__"
+            # The legacy browser UI predates the nonce marker. Its static CSS
+            # remains usable; the React release has exactly one marker.
+            if data.count(sentinel) > 1:
+                raise ApiError(500, "static-invalid")
+            data = data.replace(sentinel, nonce.encode("ascii"))
         self.send_response(200)
-        self._security_headers(content_type)
+        self._security_headers(content_type, nonce=nonce)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(data)))
@@ -435,13 +461,18 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
         self.close_connection = True
         self.wfile.write(data)
 
-    def _security_headers(self, content_type: str) -> None:
+    def _security_headers(self, content_type: str, *, nonce: str | None = None) -> None:
         self.send_header("Content-Type", content_type)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        nonce = nonce or secrets.token_urlsafe(24)
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; script-src 'self'; style-src 'self'; "
+                         f"style-src-elem 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'; "
+                         "connect-src 'self'; img-src 'self' data:; font-src 'self'; "
+                         "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 
 
 def _query(query: dict[str, list[str]], allowed: set[str]) -> dict[str, str]:
@@ -506,6 +537,8 @@ class LocalBuddy:
         self.thread = threading.Thread(target=self.server.serve_forever, name="leakguard-buddy-http", daemon=True)
         self.bootstrap_file = bootstrap_file
         self._bootstrap_url: str | None = None
+        self._close_lock = threading.Lock()
+        self._closed = False
 
     @property
     def url(self) -> str:
@@ -524,6 +557,14 @@ class LocalBuddy:
             self._write_bootstrap_file(token)
         self.bootstrap = token
         return token
+
+    def fresh_bootstrap(self) -> str:
+        """Rotate only through the inherited desktop pipe, never an HTTP route."""
+        with self.server.session_lock:
+            token = self._rotate_bootstrap()
+            self.server.bootstrap_digest = hashlib.sha256(token.encode("ascii")).digest()
+            self.server.bootstrap_used = False
+            return token
 
     def _write_bootstrap_file(self, token: str) -> None:
         assert self.bootstrap_file is not None
@@ -554,19 +595,33 @@ class LocalBuddy:
             except OSError: pass
 
     def close(self) -> None:
-        try:
+        # Keep HTTP/control available if worker stop fails. Never join HTTP
+        # request threads while holding the backend operation lock.
+        with self._close_lock:
+            if self._closed:
+                return
+            with self.server.request_condition:
+                self.server.quiescing = True
+                if not self.server.request_condition.wait_for(
+                    lambda: self.server.active_requests == 0, timeout=30
+                ):
+                    raise RuntimeError("requests-still-running")
+            prepare = getattr(self.backend, "prepare_close", None)
+            close = prepare if callable(prepare) else getattr(self.backend, "close", None)
+            if callable(close):
+                close()
             self.server.shutdown()
             self.server.server_close()
-        finally:
+            release = getattr(self.backend, "release_ownership", None)
+            if callable(release):
+                release()
+            self._closed = True
             if self.bootstrap_file is not None:
                 try:
                     if self.bootstrap_file.read_text(encoding="utf-8") == self._bootstrap_url:
                         self.bootstrap_file.unlink()
                 except OSError:
                     pass
-            close = getattr(self.backend, "close", None)
-            if callable(close):
-                close()
 
 
 def serve_forever(backend: object, *, open_browser: bool = True, bootstrap_file: Path | None = None) -> None:
