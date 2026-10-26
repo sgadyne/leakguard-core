@@ -5,10 +5,10 @@ from local files. It uses the per-user Python runtime from the LeakGuard release
 bundle. It does not change a Git hook until a user selects a repository and
 enables that hook.
 
-The examples use POSIX paths. On Windows, use the private runtime's
-`Scripts\\leakguard-extensions.exe` and `Scripts\\leakguard.exe`, with the
-same arguments. Keep the registry, config and script under a user-private
-directory with access limited to that account.
+The examples use POSIX shell syntax. Windows has not been validated in this
+release; its private runtime command paths are `Scripts\leakguard-extensions.exe`
+and `Scripts\leakguard.exe`. Keep the registry, config and script under a
+user-private directory with access limited to that account.
 
 ## 1. Install the local bundle
 
