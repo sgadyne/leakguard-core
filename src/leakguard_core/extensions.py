@@ -186,6 +186,19 @@ class ExtensionRegistry:
             raise ExtensionError('extension-path-invalid')
         self.path = self.directory / 'registry.json'
 
+    def initialize(self):
+        """Create a new empty registry once; never recreate lost enabled state."""
+        marker = self.directory / '.registry-initialized'
+        with self._mutation(save=False) as value:
+            if marker.exists() and _read(marker, 16) != b'1':
+                raise ExtensionError('extension-invalid')
+            if not self.path.exists():
+                if marker.exists():
+                    raise ExtensionError('extension-unavailable')
+                _atomic(self.path, json.dumps(value, sort_keys=True, ensure_ascii=True).encode())
+            if not marker.exists():
+                _atomic(marker, b'1')
+
     def _load(self):
         if not self.path.exists():
             return {'schema_version': 1, 'extensions': {}}
@@ -228,7 +241,7 @@ class ExtensionRegistry:
                 raise ExtensionError('extension-conformance-invalid')
 
     @contextmanager
-    def _mutation(self):
+    def _mutation(self, *, save=True):
         try:
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         except OSError:
@@ -255,8 +268,9 @@ class ExtensionRegistry:
         try:
             value = self._load()
             yield value
-            raw = json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False).encode()
-            _atomic(self.path, raw)
+            if save:
+                raw = json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False).encode()
+                _atomic(self.path, raw)
         finally:
             # Kernel lock release survives process death; retain the inode so a
             # concurrent opener cannot hold an obsolete unlinked lock file.

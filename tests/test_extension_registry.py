@@ -56,6 +56,22 @@ class RegistryTests(unittest.TestCase):
             with self.assertRaises(ExtensionError):
                 registry.apply({}, 'firm')
 
+    def test_initialize_is_idempotent_but_never_recreates_lost_registry(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
+            registry = ExtensionRegistry(Path(folder) / 'extensions')
+            registry.initialize()
+            original = registry.path.read_bytes()
+            registry.initialize()
+            self.assertEqual(registry.path.read_bytes(), original)
+            self.assertEqual(registry.apply({}, 'credentials')['plugins'], [])
+            registry.path.unlink()
+            with self.assertRaises(ExtensionError) as lost:
+                registry.initialize()
+            self.assertEqual(lost.exception.code, 'extension-unavailable')
+            self.assertFalse(registry.path.exists())
+            with self.assertRaises(ExtensionError):
+                registry.apply({}, 'credentials')
+
     def test_runtime_requires_private_current_environment(self):
         from leakguard_core.extensions import _private_python
         import sys
