@@ -86,6 +86,8 @@ def make_bundle(args: argparse.Namespace) -> Path:
     target_python = args.target_python
     if not re.fullmatch(r"3\.[0-9]{1,2}", target_python):
         raise ValueError("target Python must be a major.minor version such as 3.11")
+    if tuple(int(part) for part in target_python.split(".")) < (3, 11):
+        raise ValueError("target Python must satisfy the release minimum of Python 3.11")
     current_python = f"{sys.version_info.major}.{sys.version_info.minor}"
     if target_python != current_python:
         raise ValueError(f"bundle builder is running Python {current_python}; run it under target Python {target_python}")
