@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+import venv
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -142,6 +143,37 @@ class ProductJourneyArtifactTests(unittest.TestCase):
                     fixture, (b"synthetic labeled source line", b"synthetic vault value"),
                 )
             self.assertEqual(caught.exception.code, "synthetic-value-in-http-response")
+
+    def test_runtime_probe_requires_installed_packages_in_the_private_venv(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            runtime = root / "runtime"
+            venv.EnvBuilder(with_pip=False).create(runtime)
+            if os.name == "nt":
+                python = runtime / "Scripts" / "python.exe"
+                buddy = runtime / "Scripts" / "leakguard-buddy.exe"
+                site_packages = runtime / "Lib" / "site-packages"
+            else:
+                python = runtime / "bin" / "python"
+                buddy = runtime / "bin" / "leakguard-buddy"
+                site_candidates = list((runtime / "lib").glob("python*/site-packages"))
+                self.assertEqual(len(site_candidates), 1)
+                site_packages = site_candidates[0]
+                buddy.write_text("#!/private/runtime/python\n", encoding="ascii")
+                buddy.chmod(0o700)
+            if os.name == "nt":
+                buddy.write_bytes(b"synthetic installed launcher")
+            for distribution in check_product_journey._PACKAGES:
+                name = distribution.replace("-", "_") + "-0.2.0.dist-info"
+                metadata = site_packages / name
+                metadata.mkdir()
+                (metadata / "METADATA").write_text(
+                    f"Metadata-Version: 2.1\nName: {distribution}\nVersion: 0.2.0\n",
+                    encoding="ascii",
+                )
+            runtime_info = check_product_journey._runtime_probe(python, buddy, timeout=10)
+            self.assertEqual(set(runtime_info["versions"]), set(check_product_journey._PACKAGES))
+            self.assertEqual(set(runtime_info["versions"].values()), {"0.2.0"})
 
 
 class SafeInputTests(unittest.TestCase):
