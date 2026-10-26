@@ -123,8 +123,20 @@ python3 deploy/desktop/seal.py \
 The helper accepts only modifications to existing Mach-O payload files, updates
 the Gitleaks backend hash when needed, records the changed native hashes in
 provenance, and recomputes the closure and runtime identity. It does not sign or
-claim notarization. Sign the outer app afterward, then regenerate the final ZIP,
-application-file manifest and artifact SHA receipt. Accept the signed candidate
+claim notarization. Sign the outer app afterward, then generate the final ZIP,
+application-file manifest and artifact SHA receipt in a new directory:
+
+```sh
+python3 deploy/desktop/archive.py \
+  --app "/path/Password Buddy.app" \
+  --output /new/final-artifact-directory \
+  --signing-label ad-hoc \
+  --native-receipt /path/native-acceptance.json
+```
+
+The archive helper verifies signed Mac applications with `codesign --verify
+--deep --strict`; its receipt links the native receipt by SHA without copying
+its contents. Omit `--native-receipt` until acceptance is recorded. Accept the signed candidate
 in a fresh profile because resealing changes its runtime identity. Never edit a
 sealed payload after outer signing.
 
