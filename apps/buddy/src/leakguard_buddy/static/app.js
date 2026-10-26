@@ -256,6 +256,8 @@
       if (job.pending_files !== null && job.pending_files !== undefined) details.push(`${job.pending_files} pending`);
       if (job.coverage) details.push(`coverage ${job.coverage}`);
       if (job.stalled_slices) details.push(`${job.stalled_slices} no-progress slices`);
+      const policyResets = Number(job.policy_resets) || 0;
+      if (policyResets > 0) details.push(`restarted after scan policy changed (${policyResets} ${policyResets === 1 ? "time" : "times"})`);
       if (job.last_error) details.push(friendlyErrors[job.last_error] || `issue ${job.last_error}`);
       main.append(node("div", "path", details.join(" · ")));
       if (["running", "queued"].includes(job.state)) {
