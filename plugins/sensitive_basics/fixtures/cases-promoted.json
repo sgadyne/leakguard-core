@@ -190,6 +190,21 @@
       ]
     },
     {
+      "case_id": "csv-numeric-employee-identifier",
+      "text": "employee_id,department\n784213,operations",
+      "logical_path": "fixtures/employees.csv",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [
+        {
+          "rule": "pii-identifier-employee",
+          "start_line": 2,
+          "end_line": 2,
+          "severity": "block"
+        }
+      ]
+    },
+    {
       "case_id": "customer-identifier",
       "text": "customer_id=CUS-884120",
       "logical_path": "fixtures/identifiers.txt",
