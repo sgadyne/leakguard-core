@@ -267,6 +267,7 @@ def _execute(args, evidence: dict) -> dict:
            for item in protected):
         raise DriverFailure("work-directory-overlap")
     work.mkdir(mode=0o700, parents=True)
+    evidence["work_directory"] = str(work)
 
     release_paths, release_manifest, release_rows = _validate_release_wheels(wheelhouse)
     fixture_paths, fixture_rows = _validate_fixture_wheels(fixture_directory)
