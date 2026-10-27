@@ -14,6 +14,7 @@ from . import settings
 
 
 JOSE_FACTORY = 'jose_recognizers.plugin:build_recognizers'
+CREDENTIAL_MODULE = 'credential_detector.plugin'
 JOSE_ENTITIES = ('JOSE_COMPACT_JWE', 'JOSE_COMPACT_JWS_CANDIDATE', 'JOSE_COMPACT_UNVERIFIED')
 PII_ENTITIES = ('EMAIL_ADDRESS', 'PHONE_NUMBER', 'CREDIT_CARD', 'US_SSN', 'IBAN_CODE', 'IP_ADDRESS')
 PROFILES = ('credentials', 'sensitive', 'firm')
@@ -22,7 +23,7 @@ PROFILES = ('credentials', 'sensitive', 'firm')
 def compose(profile: str, base: dict | None = None, *, healthcare: bool = False) -> dict:
     """Return a detached explicit config, retaining existing firm factories.
 
-    All named native profiles cover JOSE. Sensitive and firm additionally select
+    All named native profiles cover credentials and JOSE. Sensitive and firm additionally select
     bounded PII presets; changing the name in an existing config does not itself
     recompose that config. Re-run this explicit operation when changing coverage.
     """
@@ -30,6 +31,9 @@ def compose(profile: str, base: dict | None = None, *, healthcare: bool = False)
         raise settings.ConfigurationError('detection_profile')
     config = settings.validate({} if base is None else base)
     config['detection_profile'] = profile
+    credentials = [spec for spec in config['plugins'] if spec['module'] == CREDENTIAL_MODULE]
+    if len(credentials) > 1:
+        raise settings.ConfigurationError('plugins')
     matches = [spec for spec in config['plugins'] if spec['module'] == 'presidio_detector.plugin']
     if len(matches) > 1:
         raise settings.ConfigurationError('plugins')
@@ -63,11 +67,13 @@ def compose(profile: str, base: dict | None = None, *, healthcare: bool = False)
     options.setdefault('ner-mode', 'pattern-only')
     options.setdefault('score-threshold', '0.35')
     options.setdefault('block-entities', [])
+    if not credentials:
+        config['plugins'].append({'module': CREDENTIAL_MODULE, 'options': {}})
     return settings.validate(config)
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description='Write an explicit optional Presidio/JOSE profile; no installation or scan.')
+    parser = argparse.ArgumentParser(description='Write an explicit credential/Presidio/JOSE profile; no installation or scan.')
     parser.add_argument('--profile', choices=PROFILES, required=True)
     parser.add_argument('--base-config', type=Path)
     parser.add_argument('--healthcare', action='store_true')
@@ -84,7 +90,7 @@ def main(argv=None) -> int:
             target.write(payload)
     except (OSError, ValueError, TypeError, RecursionError):
         parser.exit(2, 'recognizer-profile-configuration-failed\n')
-    print(json.dumps({'profile': args.profile, 'jose_configured': True,
+    print(json.dumps({'profile': args.profile, 'jose_configured': True, 'credentials_configured': True,
                       'runtime_checked': False, 'dependencies_installed': False}))
     return 0
 

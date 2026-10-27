@@ -20,6 +20,8 @@ class RecognizerProfileTests(unittest.TestCase):
             self.assertEqual(options['block-entities'], [])
             self.assertEqual(options['ner-mode'], 'pattern-only')
             self.assertEqual(options['presets'], [] if name == 'credentials' else ['financial', 'identity'])
+            self.assertEqual([spec for spec in config['plugins'] if spec['module'] == profiles.CREDENTIAL_MODULE],
+                             [{'module': profiles.CREDENTIAL_MODULE, 'options': {}}])
 
     def test_composition_preserves_firm_factory_options_without_mutating_base(self):
         options = {'entities': ['FIRM_ACCOUNT_ID'],
@@ -48,10 +50,22 @@ class RecognizerProfileTests(unittest.TestCase):
 
     def test_ambiguous_adapters_and_invalid_lists_fail_safely(self):
         for plugins in ([{'module': 'presidio_detector.plugin'}] * 2,
+                        [{'module': profiles.CREDENTIAL_MODULE}] * 2,
                         [{'module': 'presidio_detector.plugin', 'options': {'entities': 'private-value'}}]):
             with self.assertRaises(settings.ConfigurationError) as error:
                 profiles.compose('firm', {'plugins': plugins})
             self.assertNotIn('private-value', str(error.exception))
+
+    def test_existing_private_plugins_and_credential_spec_are_preserved(self):
+        private = {'module': 'private_credential_pack.plugin', 'options': {'firm-setting': 'retained'}}
+        credential = {'module': profiles.CREDENTIAL_MODULE, 'options': {}}
+        base = {'plugins': [private, credential], 'scan_workers': 1, 'review_only_rules': ['jwt']}
+        config = profiles.compose('firm', base)
+        self.assertEqual(config['plugins'][:2], [private, credential])
+        self.assertEqual(config['scan_workers'], 1)
+        self.assertEqual(config['review_only_rules'], ['jwt'])
+        self.assertEqual(profiles.compose('firm', config), config)
+        self.assertEqual(base['plugins'], [private, credential])
 
     def test_command_creates_private_config_and_refuses_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
