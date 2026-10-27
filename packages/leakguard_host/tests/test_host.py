@@ -87,13 +87,23 @@ class HostTests(unittest.TestCase):
         with self.assertRaisesRegex(HostError, "encrypted-state-required"):
             HostService(config=ScanConfig.from_mapping({}), scan_store=MemoryScanStore())
 
+    def _change_directory_observably(self, name, previous_mtime_ns):
+        (self.root / name).mkdir()
+        current = self.root.stat()
+        # Directory change timestamps may be deferred or coarse (notably on
+        # Windows). Set a distinct real mtime so the fixture exercises the
+        # cursor/listing check instead of depending on clock resolution.
+        os.utime(self.root, ns=(current.st_atime_ns, previous_mtime_ns + 2_000_000_000))
+        self.assertNotEqual(self.root.stat().st_mtime_ns, previous_mtime_ns)
+
     def test_root_bounds_symlink_and_cursor_change(self):
         for name in ("a", "b", "c"):
             (self.root / name).mkdir()
+        previous_mtime_ns = self.root.stat().st_mtime_ns
         first = browse(self.root, root=self.root, limit=1)
         second = browse(self.root, root=self.root, limit=1, cursor=first["next_cursor"])
         self.assertNotEqual(first["entries"][0]["name"], second["entries"][0]["name"])
-        (self.root / "changed").mkdir()
+        self._change_directory_observably("changed", previous_mtime_ns)
         with self.assertRaisesRegex(HostError, "cursor-invalid"):
             browse(self.root, root=self.root, cursor=first["next_cursor"])
         if hasattr(Path, "symlink_to"):
@@ -145,7 +155,7 @@ class HostTests(unittest.TestCase):
         def change_after_listing(target, root, expected):
             with original(target, root, expected) as entries:
                 yield entries
-            (self.root / "after").mkdir()
+            self._change_directory_observably("after", expected.st_mtime_ns)
         with patch.object(navigation, "_scoped_scandir", side_effect=change_after_listing):
             result = browse(self.root, root=self.root)
         self.assertEqual(result["status"], "directory-changed")
