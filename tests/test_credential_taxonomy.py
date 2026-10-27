@@ -161,6 +161,7 @@ class CredentialTaxonomyTests(unittest.TestCase):
             'both-literal-space': (literal + ' mysql://w:c@host', 2),
             'both-literal-comma': (literal + ',mysql://w:c@host', 2),
             'both-literal-newline': (literal + '\nmysql://w:c@host', 2),
+            'both-literal-crlf': (literal + '\r\nmysql://w:c@host', 2),
             'three-literals': (literal + ' mysql://w:c@host mysql://z:d@host', 3),
             'invalid-prefix-first': ('x+postgres://u:p@host ' + literal, 1),
         }
@@ -237,6 +238,11 @@ class CredentialTaxonomyTests(unittest.TestCase):
                     policy=models.ScanPolicy.inventory(),
                     limits=models.ScanLimits(30, 1), use_cache=False,
                 )
+                mixed_report = service.scan(
+                    [models.BytesInput((content + encoded + '\n').encode(), 'mixed.txt')],
+                    policy=models.ScanPolicy.inventory(),
+                    limits=models.ScanLimits(30, 1), use_cache=False,
+                )
             finally:
                 service.close()
         self.assertEqual(report.decision.verdict, models.DecisionVerdict.BLOCK)
@@ -259,6 +265,13 @@ class CredentialTaxonomyTests(unittest.TestCase):
         self.assertNotIn(encoded, json.dumps(wrapped_report.to_dict()))
         self.assertNotIn('Encoded42', json.dumps(wrapped_report.to_dict()))
         self.assertNotIn(encoded, repr(wrapped_report))
+        mixed = [finding for result in mixed_report.results for finding in result.findings
+                 if finding.rule == 'credential-connection-url']
+        self.assertEqual(len(mixed), len(SCHEMES) + 2)
+        self.assertEqual({(f.start_line, f.end_line) for f in mixed},
+                         {(line, line) for line in range(2, 14)})
+        self.assertEqual(mixed_report.decision.verdict, models.DecisionVerdict.BLOCK)
+        self.assertNotIn(encoded, json.dumps(mixed_report.to_dict()))
 
 
 if __name__ == '__main__':
