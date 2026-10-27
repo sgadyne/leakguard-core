@@ -91,6 +91,8 @@ class CredentialTaxonomyTests(unittest.TestCase):
             'one-character': 'redis://:x@h',
             'percent-user-and-password': 'mysql://u%40x:p%3Ass@host/path',
             'embedded-encoded-marker': 'mysql://u:p%24DB_PASSWORD@host/path',
+            'embedded-encoded-template': 'mysql://u:p%7b%7bPASSWORD%7d%7d@host/path',
+            'encoded-high-byte': 'mysql://u:p%c3%a9@host/path',
             'userinfo-punctuation': 'amqp://u-._~!*+;=:p-._~!*+;=:@host?v=1',
             'ip-host': 'postgres://u:p@127.0.0.1:1/db',
             'bracket-ipv6': 'postgres://u:p@[::1]:65535/db',
@@ -132,6 +134,7 @@ class CredentialTaxonomyTests(unittest.TestCase):
             'encoded-environment-dollar': 'mysql://u:%24DB_PASSWORD@host/db',
             'encoded-environment-percent': 'mysql://u:%25DB_PASSWORD%25@host/db',
             'encoded-angle-placeholder': 'mysql://u:%3CPASSWORD%3E@host/db',
+            'encoded-brace-placeholder': 'mysql://u:%7b%7bPASSWORD%7d%7d@host/db',
             'environment-braces': 'postgres://alice:${DB_PASSWORD}@host/db',
             'environment-dollar': 'postgres://alice:$DB_PASSWORD@host/db',
             'environment-percent': 'postgres://alice:%DB_PASSWORD%@host/db',
@@ -144,10 +147,40 @@ class CredentialTaxonomyTests(unittest.TestCase):
                     found = any(f.rule == 'credential-connection-url' for f in self.detect(text))
                     self.assertEqual(found, expected)
 
+    def test_adjacent_urls_are_independently_evaluated(self):
+        placeholder = 'mysql://u:%24FOO@host'
+        literal = 'mysql://v:b@host'
+        cases = {
+            'placeholder-first-space': (placeholder + ' ' + literal, 1),
+            'placeholder-first-comma': (placeholder + ',' + literal, 1),
+            'literal-first-space': (literal + ' ' + placeholder, 1),
+            'both-literal-space': (literal + ' mysql://w:c@host', 2),
+            'both-literal-comma': (literal + ',mysql://w:c@host', 2),
+            'both-literal-newline': (literal + '\nmysql://w:c@host', 2),
+            'three-literals': (literal + ' mysql://w:c@host mysql://z:d@host', 3),
+            'invalid-prefix-first': ('x+postgres://u:p@host ' + literal, 1),
+        }
+        for label, (text, expected) in cases.items():
+            with self.subTest(case=label):
+                own = [f for f in self.detect(text) if f.rule == 'credential-connection-url']
+                self.assertEqual(len(own), expected)
+
+    def test_percent_encoded_ascii_controls_are_rejected(self):
+        # All C0 octets and DEL, in both user and password positions. High
+        # bytes remain lexical and are not decoded as Unicode by this rule.
+        cases = []
+        for byte in (*range(0x20), 0x7f):
+            encoded = f'%{byte:02x}'
+            cases.extend(('mysql://u' + encoded + ':p@host',
+                          'mysql://u:p' + encoded + '@host'))
+        findings = self.detect('\n'.join(cases))
+        self.assertNotIn('credential-connection-url', {f.rule for f in findings})
+
     def test_connection_url_produces_redacted_blocking_scan_result(self):
         urls = [scheme + '://alice:K7fx9yQP2mR8@db.internal/app'
                 for scheme in SCHEMES]
         content = 'first line\n' + ''.join('connection = "' + url + '"\n' for url in urls)
+        content += 'mysql://u:%24FOO@host mysql://v:Adjacent42@host\n'
         with tempfile.TemporaryDirectory(prefix='leakguard-credential-test-') as state:
             service = engine.ScanService({
                 'gitleaks_executable': self.binary,
@@ -164,12 +197,12 @@ class CredentialTaxonomyTests(unittest.TestCase):
         self.assertEqual(report.decision.verdict, models.DecisionVerdict.BLOCK)
         own = [finding for result in report.results for finding in result.findings
                if finding.rule == 'credential-connection-url']
-        self.assertEqual(len(own), len(SCHEMES))
+        self.assertEqual(len(own), len(SCHEMES) + 1)
         self.assertTrue(all(f.severity == models.FindingSeverity.BLOCK for f in own))
         self.assertEqual({(f.start_line, f.end_line) for f in own},
-                         {(line, line) for line in range(2, 12)})
+                         {(line, line) for line in range(2, 13)})
         serialized = json.dumps(report.to_dict())
-        for value in (*urls, 'K7fx9yQP2mR8', content):
+        for value in (*urls, 'K7fx9yQP2mR8', 'Adjacent42', content):
             self.assertNotIn(value, serialized)
             self.assertNotIn(value, repr(report))
 
