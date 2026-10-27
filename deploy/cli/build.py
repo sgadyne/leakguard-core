@@ -137,6 +137,9 @@ def main():
         # Release source contains tracked source files, excluding historical
         # machine-specific handoff/design/validation evidence and UI bundles.
         allowed_roots = {'.github', 'src', 'plugins', 'examples', 'tests', 'tools', 'scripts', 'native', 'packages', 'docs', 'deploy'}
+        allowed_root_files = {'.gitignore', 'COMPATIBILITY.md', 'CONTRIBUTING.md', 'LICENSE', 'MANIFEST.in',
+                              'PLUGIN_API.md', 'README.md', 'RELEASING.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES.md',
+                              'VALIDATION.md', 'pyproject.toml'}
         excluded = ('docs/design/', 'docs/handoff/', 'docs/validation/', 'deploy/desktop/')
         excluded_files = {'tools/recognizer_eval/REPORT.md', 'tools/recognizer_eval/HOLDOUT_ARTIFACTS.json', 'docs/recognizer-results.json'}
         source_members = []
@@ -144,12 +147,15 @@ def main():
             for member in origin.getmembers():
                 name = member.name
                 if not member.isfile() or name.startswith(excluded) or name in excluded_files: continue
-                if '/' in name and name.split('/')[0] not in allowed_roots: continue
+                if '/' in name:
+                    if name.split('/')[0] not in allowed_roots: continue
+                elif name not in allowed_root_files: continue
                 content = origin.extractfile(member)
                 member.name = f'leakguard-source-{label}/' + name
                 dest.addfile(member, content)
                 source_members.append(name)
         receipt['source_archive_policy'] = {'tracked_files_only': True, 'allowed_roots': sorted(allowed_roots),
+                                            'allowed_root_files': sorted(allowed_root_files),
                                             'excluded_prefixes': list(excluded), 'excluded_files': sorted(excluded_files), 'members': source_members}
         receipt['artifacts'].append({'filename':source_archive.name,'sha256':sha(source_archive),'kind':'tracked-source'})
         for target in dict.fromkeys(a.target):
