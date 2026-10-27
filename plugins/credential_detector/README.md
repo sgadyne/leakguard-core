@@ -20,7 +20,9 @@ unquoted environment references and pure placeholder forms are excluded. Empty
 values and unquoted null/boolean atoms are excluded. Inputs and resources are
 bounded; exceeding bounds fails the operation instead of silently reporting a
 clean result. See the implementation and coverage document for exact syntax,
-limits, controls, and the supported profile wiring.
+limits, controls, and the supported profile wiring. The [alias resource
+inventory and provenance](src/credential_detector/resources/README.md) lists
+the bundled data.
 
 Alias resources are packaged JSON files loaded with `importlib.resources`. The
 installed runtime identity follows explicitly declared distributions and hashes
@@ -29,6 +31,8 @@ identity. Both the public and example plugin manifests declare
 `external_state="unknown"` as a conservative fence: persistent result reuse and
 continuation cannot rely on their identity in this phase. Installed acceptance
 must demonstrate that fence; a wheel hash receipt alone is not that proof.
+An audit using an unknown-state plugin must finish within one bounded slice;
+it cannot resume an earlier slice as though its external state were fixed.
 
 ## Offline installed-wheel qualification
 
