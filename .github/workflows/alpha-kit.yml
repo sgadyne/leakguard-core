@@ -52,7 +52,7 @@ jobs:
           python -I tools/qualify_alpha_upgrade.py
           --repository "$GITHUB_WORKSPACE"
           --kit "$RUNNER_TEMP/alpha-kit"
-          --kit-archive "$RUNNER_TEMP"/alpha-dist/leakguard-cli-*.zip
+          --kit-archive "$RUNNER_TEMP/alpha-dist/leakguard-cli-*.zip"
           --output-dir "$RUNNER_TEMP/alpha-upgrade"
       - name: Retain native upgrade and rollback evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
