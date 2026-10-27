@@ -128,7 +128,8 @@ def main() -> None:
     if artifacts.exists() or artifacts.is_symlink() or artifacts.resolve().is_relative_to(root):
         raise SystemExit('artifact-root-invalid')
     inputs = args.wheelhouse.resolve(strict=True)
-    if not inputs.is_dir() or inputs.is_relative_to(root):
+    if (not inputs.is_dir() or inputs.is_relative_to(root)
+            or any(p.name.lower().replace('-', '_').startswith('leakguard_') for p in inputs.glob('*.whl'))):
         raise SystemExit('wheelhouse-invalid')
     artifacts.mkdir(mode=0o700, parents=True)
     os.umask(0o077)
@@ -170,11 +171,16 @@ def main() -> None:
     if len(private) != 1:
         raise RuntimeError('private-wheel-ambiguous')
     missing_python = venv('missing-dependency')
-    # Empty find-links and no cache prove the private wheel cannot silently stand alone.
-    empty = artifacts / 'empty-wheelhouse'
-    empty.mkdir()
+    # Core and its runtime dependencies are present, but the engine is absent.
+    # The empty cache and offline resolver must identify that missing dependency.
+    core_only = artifacts / 'core-only-wheelhouse'
+    core_only.mkdir()
+    core_wheels = list(wheels.glob('leakguard_core-*.whl'))
+    if len(core_wheels) != 1:
+        raise RuntimeError('core-wheel-ambiguous')
+    shutil.copy2(core_wheels[0], core_only)
     output = run('missing-dependency', [uv, 'pip', 'install', '--python', missing_python,
-                  *offline, '--find-links', empty, private[0]], success=False)
+                  *offline, '--find-links', inputs, '--find-links', core_only, private[0]], success=False)
     if 'leakguard-credential-detector' not in output.lower().replace('_', '-'):
         raise RuntimeError('missing-dependency-not-proven')
     installed = venv('installed')

@@ -68,8 +68,9 @@ python3 scripts/credential_install_smoke.py \
 
 The script builds the core, detector and private example wheels from a copied
 source tree with pinned build constraints and no index or cache. It first tries
-to install the private wheel into an empty environment with no dependency
-wheelhouse and requires resolution to fail. A second fresh environment installs
+to install the private wheel into an empty environment with core and its runtime
+dependencies available but the credential engine absent, and requires resolution
+to fail specifically for that engine. A second fresh environment installs
 the private wheel through its metadata, using only the supplied inputs and
 newly built wheels; it checks dependency closure and compares every package
 Python, JSON and TOML file across source, wheel and installed distribution.
