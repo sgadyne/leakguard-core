@@ -60,6 +60,26 @@ machine keyring state. Restore refuses to overwrite unless `replace=True` is
 explicit. Deleting a credential does not promise secure erasure of filesystem
 snapshots, old encrypted backups or storage hardware remnants.
 
+The password generator uses the operating system's cryptographic random source.
+Its default is 24 ASCII characters; callers may request 16–128. The alphabet
+contains lowercase and uppercase English letters, digits, and the symbols
+`!#$%&()*+,-./:;<=>?@[]^_{|}~`. Every result contains each class; rejection
+sampling is used so that all strings satisfying that policy are equally likely.
+Some services have different length or symbol restrictions; check their rules.
+The UI searches only title and location in the unlocked in-memory metadata list;
+it does not send search terms in URLs or persist them. Usernames, notes and
+secrets are excluded from list results and search.
+
+The protected UI/API passphrase change requires the current credential
+passphrase and re-encrypts using the existing vault library. Backups keep their
+own recovery passphrases and are not updated by this operation. Backup status is
+not persisted or a guarantee of recoverability: keep a copy and its passphrase
+safe and test recovery into a separate profile. Without a valid backup and its
+passphrase there is no forgotten-vault-passphrase recovery. The native shell is
+the first beta surface; browser fallback clipboard copies are not automatically
+cleared. Reopen after a failed write and inspect the last saved state before
+retrying, because an error after file replacement can leave durability uncertain.
+
 Unattended observation access is opt-in. `enable_keyring()` directly selects the
 native macOS Keychain, Windows WinVault or Linux Secret Service backend, then
 verifies store/read/delete and the actual key round trip. Third-party, plaintext,

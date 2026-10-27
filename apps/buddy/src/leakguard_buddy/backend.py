@@ -142,7 +142,8 @@ class BuddyBackend:
         return self._host
 
     def _require_credential_session(self):
-        if self._credential_session is None:
+        if self._credential_session is None or not self._vault.status()["unlocked"]:
+            self._credential_session = None
             raise RuntimeError("credential-vault-locked")
         return self._credential_session
 
@@ -525,7 +526,7 @@ class BuddyBackend:
     @_backend_locked
     def credential_status(self):
         status = self._vault.status()
-        return {"created": bool(status.get("created")), "unlocked": self._credential_session is not None}
+        return {"created": bool(status.get("created")), "unlocked": bool(status.get("unlocked"))}
 
     @_backend_locked
     def credential_create(self, passphrase: str):
@@ -569,20 +570,36 @@ class BuddyBackend:
         return self._require_credential_session().delete_entry(entry_id)
 
     @_backend_locked
+    def credential_generate(self, length: int):
+        from leakguard_vault import generate_password
+        self._require_credential_session()
+        return {"secret": generate_password(length)}
+
+    @_backend_locked
+    def credential_change_passphrase(self, current_passphrase: str, new_passphrase: str):
+        session = self._require_credential_session()
+        try:
+            session.change_passphrase(new_passphrase, current_passphrase=current_passphrase)
+        finally:
+            if not self._vault.status()["unlocked"]:
+                self._credential_session = None
+        return self.credential_status()
+
+    @_backend_locked
     def credential_backup(self, passphrase: str):
         session = self._require_credential_session()
         with tempfile.TemporaryDirectory(prefix="leakguard-buddy-") as temporary:
             path = Path(temporary) / "vault.lgbak"
             session.backup(path, passphrase)
             data = path.read_bytes()
-        if len(data) > 16 * 1024 * 1024:
+        if len(data) > 16 * 1024 * 1024 + 8192 + 128:
             raise ValueError("vault-backup-too-large")
         return {"filename": "leakguard-vault.lgbak", "backup_base64": base64.b64encode(data).decode("ascii")}
 
     @_backend_locked
     def credential_restore(self, payload: dict[str, Any]):
         raw = base64.b64decode(payload["backup"], validate=True)
-        if len(raw) > 16 * 1024 * 1024:
+        if len(raw) > 16 * 1024 * 1024 + 8192 + 128:
             raise ValueError("vault-backup-too-large")
         with self._lock:
             # Vault restore requires an absent credential session. Revoke the

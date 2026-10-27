@@ -33,7 +33,7 @@ _SAFE_BACKEND_ERRORS = {
     "vault-not-created", "vault-already-unlocked", "vault-busy",
     "vault-passphrase-invalid", "vault-capacity-limit", "vault-entry-invalid",
     "vault-entry-not-found", "vault-format-invalid", "vault-io-failed",
-    "vault-crypto-unavailable", "observation-keyring-unavailable",
+    "vault-crypto-unavailable", "vault-password-policy-invalid", "observation-keyring-unavailable",
     "observation-keyring-not-enabled", "observation-keyring-invalid",
     "state-locked", "state-checkpoint-failed", "state-capacity-limit",
     "state-query-invalid", "state-cycle-busy", "plugin-invalid",
@@ -209,7 +209,7 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 "job-busy", "directory-changed", "observation-store-exists", "extension-not-found",
             }
             client = {
-                "vault-passphrase-invalid", "vault-entry-invalid", "state-query-invalid",
+                "vault-passphrase-invalid", "vault-password-policy-invalid", "vault-entry-invalid", "vault-format-invalid", "state-query-invalid",
                 "plugin-invalid", "plugin-review-required", "extension-invalid",
                 "extension-conflict", "extension-runtime-inspection-failed",
                 "extension-startup-artifact", "extension-wheel-invalid", "permission-denied",
@@ -217,7 +217,7 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 "page-invalid", "platform-unavailable",
             }
             unavailable = {
-                "vault-crypto-unavailable", "observation-keyring-unavailable",
+                "vault-crypto-unavailable", "vault-password-policy-invalid", "observation-keyring-unavailable",
                 "observation-keyring-not-enabled", "observation-keyring-invalid",
                 "state-checkpoint-failed", "state-capacity-limit",
             }
@@ -355,6 +355,15 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 _optional_text(body, "username", 2048); _optional_text(body, "location", 4096); _optional_text(body, "notes", 65_536)
                 if "finding_id" in body: _id(body, "finding_id")
                 return app.credential_save(body), 201
+            if path == "/api/vault/generate":
+                _keys(body, {"length"}, {"length"})
+                if type(body["length"]) is not int or not 16 <= body["length"] <= 128:
+                    raise ApiError(400, "vault-password-policy-invalid")
+                return app.credential_generate(body["length"]), 200
+            if path == "/api/vault/change-passphrase":
+                _keys(body, {"current_passphrase", "new_passphrase"})
+                _passphrase(body, "current_passphrase"); _passphrase(body, "new_passphrase")
+                return app.credential_change_passphrase(body["current_passphrase"], body["new_passphrase"]), 200
             if path == "/api/vault/backup":
                 _keys(body, {"passphrase"}); _passphrase(body, "passphrase")
                 return app.credential_backup(body["passphrase"]), 200
@@ -411,8 +420,7 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/vault/entries/([A-Za-z0-9_-]{1,160})/(reveal|copy)", path)
         if method == "POST" and match:
             _keys(body, set())
-            # This is the only route that returns a credential value, following
-            # a user click and a same-origin, CSRF-protected request.
+            # Explicit user action and same-origin, CSRF-protected request.
             return app.credential_reveal(match.group(1)), 200
         match = re.fullmatch(r"/api/plugins/(enable|disable)", path)
         if method == "POST" and match:

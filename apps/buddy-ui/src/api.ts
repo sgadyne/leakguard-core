@@ -6,6 +6,9 @@ let onReconnect: (() => void) | undefined;
 const messages: Record<string, string> = {
   "vault-authentication-failed": "Passphrase was incorrect or encrypted data could not authenticate.",
   "vault-passphrase-invalid": "Passphrases must contain at least 12 characters.",
+  "vault-format-invalid": "The encrypted file is invalid, truncated, or unsupported.",
+  "vault-io-failed": "The vault operation could not be written safely. Reopen the vault and check the saved data before retrying.",
+  "vault-password-policy-invalid": "Password length must be between 16 and 128 characters.",
   "vault-locked": "Unlock the credential vault first.", "state-locked": "Unlock scan storage first.",
   "state-capacity-limit": "Encrypted scan storage reached its current capacity limit.",
   "state-checkpoint-failed": "Encrypted scan progress could not be saved.", "source-busy": "The current scan is stopping. Try again after it stops.",

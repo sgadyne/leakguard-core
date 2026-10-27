@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import copy
+import hmac
+import secrets
+import string
 from datetime import datetime, timezone
 from pathlib import Path
 import threading
@@ -14,6 +17,22 @@ from .errors import VaultError
 MAX_CREDENTIAL_BYTES = 16 * 1024 * 1024
 _ENTRY_FIELDS = {"id", "title", "username", "secret", "location", "notes", "finding_id", "created_at", "updated_at"}
 _OMITTED = object()
+
+# A fixed, service-friendly ASCII alphabet. Rejection sampling makes every
+# string satisfying the four class requirements equally likely.
+_PASSWORD_CLASSES = (string.ascii_lowercase, string.ascii_uppercase,
+                     string.digits, "!#$%&()*+,-./:;<=>?@[]^_{|}~")
+_PASSWORD_ALPHABET = "".join(_PASSWORD_CLASSES)
+
+
+def generate_password(length=24):
+    """Generate an OS-random password containing each of four ASCII classes."""
+    if type(length) is not int or not 16 <= length <= 128:
+        raise VaultError("vault-password-policy-invalid")
+    while True:
+        value = "".join(secrets.choice(_PASSWORD_ALPHABET) for _ in range(length))
+        if all(any(char in group for char in value) for group in _PASSWORD_CLASSES):
+            return value
 
 
 def _text(value, maximum, *, required=False):
@@ -251,9 +270,17 @@ class CredentialSession:
             _, value = envelope.encode(header, key, envelope.canonical({"schema": 1, "entries": self._entries}))
             atomic_write(path, value, replace=False)
 
-    def change_passphrase(self, passphrase: str):
+    def change_passphrase(self, passphrase: str, *, current_passphrase=None):
         with self._vault._mutex:
             self._ensure_active()
+            if current_passphrase is not None:
+                # Authenticate against the current file while holding the vault
+                # lock. Do not accept a different file swapped beneath the session.
+                _, current_key, _ = envelope.decrypt(
+                    read_bounded(self._vault.path, envelope.MAX_FILE),
+                    "credentials", current_passphrase)
+                if not hmac.compare_digest(current_key, self._key):
+                    raise VaultError("vault-authentication-failed")
             header, key = envelope.new_header("credentials", passphrase)
             old_header, old_key = self._header, self._key
             self._header, self._key = header, bytearray(key)
