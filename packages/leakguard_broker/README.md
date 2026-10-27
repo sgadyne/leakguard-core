@@ -159,13 +159,15 @@ certificate. The key file stays local to that agent. The CLI accepts paths,
 never key contents, and does not print those paths or read key material into
 model-facing output.
 
+Use the `--grant=VALUE` form: a generated grant may begin with a hyphen.
+
 ```sh
 leakguard-agent \
   --url https://broker.example:8443 \
   --ca /etc/leakguard-agent/broker-ca.pem \
   --cert /etc/leakguard-agent/agent.pem \
   --key /etc/leakguard-agent/agent-key.pem \
-  inventory --grant GRANT_ID --label "Synthetic test service" --limit 20
+  inventory --grant=GRANT_ID --label "Synthetic test service" --limit 20
 ```
 
 An inventory result contains only permitted binding IDs, labels, tags, and
@@ -178,7 +180,7 @@ leakguard-agent \
   --ca /etc/leakguard-agent/broker-ca.pem \
   --cert /etc/leakguard-agent/agent.pem \
   --key /etc/leakguard-agent/agent-key.pem \
-  request --grant GRANT_ID --binding synthetic-binding \
+  request --grant=GRANT_ID --binding synthetic-binding \
   --method GET --path /fixture-health --query format=json
 ```
 

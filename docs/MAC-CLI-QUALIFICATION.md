@@ -106,15 +106,17 @@ ssh -N -L 127.0.0.1:LOCAL_PORT:127.0.0.1:LINUX_PORT LINUX_HOST
 Run the following using the installed Mac agent and values from the synthetic
 fixture (replace placeholders; the grant is short-lived synthetic test data):
 
+Use the `--grant=VALUE` form: a generated grant may begin with a hyphen.
+
 ```sh
 "$LG_VENV/bin/leakguard-agent" --url https://127.0.0.1:LOCAL_PORT \
   --ca "$LG_PRIVATE/bridge-client/ca.pem" --cert "$LG_PRIVATE/bridge-client/client.pem" \
   --key "$LG_PRIVATE/bridge-client/client-key.pem" \
-  inventory --grant SYNTHETIC_GRANT --label "Synthetic test service" --limit 20
+  inventory --grant=SYNTHETIC_GRANT --label "Synthetic test service" --limit 20
 "$LG_VENV/bin/leakguard-agent" --url https://127.0.0.1:LOCAL_PORT \
   --ca "$LG_PRIVATE/bridge-client/ca.pem" --cert "$LG_PRIVATE/bridge-client/client.pem" \
   --key "$LG_PRIVATE/bridge-client/client-key.pem" \
-  request --grant SYNTHETIC_GRANT --binding synthetic-binding --method GET --path /fixture-health
+  request --grant=SYNTHETIC_GRANT --binding synthetic-binding --method GET --path /fixture-health
 ```
 
 Verify inventory contains the synthetic binding, the request returns its
