@@ -79,6 +79,12 @@ examples in documentation can still be flagged. Global upstream allowlists
 apply. The password is never returned in LeakGuard findings; no network request
 is made to the URL.
 
+These Gitleaks-backed findings expose original start/end lines through the core
+adapter. Raw upstream URL columns on later LF/CRLF lines showed discrepancies
+and remain unqualified; the adapter does not expose them as precise spans.
+The credential wheel's field and HTTP findings separately carry tested Unicode
+offsets into each original extracted text part.
+
 ## Presidio and open-source options
 
 - [Presidio's supported entities](https://presidio.dataprivacystack.org/supported_entities/)
