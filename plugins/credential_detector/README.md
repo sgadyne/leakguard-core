@@ -70,8 +70,7 @@ python3 scripts/credential_install_smoke.py \
   --artifacts /private/new-credential-gate
 ```
 
-The script builds the core, detector and private example wheels from a copied
-source tree with pinned build constraints and no index or cache. It first tries
+The script builds the core, detector and private example wheels from a tracked commit archive with pinned build constraints and no index or cache. It first tries
 to install the private wheel into an empty environment with core and its runtime
 dependencies available but the credential engine absent, and requires resolution
 to fail specifically for that engine. A second fresh environment installs

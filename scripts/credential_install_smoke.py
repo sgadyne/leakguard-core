@@ -18,6 +18,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,11 +53,13 @@ def verify_wheel(wheel: Path, source: Path, module: str, required: set[str]) -> 
     return {f'{module}/{name}': sha(data) for name, data in sorted(expected.items())}
 
 
-def inspect_install(source_root: Path, wheel_dir: Path) -> dict:
+def inspect_install(source_root: Path, checkout_root: Path, wheel_dir: Path) -> dict:
     if not sys.flags.isolated or Path(sys.prefix).resolve() == Path(sys.base_prefix).resolve():
         raise ValueError('isolated-venv-required')
     source_root = source_root.resolve()
-    if any(Path(p).resolve().is_relative_to(source_root) for p in sys.path if p):
+    checkout_root = checkout_root.resolve()
+    if any(Path(p).resolve().is_relative_to(root) for p in sys.path if p
+           for root in (source_root, checkout_root)):
         raise ValueError('source-on-import-path')
     result = {}
     for distribution, module, _, source_path in PROJECTS:
@@ -67,7 +70,8 @@ def inspect_install(source_root: Path, wheel_dir: Path) -> dict:
         imported = importlib.import_module(module)
         origin = Path(imported.__file__).resolve()
         prefix = Path(sys.prefix).resolve()
-        if not origin.is_relative_to(prefix) or origin.is_relative_to(source_root):
+        if (not origin.is_relative_to(prefix) or origin.is_relative_to(source_root)
+                or origin.is_relative_to(checkout_root)):
             raise ValueError('import-origin-invalid')
         candidates = list(wheel_dir.glob(distribution.replace('-', '_') + '-*.whl'))
         if len(candidates) != 1:
@@ -117,9 +121,10 @@ def main() -> None:
     parser.add_argument('--inspect', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--source-root', type=Path, default=ROOT, help=argparse.SUPPRESS)
     parser.add_argument('--built-wheels', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--checkout-root', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.inspect:
-        print(json.dumps(inspect_install(args.source_root, args.built_wheels), sort_keys=True))
+        print(json.dumps(inspect_install(args.source_root, args.checkout_root, args.built_wheels), sort_keys=True))
         return
     if not args.artifacts or not args.wheelhouse:
         parser.error('--artifacts and --wheelhouse are required')
@@ -157,9 +162,19 @@ def main() -> None:
         raise RuntimeError('source-dirty')
     runtime_constraints = artifacts / 'runtime-constraints.txt'
     runtime_constraints.write_text('packaging==26.3\npsutil==7.2.2\ncachetools==7.2.5\n', encoding='utf-8')
-    # Source is copied so builds cannot leave generated files in the checkout.
+    # Only tracked commit bytes enter the build; ignored files are never copied.
     source = artifacts / 'source'
-    shutil.copytree(root, source, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.pyc', 'build', 'dist', '*.egg-info'))
+    source.mkdir()
+    archive = artifacts / 'source.tar'
+    run('source-archive', ['git', '-C', root, 'archive', '--format=tar', '--output', archive, source_commit])
+    with tarfile.open(archive) as tar:
+        for member in tar.getmembers():
+            destination = (source / member.name).resolve()
+            if (not destination.is_relative_to(source.resolve())
+                    or not (member.isfile() or member.isdir())):
+                raise RuntimeError('source-archive-invalid')
+        tar.extractall(source)
+    archive.unlink()
     for distribution, _, project, _ in PROJECTS:
         run('build-' + distribution, [uv, 'build', '--wheel', '--python', python, *offline,
             '--find-links', inputs, '--build-constraints', constraints, '--out-dir', wheels, source / project])
@@ -189,7 +204,7 @@ def main() -> None:
         '--link-mode', 'copy', private[0]])
     run('dependency-check', [uv, 'pip', 'check', '--python', installed, '--offline'])
     payload = run('inspect', [installed, '-I', Path(__file__).resolve(), '--inspect',
-                              '--source-root', root, '--built-wheels', wheels])
+                              '--source-root', source, '--checkout-root', root, '--built-wheels', wheels])
     receipt = {'schema': 1, 'outcome': 'passed', 'synthetic_only': True,
                'python': run('python-version', [installed, '-I', '--version']).strip(),
                'python_executable_sha256': sha(Path(python).read_bytes()),
