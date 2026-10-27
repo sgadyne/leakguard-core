@@ -358,6 +358,846 @@
       "text": "\u03bb\r\n\tAUTHORIZATION: bEaReR n7s9/+a==\r\n",
       "rule": "credential-http-bearer",
       "fragment": "n7s9/+a=="
+    },
+    {
+      "id": "url8-postgres-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "postgres://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "postgres://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-embedded-colon-double-braced",
+      "family": "url",
+      "text": "postgres://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-pure-reference-double-braced",
+      "family": "url",
+      "text": "postgres://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-embedded-colon-angle",
+      "family": "url",
+      "text": "postgres://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-pure-reference-angle",
+      "family": "url",
+      "text": "postgres://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "postgres://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-pure-reference-dollar-name",
+      "family": "url",
+      "text": "postgres://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-embedded-colon-percent",
+      "family": "url",
+      "text": "postgres://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-pure-reference-percent",
+      "family": "url",
+      "text": "postgres://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-encoded-user-colon-pure",
+      "family": "url",
+      "text": "postgres://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgres-encoded-user-colon-literal",
+      "family": "url",
+      "text": "postgres://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "postgresql://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "postgresql://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-embedded-colon-double-braced",
+      "family": "url",
+      "text": "postgresql://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-pure-reference-double-braced",
+      "family": "url",
+      "text": "postgresql://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-embedded-colon-angle",
+      "family": "url",
+      "text": "postgresql://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-pure-reference-angle",
+      "family": "url",
+      "text": "postgresql://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "postgresql://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-pure-reference-dollar-name",
+      "family": "url",
+      "text": "postgresql://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-embedded-colon-percent",
+      "family": "url",
+      "text": "postgresql://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-pure-reference-percent",
+      "family": "url",
+      "text": "postgresql://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-encoded-user-colon-pure",
+      "family": "url",
+      "text": "postgresql://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-postgresql-encoded-user-colon-literal",
+      "family": "url",
+      "text": "postgresql://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "mysql://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "mysql://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-embedded-colon-double-braced",
+      "family": "url",
+      "text": "mysql://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-pure-reference-double-braced",
+      "family": "url",
+      "text": "mysql://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-embedded-colon-angle",
+      "family": "url",
+      "text": "mysql://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-pure-reference-angle",
+      "family": "url",
+      "text": "mysql://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "mysql://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-pure-reference-dollar-name",
+      "family": "url",
+      "text": "mysql://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-embedded-colon-percent",
+      "family": "url",
+      "text": "mysql://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-pure-reference-percent",
+      "family": "url",
+      "text": "mysql://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-encoded-user-colon-pure",
+      "family": "url",
+      "text": "mysql://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mysql-encoded-user-colon-literal",
+      "family": "url",
+      "text": "mysql://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "mariadb://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "mariadb://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-embedded-colon-double-braced",
+      "family": "url",
+      "text": "mariadb://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-pure-reference-double-braced",
+      "family": "url",
+      "text": "mariadb://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-embedded-colon-angle",
+      "family": "url",
+      "text": "mariadb://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-pure-reference-angle",
+      "family": "url",
+      "text": "mariadb://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "mariadb://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-pure-reference-dollar-name",
+      "family": "url",
+      "text": "mariadb://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-embedded-colon-percent",
+      "family": "url",
+      "text": "mariadb://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-pure-reference-percent",
+      "family": "url",
+      "text": "mariadb://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-encoded-user-colon-pure",
+      "family": "url",
+      "text": "mariadb://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mariadb-encoded-user-colon-literal",
+      "family": "url",
+      "text": "mariadb://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "mongodb://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "mongodb://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-embedded-colon-double-braced",
+      "family": "url",
+      "text": "mongodb://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-pure-reference-double-braced",
+      "family": "url",
+      "text": "mongodb://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-embedded-colon-angle",
+      "family": "url",
+      "text": "mongodb://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-pure-reference-angle",
+      "family": "url",
+      "text": "mongodb://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "mongodb://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-pure-reference-dollar-name",
+      "family": "url",
+      "text": "mongodb://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-embedded-colon-percent",
+      "family": "url",
+      "text": "mongodb://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-pure-reference-percent",
+      "family": "url",
+      "text": "mongodb://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-encoded-user-colon-pure",
+      "family": "url",
+      "text": "mongodb://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb-encoded-user-colon-literal",
+      "family": "url",
+      "text": "mongodb://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "mongodb+srv://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "mongodb+srv://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-embedded-colon-double-braced",
+      "family": "url",
+      "text": "mongodb+srv://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-pure-reference-double-braced",
+      "family": "url",
+      "text": "mongodb+srv://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-embedded-colon-angle",
+      "family": "url",
+      "text": "mongodb+srv://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-pure-reference-angle",
+      "family": "url",
+      "text": "mongodb+srv://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "mongodb+srv://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-pure-reference-dollar-name",
+      "family": "url",
+      "text": "mongodb+srv://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-embedded-colon-percent",
+      "family": "url",
+      "text": "mongodb+srv://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-pure-reference-percent",
+      "family": "url",
+      "text": "mongodb+srv://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-encoded-user-colon-pure",
+      "family": "url",
+      "text": "mongodb+srv://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-mongodb+srv-encoded-user-colon-literal",
+      "family": "url",
+      "text": "mongodb+srv://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "redis://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "redis://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-embedded-colon-double-braced",
+      "family": "url",
+      "text": "redis://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-pure-reference-double-braced",
+      "family": "url",
+      "text": "redis://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-embedded-colon-angle",
+      "family": "url",
+      "text": "redis://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-pure-reference-angle",
+      "family": "url",
+      "text": "redis://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "redis://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-pure-reference-dollar-name",
+      "family": "url",
+      "text": "redis://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-embedded-colon-percent",
+      "family": "url",
+      "text": "redis://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-pure-reference-percent",
+      "family": "url",
+      "text": "redis://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-encoded-user-colon-pure",
+      "family": "url",
+      "text": "redis://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-redis-encoded-user-colon-literal",
+      "family": "url",
+      "text": "redis://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "rediss://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "rediss://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-embedded-colon-double-braced",
+      "family": "url",
+      "text": "rediss://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-pure-reference-double-braced",
+      "family": "url",
+      "text": "rediss://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-embedded-colon-angle",
+      "family": "url",
+      "text": "rediss://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-pure-reference-angle",
+      "family": "url",
+      "text": "rediss://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "rediss://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-pure-reference-dollar-name",
+      "family": "url",
+      "text": "rediss://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-embedded-colon-percent",
+      "family": "url",
+      "text": "rediss://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-pure-reference-percent",
+      "family": "url",
+      "text": "rediss://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-encoded-user-colon-pure",
+      "family": "url",
+      "text": "rediss://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-rediss-encoded-user-colon-literal",
+      "family": "url",
+      "text": "rediss://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "amqp://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "amqp://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-embedded-colon-double-braced",
+      "family": "url",
+      "text": "amqp://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-pure-reference-double-braced",
+      "family": "url",
+      "text": "amqp://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-embedded-colon-angle",
+      "family": "url",
+      "text": "amqp://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-pure-reference-angle",
+      "family": "url",
+      "text": "amqp://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "amqp://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-pure-reference-dollar-name",
+      "family": "url",
+      "text": "amqp://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-embedded-colon-percent",
+      "family": "url",
+      "text": "amqp://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-pure-reference-percent",
+      "family": "url",
+      "text": "amqp://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-encoded-user-colon-pure",
+      "family": "url",
+      "text": "amqp://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqp-encoded-user-colon-literal",
+      "family": "url",
+      "text": "amqp://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-embedded-colon-dollar-braced",
+      "family": "url",
+      "text": "amqps://devuser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-pure-reference-dollar-braced",
+      "family": "url",
+      "text": "amqps://devuser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-embedded-colon-double-braced",
+      "family": "url",
+      "text": "amqps://devuser:prefix:part%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-pure-reference-double-braced",
+      "family": "url",
+      "text": "amqps://devuser:%7B%7BDEV_SECRET%7D%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-embedded-colon-angle",
+      "family": "url",
+      "text": "amqps://devuser:prefix:part%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-pure-reference-angle",
+      "family": "url",
+      "text": "amqps://devuser:%3CDEV_SECRET%3E@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-embedded-colon-dollar-name",
+      "family": "url",
+      "text": "amqps://devuser:prefix:part%24DEV_SECRET@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-pure-reference-dollar-name",
+      "family": "url",
+      "text": "amqps://devuser:%24DEV_SECRET@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-embedded-colon-percent",
+      "family": "url",
+      "text": "amqps://devuser:prefix:part%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-pure-reference-percent",
+      "family": "url",
+      "text": "amqps://devuser:%25DEV_SECRET%25@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-encoded-user-colon-pure",
+      "family": "url",
+      "text": "amqps://dev%3Auser:%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url8-amqps-encoded-user-colon-literal",
+      "family": "url",
+      "text": "amqps://dev%3Auser:prefix:part%24%7BDEV_SECRET%7D@db.invalid:4567/name",
+      "rule": "credential-connection-url",
+      "fragment": null
     }
   ],
   "field_templates": {
