@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "pack_id": "saas-ai",
+  "aliases": [
+    {
+      "name": "openai_api_key",
+      "role": "api-key",
+      "group": "saas-ai"
+    },
+    {
+      "name": "anthropic_api_key",
+      "role": "api-key",
+      "group": "saas-ai"
+    },
+    {
+      "name": "stripe_secret_key",
+      "role": "api-key",
+      "group": "saas-ai"
+    },
+    {
+      "name": "slack_token",
+      "role": "access-token",
+      "group": "saas-ai"
+    },
+    {
+      "name": "sendgrid_api_key",
+      "role": "api-key",
+      "group": "saas-ai"
+    }
+  ]
+}

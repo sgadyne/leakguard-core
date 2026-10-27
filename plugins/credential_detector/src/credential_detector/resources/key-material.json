@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "pack_id": "key-material",
+  "aliases": [
+    {
+      "name": "private_key",
+      "role": "private-key",
+      "group": "key-material"
+    },
+    {
+      "name": "rsa_private_key",
+      "role": "private-key",
+      "group": "key-material"
+    },
+    {
+      "name": "ssh_private_key",
+      "role": "private-key",
+      "group": "key-material"
+    },
+    {
+      "name": "signing_private_key",
+      "role": "private-key",
+      "group": "key-material"
+    }
+  ]
+}

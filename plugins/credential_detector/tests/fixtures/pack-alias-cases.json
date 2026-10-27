@@ -1,0 +1,226 @@
+[
+  {
+    "group": "common",
+    "name": "password",
+    "rule": "credential-password",
+    "positive": "password=\"x\"",
+    "negative": "prefixpasswordsuffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "passwd",
+    "rule": "credential-password",
+    "positive": "passwd=\"x\"",
+    "negative": "prefixpasswdsuffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "pwd",
+    "rule": "credential-password",
+    "positive": "pwd=\"x\"",
+    "negative": "prefixpwdsuffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "passphrase",
+    "rule": "credential-password",
+    "positive": "passphrase=\"x\"",
+    "negative": "prefixpassphrasesuffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "api_key",
+    "rule": "credential-api-key",
+    "positive": "api_key=\"x\"",
+    "negative": "prefixapi_keysuffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "api_secret",
+    "rule": "credential-client-secret",
+    "positive": "api_secret=\"x\"",
+    "negative": "prefixapi_secretsuffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "client_secret",
+    "rule": "credential-client-secret",
+    "positive": "client_secret=\"x\"",
+    "negative": "prefixclient_secretsuffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "access_token",
+    "rule": "credential-access-token",
+    "positive": "access_token=\"x\"",
+    "negative": "prefixaccess_tokensuffix=\"x\""
+  },
+  {
+    "group": "cloud",
+    "name": "aws_secret_access_key",
+    "rule": "credential-client-secret",
+    "positive": "aws_secret_access_key=\"x\"",
+    "negative": "prefixaws_secret_access_keysuffix=\"x\""
+  },
+  {
+    "group": "cloud",
+    "name": "azure_client_secret",
+    "rule": "credential-client-secret",
+    "positive": "azure_client_secret=\"x\"",
+    "negative": "prefixazure_client_secretsuffix=\"x\""
+  },
+  {
+    "group": "cloud",
+    "name": "gcp_api_key",
+    "rule": "credential-api-key",
+    "positive": "gcp_api_key=\"x\"",
+    "negative": "prefixgcp_api_keysuffix=\"x\""
+  },
+  {
+    "group": "cloud",
+    "name": "cloudflare_api_token",
+    "rule": "credential-access-token",
+    "positive": "cloudflare_api_token=\"x\"",
+    "negative": "prefixcloudflare_api_tokensuffix=\"x\""
+  },
+  {
+    "group": "developer-ci",
+    "name": "github_token",
+    "rule": "credential-access-token",
+    "positive": "github_token=\"x\"",
+    "negative": "prefixgithub_tokensuffix=\"x\""
+  },
+  {
+    "group": "developer-ci",
+    "name": "gitlab_token",
+    "rule": "credential-access-token",
+    "positive": "gitlab_token=\"x\"",
+    "negative": "prefixgitlab_tokensuffix=\"x\""
+  },
+  {
+    "group": "developer-ci",
+    "name": "npm_token",
+    "rule": "credential-access-token",
+    "positive": "npm_token=\"x\"",
+    "negative": "prefixnpm_tokensuffix=\"x\""
+  },
+  {
+    "group": "developer-ci",
+    "name": "pypi_token",
+    "rule": "credential-access-token",
+    "positive": "pypi_token=\"x\"",
+    "negative": "prefixpypi_tokensuffix=\"x\""
+  },
+  {
+    "group": "developer-ci",
+    "name": "ci_job_token",
+    "rule": "credential-access-token",
+    "positive": "ci_job_token=\"x\"",
+    "negative": "prefixci_job_tokensuffix=\"x\""
+  },
+  {
+    "group": "data-messaging",
+    "name": "database_password",
+    "rule": "credential-password",
+    "positive": "database_password=\"x\"",
+    "negative": "prefixdatabase_passwordsuffix=\"x\""
+  },
+  {
+    "group": "data-messaging",
+    "name": "db_password",
+    "rule": "credential-password",
+    "positive": "db_password=\"x\"",
+    "negative": "prefixdb_passwordsuffix=\"x\""
+  },
+  {
+    "group": "data-messaging",
+    "name": "redis_password",
+    "rule": "credential-password",
+    "positive": "redis_password=\"x\"",
+    "negative": "prefixredis_passwordsuffix=\"x\""
+  },
+  {
+    "group": "data-messaging",
+    "name": "kafka_password",
+    "rule": "credential-password",
+    "positive": "kafka_password=\"x\"",
+    "negative": "prefixkafka_passwordsuffix=\"x\""
+  },
+  {
+    "group": "data-messaging",
+    "name": "rabbitmq_password",
+    "rule": "credential-password",
+    "positive": "rabbitmq_password=\"x\"",
+    "negative": "prefixrabbitmq_passwordsuffix=\"x\""
+  },
+  {
+    "group": "data-messaging",
+    "name": "confluent_api_secret",
+    "rule": "credential-client-secret",
+    "positive": "confluent_api_secret=\"x\"",
+    "negative": "prefixconfluent_api_secretsuffix=\"x\""
+  },
+  {
+    "group": "saas-ai",
+    "name": "openai_api_key",
+    "rule": "credential-api-key",
+    "positive": "openai_api_key=\"x\"",
+    "negative": "prefixopenai_api_keysuffix=\"x\""
+  },
+  {
+    "group": "saas-ai",
+    "name": "anthropic_api_key",
+    "rule": "credential-api-key",
+    "positive": "anthropic_api_key=\"x\"",
+    "negative": "prefixanthropic_api_keysuffix=\"x\""
+  },
+  {
+    "group": "saas-ai",
+    "name": "stripe_secret_key",
+    "rule": "credential-api-key",
+    "positive": "stripe_secret_key=\"x\"",
+    "negative": "prefixstripe_secret_keysuffix=\"x\""
+  },
+  {
+    "group": "saas-ai",
+    "name": "slack_token",
+    "rule": "credential-access-token",
+    "positive": "slack_token=\"x\"",
+    "negative": "prefixslack_tokensuffix=\"x\""
+  },
+  {
+    "group": "saas-ai",
+    "name": "sendgrid_api_key",
+    "rule": "credential-api-key",
+    "positive": "sendgrid_api_key=\"x\"",
+    "negative": "prefixsendgrid_api_keysuffix=\"x\""
+  },
+  {
+    "group": "key-material",
+    "name": "private_key",
+    "rule": "credential-private-key",
+    "positive": "private_key=\"x\"",
+    "negative": "prefixprivate_keysuffix=\"x\""
+  },
+  {
+    "group": "key-material",
+    "name": "rsa_private_key",
+    "rule": "credential-private-key",
+    "positive": "rsa_private_key=\"x\"",
+    "negative": "prefixrsa_private_keysuffix=\"x\""
+  },
+  {
+    "group": "key-material",
+    "name": "ssh_private_key",
+    "rule": "credential-private-key",
+    "positive": "ssh_private_key=\"x\"",
+    "negative": "prefixssh_private_keysuffix=\"x\""
+  },
+  {
+    "group": "key-material",
+    "name": "signing_private_key",
+    "rule": "credential-private-key",
+    "positive": "signing_private_key=\"x\"",
+    "negative": "prefixsigning_private_keysuffix=\"x\""
+  }
+]

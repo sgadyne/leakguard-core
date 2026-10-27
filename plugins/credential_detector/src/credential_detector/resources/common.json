@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "pack_id": "common",
+  "aliases": [
+    {
+      "name": "password",
+      "role": "password",
+      "group": "common"
+    },
+    {
+      "name": "passwd",
+      "role": "password",
+      "group": "common"
+    },
+    {
+      "name": "pwd",
+      "role": "password",
+      "group": "common"
+    },
+    {
+      "name": "passphrase",
+      "role": "password",
+      "group": "common"
+    },
+    {
+      "name": "api_key",
+      "role": "api-key",
+      "group": "common"
+    },
+    {
+      "name": "api_secret",
+      "role": "client-secret",
+      "group": "common"
+    },
+    {
+      "name": "client_secret",
+      "role": "client-secret",
+      "group": "common"
+    },
+    {
+      "name": "access_token",
+      "role": "access-token",
+      "group": "common"
+    }
+  ]
+}

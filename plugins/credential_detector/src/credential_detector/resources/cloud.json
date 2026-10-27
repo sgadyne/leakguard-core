@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "pack_id": "cloud",
+  "aliases": [
+    {
+      "name": "aws_secret_access_key",
+      "role": "client-secret",
+      "group": "cloud"
+    },
+    {
+      "name": "azure_client_secret",
+      "role": "client-secret",
+      "group": "cloud"
+    },
+    {
+      "name": "gcp_api_key",
+      "role": "api-key",
+      "group": "cloud"
+    },
+    {
+      "name": "cloudflare_api_token",
+      "role": "access-token",
+      "group": "cloud"
+    }
+  ]
+}

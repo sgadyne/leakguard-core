@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "pack_id": "data-messaging",
+  "aliases": [
+    {
+      "name": "database_password",
+      "role": "password",
+      "group": "data-messaging"
+    },
+    {
+      "name": "db_password",
+      "role": "password",
+      "group": "data-messaging"
+    },
+    {
+      "name": "redis_password",
+      "role": "password",
+      "group": "data-messaging"
+    },
+    {
+      "name": "kafka_password",
+      "role": "password",
+      "group": "data-messaging"
+    },
+    {
+      "name": "rabbitmq_password",
+      "role": "password",
+      "group": "data-messaging"
+    },
+    {
+      "name": "confluent_api_secret",
+      "role": "client-secret",
+      "group": "data-messaging"
+    }
+  ]
+}
