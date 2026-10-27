@@ -140,6 +140,18 @@ def main():
             require(all(marker.encode() not in p.read_bytes() for p in (owned / 'cli-state').rglob('*') if p.is_file()), 'cli-store-value-leak')
         gate('installed-cli-block-redaction-location', cli_check)
 
+        def bound_fails_closed():
+            oversize = owned / 'oversize.txt'
+            oversize.write_text('Authorization: Bearer ' + marker * 500 + '\n')
+            digest = sha(oversize)
+            command = [sys.executable, '-I', '-m', 'leakguard_core', 'scan', oversize, '--config', config_path,
+                       '--state-dir', owned / 'bound-state', '--format', 'json', '--fail-on', 'block']
+            result = run(command, expected=2)
+            report = parse_report(result.stdout.decode())
+            require(not report.coverage.required_complete, 'bound-silent-clean')
+            require(sha(oversize) == digest, 'bound-input-changed')
+        gate('installed-bound-fails-closed', bound_fails_closed)
+
         def jose_review():
             def b64(data): return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
             token = '.'.join((b64(b'{"alg":"HS256"}'), b64(b'{"sub":"synthetic"}'), b64(b'j' * 32)))
@@ -282,6 +294,12 @@ def main():
             require(marker.encode() not in path.read_bytes(), 'encrypted-store-value-leak')
             require(sha(fixture) == before, 'host-input-changed')
         gate('installed-host-action-and-store', host_check)
+
+        def workers_cleaned():
+            import psutil
+            children = psutil.Process().children(recursive=True)
+            require(not any(p.is_running() and p.status() != psutil.STATUS_ZOMBIE for p in children), 'worker-process-leaked')
+        gate('worker-cleanup', workers_cleaned)
         receipt['status'] = 'passed' if all(g['status'] == 'passed' for g in receipt['gates'].values()) else 'failed'
     except Exception as exc:
         receipt['status'] = 'failed'
