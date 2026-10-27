@@ -26,6 +26,18 @@ limits, controls, and the supported profile wiring. The [alias resource
 inventory and provenance](src/credential_detector/resources/README.md) lists
 the bundled data.
 
+### Representations and bounds
+
+| Input | Supported representation and limits |
+| --- | --- |
+| Flat fields | A complete alias key followed by `:` or `=` and a single-line quoted or unquoted scalar. A comma, semicolon, closing brace, or line ending terminates an unquoted scalar. Literal values are 1–4,096 Unicode codepoints; the value limit also applies to unknown flat fields. The scanner accepts at most 10,000,000 input codepoints, 100,000 fields, and 10,000 field spans. |
+| HTTP Authorization | Complete Basic or Bearer header lines; at most 10,000,000 input codepoints, 8,192 codepoints per line, 4,096 per token, and 10,000 HTTP spans. Basic accepts canonical Base64 for printable UTF-8 `username:password`, including an empty username and requiring a nonempty password. It does not recursively scan decoded content. |
+
+The field scanner excludes supported unquoted environment references and pure
+`${NAME}`, `{{NAME}}`, or `<NAME>` placeholders, including when quoted. A quoted
+`$NAME` is a literal. Limits fail required work rather than silently truncating
+it or returning a clean result.
+
 Alias resources are packaged JSON files loaded with `importlib.resources`. The
 installed runtime identity follows explicitly declared distributions and hashes
 their installed files, including JSON; a version string alone is not resource
