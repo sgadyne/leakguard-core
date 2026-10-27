@@ -19,8 +19,8 @@ case is ignored and `_`, `-`, `.` separators are removed for lookup. Each
 entry matches a complete key, not a substring. Fields use `:` or `=` with a
 nonempty literal; short literals are included. Unquoted `$VAR`, `${VAR}`,
 `getenv(...)`, `os.getenv(...)`, and `os.environ[...]` references are excluded;
-quoted reference-looking strings are literals. Unquoted null/none/~ and empty
-values are excluded. No network validation or entropy inference is performed.
+quoted reference-looking strings are literals. Unquoted null/none/true/false/~, empty values, and pure
+`${NAME}`, `{{NAME}}`, and `<NAME>` placeholders (even quoted) are excluded. No network validation or entropy inference is performed.
 The key-material group covers only literal values assigned to these names; it
 does not parse JWK, WireGuard, PEM containers, nested semantic records, or
 binary key stores. Unlabelled arbitrary strings are outside this pack's scope.

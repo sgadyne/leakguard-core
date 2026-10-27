@@ -3,7 +3,7 @@
 This separate MIT-licensed example distribution contributes one synthetic
 organization-specific field label, `acme_deploy_key`, using the existing
 DetectorV2 interface and the shared credential engine. The original alias data
-is in `src/private_credential_pack/aliases.json`; its role is `api-key` and the
+is in `src/private_credential_pack/resources/aliases.json`; its role is `api-key` and the
 resource is loaded explicitly from this package. The example doesn't discover
 packages or load arbitrary files. The alias matches complete normalized field
 keys assigned literal values and uses the engine's reference and bounds rules.

@@ -15,4 +15,5 @@ dependencies = ["leakguard-core>=0.2.1a1,<0.3", "leakguard-credential-detector>=
 where = ["src"]
 
 [tool.setuptools.package-data]
-private_credential_pack = ["aliases.json", "cases.json", "leakguard-plugin.json"]
+private_credential_pack = ["cases.json", "leakguard-plugin.json"]
+"private_credential_pack.resources" = ["aliases.json"]

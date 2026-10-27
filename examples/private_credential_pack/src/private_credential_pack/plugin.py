@@ -18,7 +18,7 @@ MANIFEST = PluginManifest(
 
 class PrivateCredentialDetector:
     def __init__(self):
-        self.pack = load_pack('private_credential_pack', 'aliases.json')
+        self.pack = load_pack('private_credential_pack.resources', 'aliases.json')
 
     def detect(self, text, context):
         del context
