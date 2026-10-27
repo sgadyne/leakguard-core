@@ -1,0 +1,335 @@
+{
+  "schema": 1,
+  "split": "development",
+  "cases": [
+    {
+      "id": "http-authorization-basic",
+      "family": "http",
+      "text": "Authorization: Basic c2FtcGxlLW9wZXJhdG9yOnA0\n",
+      "rule": "credential-http-basic",
+      "fragment": "c2FtcGxlLW9wZXJhdG9yOnA0"
+    },
+    {
+      "id": "http-near-authorization-basic",
+      "family": "http",
+      "text": "X-Authorization: Basic c2FtcGxlLW9wZXJhdG9yOnA0\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-scheme-near-authorization-basic",
+      "family": "http",
+      "text": "Authorization: BasicExtra c2FtcGxlLW9wZXJhdG9yOnA0\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-authorization-bearer",
+      "family": "http",
+      "text": "Authorization: Bearer synthetic-acceptance-dev-A49xY\n",
+      "rule": "credential-http-bearer",
+      "fragment": "synthetic-acceptance-dev-A49xY"
+    },
+    {
+      "id": "http-near-authorization-bearer",
+      "family": "http",
+      "text": "X-Authorization: Bearer synthetic-acceptance-dev-A49xY\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-scheme-near-authorization-bearer",
+      "family": "http",
+      "text": "Authorization: BearerExtra synthetic-acceptance-dev-A49xY\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-proxy-authorization-basic",
+      "family": "http",
+      "text": "Proxy-Authorization: Basic c2FtcGxlLW9wZXJhdG9yOnA0\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-near-proxy-authorization-basic",
+      "family": "http",
+      "text": "X-Proxy-Authorization: Basic c2FtcGxlLW9wZXJhdG9yOnA0\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-scheme-near-proxy-authorization-basic",
+      "family": "http",
+      "text": "Proxy-Authorization: BasicExtra c2FtcGxlLW9wZXJhdG9yOnA0\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-proxy-authorization-bearer",
+      "family": "http",
+      "text": "Proxy-Authorization: Bearer synthetic-acceptance-dev-A49xY\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-near-proxy-authorization-bearer",
+      "family": "http",
+      "text": "X-Proxy-Authorization: Bearer synthetic-acceptance-dev-A49xY\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-scheme-near-proxy-authorization-bearer",
+      "family": "http",
+      "text": "Proxy-Authorization: BearerExtra synthetic-acceptance-dev-A49xY\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-invalid-basic",
+      "family": "http",
+      "text": "Authorization: Basic !!!\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-truncated-basic",
+      "family": "http",
+      "text": "Authorization: Basic b3BlcmF0b3Itb25seQ==\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-empty-bearer",
+      "family": "http",
+      "text": "Authorization: Bearer \n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-reference-bearer",
+      "family": "http",
+      "text": "Authorization: Bearer ${TOKEN}\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-postgres",
+      "family": "url",
+      "text": "postgres://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-postgres",
+      "family": "url",
+      "text": "postgres://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-postgres",
+      "family": "url",
+      "text": "postgres://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-postgresql",
+      "family": "url",
+      "text": "postgresql://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-postgresql",
+      "family": "url",
+      "text": "postgresql://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-postgresql",
+      "family": "url",
+      "text": "postgresql://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-mysql",
+      "family": "url",
+      "text": "mysql://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-mysql",
+      "family": "url",
+      "text": "mysql://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-mysql",
+      "family": "url",
+      "text": "mysql://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-mariadb",
+      "family": "url",
+      "text": "mariadb://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-mariadb",
+      "family": "url",
+      "text": "mariadb://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-mariadb",
+      "family": "url",
+      "text": "mariadb://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-mongodb",
+      "family": "url",
+      "text": "mongodb://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-mongodb",
+      "family": "url",
+      "text": "mongodb://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-mongodb",
+      "family": "url",
+      "text": "mongodb://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-mongodb+srv",
+      "family": "url",
+      "text": "mongodb+srv://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-mongodb+srv",
+      "family": "url",
+      "text": "mongodb+srv://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-mongodb+srv",
+      "family": "url",
+      "text": "mongodb+srv://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-redis",
+      "family": "url",
+      "text": "redis://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-redis",
+      "family": "url",
+      "text": "redis://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-redis",
+      "family": "url",
+      "text": "redis://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-rediss",
+      "family": "url",
+      "text": "rediss://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-rediss",
+      "family": "url",
+      "text": "rediss://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-rediss",
+      "family": "url",
+      "text": "rediss://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-amqp",
+      "family": "url",
+      "text": "amqp://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-amqp",
+      "family": "url",
+      "text": "amqp://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-amqp",
+      "family": "url",
+      "text": "amqp://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-amqps",
+      "family": "url",
+      "text": "amqps://test-user:k9@example.invalid:3456/db",
+      "rule": "credential-connection-url",
+      "fragment": null
+    },
+    {
+      "id": "url-no-password-amqps",
+      "family": "url",
+      "text": "amqps://test-user@example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "url-no-userinfo-amqps",
+      "family": "url",
+      "text": "amqps://example.invalid:3456/db",
+      "rule": null,
+      "fragment": null
+    }
+  ],
+  "field_templates": {
+    "literal": "k9",
+    "quoted_reference": "$DEVELOPMENT_CONTEXT",
+    "reference": "${DEVELOPMENT_CONTEXT}",
+    "near_prefix": "shadow_",
+    "near_suffix": "_shadow"
+  }
+}
