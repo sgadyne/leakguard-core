@@ -64,6 +64,12 @@ def test_basic_requires_literal_printable_user_password(value):
     assert scan_http("Authorization: Basic " + basic(value)) == ()
 
 
+@pytest.mark.parametrize("value", ["u:foo${BAR}baz", 'u:"$PASSWORD"', "u:literal$NAMEsuffix"])
+def test_basic_embedded_or_quoted_dollar_is_literal(value):
+    token = basic(value)
+    assert len(scan_http("Authorization: Basic " + token)) == 1
+
+
 def test_basic_requires_valid_utf8_and_canonical_base64():
     assert scan_http("Authorization: Basic " + base64.b64encode(b"user:\xff").decode()) == ()
     # Non-zero unused padding bits decode to the same bytes, but are not canonical.

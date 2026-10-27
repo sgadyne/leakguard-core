@@ -40,10 +40,21 @@ def _basic(token: str) -> bool:
         value = decoded.decode("utf-8")
     except (UnicodeEncodeError, UnicodeDecodeError, binascii.Error, ValueError):
         return False
-    if not value.isprintable() or ":" not in value or _REFERENCE.search(value):
+    if not value.isprintable() or ":" not in value:
         return False
-    _, password = value.split(":", 1)
-    return bool(password.strip())
+    user, password = value.split(":", 1)
+    if not password.strip():
+        return False
+    for component in (user, password):
+        if _REFERENCE.fullmatch(component):
+            return False
+        # Quoted pure template placeholders are references; a quoted $NAME
+        # or an embedded marker is a literal, not an expression to expand.
+        if (len(component) >= 2 and component[0] == component[-1]
+                and component[0] in "\"'"
+                and re.fullmatch(r"\$\{[^}]*\}|\{\{[^}]*\}\}|<[^<>]+>", component[1:-1])):
+            return False
+    return True
 
 
 def scan_http(text: str) -> tuple[CredentialSpan, ...]:
