@@ -6,12 +6,55 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from leakguard_core import backends, engine, models as m
+from leakguard_core import backends, engine, models as m, plugins
 from leakguard_core.execution import work_identity
 from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
 
 
 class AuditIdentityTests(unittest.TestCase):
+    def test_unknown_plugin_state_restarts_each_slice_and_reopened_work(self):
+        manifest = plugins.PluginManifest('synthetic-unknown', '1', 'detector',
+                                         rules=(plugins.RuleSpec('synthetic-rule'),), external_state='unknown')
+        plugin = plugins.LoadedPlugin('synthetic_unknown.plugin', {}, 2, manifest)
+        for kind in ('memory', 'sqlite'):
+            with self.subTest(store=kind), tempfile.TemporaryDirectory(prefix='leakguard-unknown-work-') as folder:
+                base = Path(folder)
+                root = base / 'source'
+                root.mkdir()
+                for number in range(3):
+                    (root / f'{number}.txt').write_text('synthetic')
+                config = {'audit_scopes': {'synthetic': str(root)}, 'scan_workers': 1,
+                          'plugins': [{'module': 'synthetic_unknown.plugin'}]}
+                store = MemoryScanStore() if kind == 'memory' else SQLiteScanStore(base / 'state')
+                with patch('leakguard_core.scan_policy.runtime_identity', return_value=('runtime', True)), \
+                     patch.object(plugins, 'load', return_value=[plugin]), \
+                     patch.object(plugins, 'detect', return_value=()), \
+                     patch.object(backends, 'detect', return_value=()):
+                    service = engine.ScanService(config, store=store)
+                    limits = m.ScanLimits(5, 1)
+                    self.assertNotEqual(service.work_identity(policy=m.ScanPolicy.inventory(), limits=limits),
+                                        service.work_identity(policy=m.ScanPolicy.inventory(), limits=limits))
+                    first = service.audit('synthetic', limits=limits)
+                    second = service.audit('synthetic', limits=limits)
+                    self.assertFalse(first.coverage.required_complete)
+                    self.assertFalse(second.coverage.required_complete)
+                    self.assertEqual(first.results[0].source.path, second.results[0].source.path)
+                    self.assertEqual(first.results[0].identity.runtime_id, 'runtime')
+                    self.assertFalse(first.results[0].identity.cache_eligible)
+                    service.close()
+                    if kind == 'sqlite':
+                        store.close()
+                        store = SQLiteScanStore(base / 'state')
+                    service = engine.ScanService(config, store=store)
+                    reopened = service.audit('synthetic', limits=limits)
+                    self.assertEqual(first.results[0].source.path, reopened.results[0].source.path)
+                    complete = service.audit('synthetic', limits=m.ScanLimits(5, 10))
+                    self.assertTrue(complete.coverage.required_complete)
+                    self.assertEqual(len(complete.results), 3)
+                    self.assertTrue(all(result.outcome is m.ScanOutcome.SCANNED for result in complete.results))
+                    service.close()
+                store.close()
+
     def test_slice_budgets_change_without_restarting_reopened_sqlite_work(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-work-id-') as folder:
             root = Path(folder) / 'source'; root.mkdir()

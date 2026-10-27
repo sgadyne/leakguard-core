@@ -576,6 +576,14 @@ class ScanService:
                 raise AcquisitionError('source-unavailable')
         identity = work_identity(config=self.config, runtime=self._runtime, policy=policy, limits=limits,
                                  material_identity=materials.identity if materials is not None else None)
+        # Unknown plugin state cannot certify work completed by an earlier
+        # slice, including slices in this service. A fresh fence forces an audit
+        # to finish in one bounded invocation rather than resume stale evidence.
+        # Keep the report runtime identity tied to the actual inspected bytes.
+        if any(getattr(getattr(instance, 'manifest', None), 'external_state', 'unknown') == 'unknown'
+               for instance in self._plugins):
+            identity['runtime_id'] = hashlib.sha256(
+                (self._runtime + ':' + uuid.uuid4().hex).encode()).hexdigest()
         return identity, materials
 
     def work_identity(self, *, policy, limits):

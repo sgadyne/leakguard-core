@@ -182,6 +182,8 @@ class Scanner:
         still identifies its full limits. Inventory identity also includes the
         bounded registered-reference snapshot, and fails if it cannot be read
         and validated. Scans capture and revalidate their own reference snapshot.
+        Unknown plugin state returns a fresh fence on every call, disabling
+        continuation; such audits must finish within a single bounded slice.
         """
         self._ensure_open()
         if type(policy) is not ScanPolicy or type(limits) is not ScanLimits:
