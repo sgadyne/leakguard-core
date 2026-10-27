@@ -108,7 +108,7 @@ def install(env, profile):
     require(not env.exists() and not env.is_symlink(), 'new-environment-required')
     require(not env.is_relative_to(ROOT) and not ROOT.is_relative_to(env), 'environment-outside-kit-required')
     os.umask(0o077)
-    venv.EnvBuilder(with_pip=True).create(env)
+    venv.EnvBuilder(with_pip=True, symlinks=os.name != 'nt').create(env)
     run([python_at(env), '-I', '-m', 'pip', 'install', '--no-index', '--no-cache-dir', '--only-binary=:all:',
          '--find-links', ROOT / 'wheelhouse', '--require-hashes', '-r', ROOT / 'requirements.lock'])
     run([python_at(env), '-I', ROOT / 'kit.py', '_configure', '--env', env, '--profile', profile], capture=True)

@@ -11,7 +11,10 @@ Obtain the archive hash from the trusted release receipt and check it before
 extracting into a fresh private directory. Each zip has `kit.py` at its root.
 The manifest is an integrity/provenance inventory, not a digital signature.
 The exact identity is the archive SHA-256 + manifest SHA-256 + full source commit
-and tree, recorded in the release receipt. Version strings alone are insufficient.
+and tree, recorded in the release receipt. The separate source archive contains
+tracked source with historical machine-specific handoff/design/validation evidence
+and UI bundles excluded; its allowlist is in the build receipt. Version strings
+alone are insufficient.
 Keep the extracted kit at its final absolute path: runtime configuration binds to
 its native backend. Do not combine backend binaries or target wheelhouses.
 
@@ -27,7 +30,9 @@ native qualification: consult the separate exact-artifact platform receipts.
 Git is additionally needed for explicitly installed Git guards. No NLP model,
 Java, Tika, private firm rules, real credentials, broker, vault or GUI is included.
 Gitleaks executable provenance/checksums/license are in `backend/`; Python wheel
-license texts and metadata are in `licenses/inventory.json`. Core/local projects
+license texts and metadata are in `licenses/inventory.json`. The Presidio
+Analyzer 2.2.365 MIT notice is supplied from its pinned upstream release commit
+with source URL/hash because its wheel omits that text. Core/local projects
 use the included MIT license. Third-party licenses remain their own.
 
 ## Install, verify, smoke

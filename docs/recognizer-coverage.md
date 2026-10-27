@@ -43,10 +43,10 @@ python3.11 -m venv /private/leakguard-native
 /private/leakguard-native/bin/python -m pip install \
   -r plugins/presidio_detector/requirements-py311.lock
 /private/leakguard-native/bin/python -m pip install \
-  /reviewed-wheels/leakguard_core-0.2.1a2-py3-none-any.whl \
+  /reviewed-wheels/leakguard_core-0.2.1a3-py3-none-any.whl \
   /reviewed-wheels/leakguard_presidio_detector-0.1.0a2-py3-none-any.whl \
   /reviewed-wheels/leakguard_jose_recognizers-0.1.0a2-py3-none-any.whl \
-  /reviewed-wheels/leakguard_credential_detector-0.1.0a1-py3-none-any.whl
+  /reviewed-wheels/leakguard_credential_detector-0.1.0a2-py3-none-any.whl
 
 /private/leakguard-native/bin/leakguard-recognizer-profile \
   --profile credentials --output /private/credentials-native.json

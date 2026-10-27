@@ -31,7 +31,7 @@ python -m pip download --only-binary=:all: --dest artifacts/wheelhouse \
   pypdf==6.21.2 olefile==0.47 'packaging>=24,<27'
 python -m pip download --only-binary=:all: --no-index \
   --find-links artifacts/wheelhouse --dest artifacts/wheelhouse \
-  'leakguard-core[documents]==0.2.1a2' leakguard-host==0.2.0 leakguard-vault==0.1.0 \
+  'leakguard-core[documents]==0.2.1a3' leakguard-host==0.2.0 leakguard-vault==0.1.0 \
   leakguard-buddy==0.1.0a1 leakguard-sensitive-basics==0.1.0 \
   leakguard-firm-example==0.1.0
 ```

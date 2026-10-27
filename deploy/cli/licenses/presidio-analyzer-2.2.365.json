@@ -1,0 +1,9 @@
+{
+  "distribution": "presidio-analyzer",
+  "version": "2.2.365",
+  "tag": "2.2.365",
+  "upstream_commit": "a8882cba0b6a9bcd9fb60892a118af37f9a7461c",
+  "url": "https://raw.githubusercontent.com/microsoft/presidio/a8882cba0b6a9bcd9fb60892a118af37f9a7461c/LICENSE",
+  "sha256": "f3e86ee59a49bcfb0d9a9547484d55224ea7b2d04f95b1947b4d18d17f6de535",
+  "reason": "Upstream wheel declares MIT but omits full copyright/permission text."
+}

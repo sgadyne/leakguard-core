@@ -10,7 +10,7 @@ from .http import scan_http
 
 API_VERSION = 2
 MANIFEST = PluginManifest(
-    id='credential-detector', implementation_version='0.1.0a1', kind='detector',
+    id='credential-detector', implementation_version='0.1.0a2', kind='detector',
     rules=tuple(RuleSpec(rule, 'block') for rule in (*RULES.values(), 'credential-http-basic', 'credential-http-bearer')),
     formats=(), part_kinds=(), options_schema=OptionSchema(),
     dependencies=(DistributionSpec('leakguard-credential-detector'), DistributionSpec('leakguard-core')), deterministic=True, external_state='unknown', result_schema=2,
@@ -34,7 +34,7 @@ class CredentialDetector:
             yield NewFinding(rule=span.rule, line=line, severity='block', analysis=AnalysisMetadata(
                 schema_version=1, start=span.start, end=span.end, entity_type=span.rule,
                 score=None, recognizer_id=span.rule, analyzer_id='credential-detector',
-                analyzer_version='0.1.0a1', model_id='none'))
+                analyzer_version='0.1.0a2', model_id='none'))
 
 
 def create_plugin(options: Mapping[str, object]) -> CredentialDetector:

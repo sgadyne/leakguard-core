@@ -63,7 +63,7 @@ def backend(stage, target, version):
         'checksums_url': base+f'gitleaks_{version}_checksums.txt', 'license': 'MIT',
         'provenance': 'Official upstream release plus upstream checksum; integrity, not independent signature verification.'})
 
-def wheels_info(wh, stage):
+def wheels_info(wh, stage, source):
     packages=[]; licenses=[]
     for path in sorted(wh.glob('*.whl')):
         with zipfile.ZipFile(path) as z:
@@ -78,6 +78,19 @@ def wheels_info(wh, stage):
                 if not n.endswith('/') and ('/licenses/' in n.lower() or n.rsplit('/',1)[-1].lower() in ('license','license.txt','copying','notice','notice.txt')):
                     dest=stage/'licenses'/rec['name']/n
                     dest.parent.mkdir(parents=True,exist_ok=True); dest.write_bytes(z.read(n)); files.append(dest.relative_to(stage).as_posix())
+            if rec['name'].lower().replace('_', '-') == 'presidio-analyzer':
+                notice = source/'deploy/cli/licenses/presidio-analyzer-2.2.365-LICENSE'
+                provenance = source/'deploy/cli/licenses/presidio-analyzer-2.2.365.json'
+                expected = json.loads(provenance.read_text())
+                if sha(notice) != expected['sha256'] or rec['version'] != expected['version']:
+                    raise ValueError('presidio-license-provenance-mismatch')
+                for item in (notice, provenance):
+                    dest=stage/'licenses'/rec['name']/item.name
+                    dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(item,dest)
+                    files.append(dest.relative_to(stage).as_posix())
+            if not files and rec['name'].startswith(('leakguard-', 'example-firm-')):
+                files.append('LICENSE')
+            if not files: raise ValueError('dependency-license-text-missing:' + rec['name'])
             licenses.append({'distribution':rec['name'],'version':rec['version'],
                 'license_expression':meta.get('License-Expression'), 'license_metadata':meta.get('License'),
                 'license_classifiers':[c for c in meta.get_all('Classifier',[]) if c.startswith('License ::')],
@@ -121,7 +134,22 @@ def main():
         run([sys.executable,'-m','pip','wheel','--no-deps','--no-build-isolation','--no-index','--no-cache-dir','--wheel-dir',built,
              *[source/r['path'] for r in projects.values()]])
         source_archive=out/f'leakguard-source-{label}-{commit[:12]}.tar.gz'
-        run(['git','archive','--format=tar.gz','--prefix',f'leakguard-source-{label}/','--output',source_archive,commit],cwd=ROOT)
+        # Release source contains tracked source files, excluding historical
+        # machine-specific handoff/design/validation evidence and UI bundles.
+        allowed_roots = {'.github', 'src', 'plugins', 'examples', 'tests', 'tools', 'scripts', 'native', 'packages', 'docs', 'deploy'}
+        excluded = ('docs/design/', 'docs/handoff/', 'docs/validation/', 'deploy/desktop/')
+        source_members = []
+        with tarfile.open(fileobj=io.BytesIO(data)) as origin, tarfile.open(source_archive, 'w:gz') as dest:
+            for member in origin.getmembers():
+                name = member.name
+                if not member.isfile() or name.startswith(excluded): continue
+                if '/' in name and name.split('/')[0] not in allowed_roots: continue
+                content = origin.extractfile(member)
+                member.name = f'leakguard-source-{label}/' + name
+                dest.addfile(member, content)
+                source_members.append(name)
+        receipt['source_archive_policy'] = {'tracked_files_only': True, 'allowed_roots': sorted(allowed_roots),
+                                            'excluded_prefixes': list(excluded), 'members': source_members}
         receipt['artifacts'].append({'filename':source_archive.name,'sha256':sha(source_archive),'kind':'tracked-source'})
         for target in dict.fromkeys(a.target):
             stage=temp/target;stage.mkdir(); wh=stage/'wheelhouse';wh.mkdir()
@@ -145,7 +173,7 @@ def main():
                 shutil.copyfile(source/filename,stage/filename)
             shutil.copyfile(source/'docs/credential-coverage.md',stage/'COVERAGE.md')
             backend(stage,target,spec['gitleaks'])
-            packages=wheels_info(wh,stage)
+            packages=wheels_info(wh,stage,source)
             actual={x['name'].lower().replace('_','-'):x['version'] for x in packages}
             for n,r in spec['projects'].items():
                 if actual.get(n)!=r['version']:raise ValueError('project-version-mismatch')
@@ -166,6 +194,6 @@ def main():
         path=out/f'leakguard-examples-{label}.zip';archive(examples,path)
         receipt['artifacts'].append({'filename':path.name,'sha256':sha(path),'kind':'optional-synthetic-examples'})
     write(out/'build-receipt.json',receipt)
-    print(json.dumps(receipt,sort_keys=True))
+    print(json.dumps({k:v for k,v in receipt.items() if k != 'source_archive_policy'},sort_keys=True))
 
 if __name__=='__main__': main()
