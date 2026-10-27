@@ -353,6 +353,12 @@ def _stage_test_tools(source_root: Path, installed_tests: Path) -> Path:
         if source.is_symlink() or not source.is_file():
             raise AcceptanceFailure("test-tool-missing")
         shutil.copy2(source, installed_tools / name)
+    installed_scripts = installed_tests / 'scripts'
+    installed_scripts.mkdir(mode=0o700)
+    source = source_root / 'scripts' / 'credential_install_smoke.py'
+    if source.is_symlink() or not source.is_file():
+        raise AcceptanceFailure('test-tool-missing')
+    shutil.copy2(source, installed_scripts / source.name)
     return installed_tools
 
 

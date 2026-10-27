@@ -22,8 +22,8 @@ target-matched staging host; a Mac wheelhouse is not a Windows wheelhouse.
 
 On a connected, approved Python 3.11 staging host of the target platform, in
 an integrated checkout, use a new build environment and an empty output
-directory. These commands build only the CLI, adapter, JOSE and synthetic firm
-example wheels; add the Tika wheel if explicitly needed. The lock contains
+directory. These commands build the CLI, credential detector, adapter, JOSE and
+synthetic private/firm example wheels; add the Tika wheel if explicitly needed. The lock contains
 hashes for the Presidio dependency closure. The second download collects core
 and local-wheel dependencies, which must also be checked against the approved
 artifact manifest. Build tooling and package index access are staging inputs;
@@ -39,6 +39,7 @@ mkdir "$WH"                       # must not already exist
 PY=/private/lg-build/bin/python
 "$PY" -m pip wheel --no-deps --wheel-dir "$WH" . \
   plugins/presidio_detector plugins/jose_recognizers \
+  plugins/credential_detector examples/private_credential_pack \
   plugins/presidio_detector/examples/firm_presidio_recognizer
 "$PY" -m pip download --only-binary=:all: --require-hashes \
   --dest "$WH" -r plugins/presidio_detector/requirements-py311.lock
@@ -46,6 +47,8 @@ PY=/private/lg-build/bin/python
   "$WH/leakguard_core-0.2.1a2-py3-none-any.whl" \
   "$WH/leakguard_presidio_detector-0.1.0a2-py3-none-any.whl" \
   "$WH/leakguard_jose_recognizers-0.1.0a2-py3-none-any.whl" \
+  "$WH/leakguard_credential_detector-0.1.0a1-py3-none-any.whl" \
+  "$WH/leakguard_private_credential_example-0.1.0-py3-none-any.whl" \
   "$WH/example_firm_presidio_recognizer-0.1.0-py3-none-any.whl"
 # Record full source commit and hashes in the receipt; compare with reviewed artifacts.
 git rev-parse HEAD
@@ -62,6 +65,7 @@ $WH = 'C:\Approved\lg-wheels-REVISION'
 New-Item -ItemType Directory -Path $WH -ErrorAction Stop
 & $BUILD -m pip wheel --no-deps --wheel-dir $WH . `
   plugins\presidio_detector plugins\jose_recognizers `
+  plugins\credential_detector examples\private_credential_pack `
   plugins\presidio_detector\examples\firm_presidio_recognizer
 if ($LASTEXITCODE -ne 0) { throw 'Project wheel build failed' }
 & $BUILD -m pip download --only-binary=:all: --require-hashes `
@@ -71,6 +75,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Locked dependency download failed' }
   (Join-Path $WH 'leakguard_core-0.2.1a2-py3-none-any.whl') `
   (Join-Path $WH 'leakguard_presidio_detector-0.1.0a2-py3-none-any.whl') `
   (Join-Path $WH 'leakguard_jose_recognizers-0.1.0a2-py3-none-any.whl') `
+  (Join-Path $WH 'leakguard_credential_detector-0.1.0a1-py3-none-any.whl') `
+  (Join-Path $WH 'leakguard_private_credential_example-0.1.0-py3-none-any.whl') `
   (Join-Path $WH 'example_firm_presidio_recognizer-0.1.0-py3-none-any.whl')
 if ($LASTEXITCODE -ne 0) { throw 'Wheel preparation failed' }
 git rev-parse HEAD
@@ -104,6 +110,8 @@ PY=/private/lg-runtime-REVISION/bin/python
   "$WH/leakguard_core-0.2.1a2-py3-none-any.whl" \
   "$WH/leakguard_presidio_detector-0.1.0a2-py3-none-any.whl" \
   "$WH/leakguard_jose_recognizers-0.1.0a2-py3-none-any.whl" \
+  "$WH/leakguard_credential_detector-0.1.0a1-py3-none-any.whl" \
+  "$WH/leakguard_private_credential_example-0.1.0-py3-none-any.whl" \
   "$WH/example_firm_presidio_recognizer-0.1.0-py3-none-any.whl"
 "$PY" -m pip check
 /private/lg-runtime-REVISION/bin/leakguard --help
@@ -118,6 +126,21 @@ credentials, sensitive or firm profile from that base. Then run the synthetic
 positive and negative checks in [recognizer coverage](recognizer-coverage.md)
 and inspect coverage and findings before firm data. The local follow-through
 receipt records what was actually exercised on the target Mac.
+
+Composed credentials, sensitive and firm profiles require the credential wheel
+alongside Presidio and JOSE. The core-only default still uses Gitleaks alone.
+An enabled missing wheel fails closed. The private alias example is activated
+only by adding `{"module":"private_credential_pack.plugin","options":{}}` to
+the explicit plugin list; the composer preserves that entry and firm Presidio
+factories/options. See [credential coverage](credential-coverage.md), the
+[private alias example](../examples/private_credential_pack/README.md) and the
+[offline wheel identity gate](../plugins/credential_detector/README.md).
+
+Both credential manifests declare unknown external state. Result reuse is
+disabled and each audit slice starts a fresh cycle. Select a bounded budget
+large enough to complete an audit in one invocation; repeated small slices do
+not accumulate certified progress. Single file CLI/Git scans remain bounded.
+Retain incomplete results when that budget is insufficient.
 
 ## Additional wheels for Mac qualification and Linux broker
 
@@ -178,6 +201,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Locked dependency install failed' }
   (Join-Path $WH 'leakguard_core-0.2.1a2-py3-none-any.whl') `
   (Join-Path $WH 'leakguard_presidio_detector-0.1.0a2-py3-none-any.whl') `
   (Join-Path $WH 'leakguard_jose_recognizers-0.1.0a2-py3-none-any.whl') `
+  (Join-Path $WH 'leakguard_credential_detector-0.1.0a1-py3-none-any.whl') `
+  (Join-Path $WH 'leakguard_private_credential_example-0.1.0-py3-none-any.whl') `
   (Join-Path $WH 'example_firm_presidio_recognizer-0.1.0-py3-none-any.whl')
 if ($LASTEXITCODE -ne 0) { throw 'Project wheel install failed' }
 & $PY -m pip check

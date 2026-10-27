@@ -90,6 +90,50 @@ jobs:
               print(json.dumps({key: value.get(key) for key in ('outcome', 'failed_stage', 'test_summary')}))
           PY
 
+  credential-wheel:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: '3.11'
+          - os: ubuntu-latest
+            python-version: '3.13'
+          - os: macos-latest
+            python-version: '3.11'
+          - os: windows-latest
+            python-version: '3.11'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Prepare target matched offline wheel inputs
+        shell: bash
+        run: |
+          python -m pip install uv==0.12.12
+          python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/credential-inputs" setuptools==80.9.0 wheel==0.45.1 packaging==26.3 psutil==7.2.2 cachetools==7.2.5
+      - name: Build and verify fresh offline credential and private wheels
+        shell: bash
+        run: >-
+          python -I scripts/credential_install_smoke.py
+          --python "$(python -c 'import sys; print(sys.executable)')"
+          --wheelhouse "$RUNNER_TEMP/credential-inputs"
+          --artifacts "$RUNNER_TEMP/credential-wheel"
+      - name: Execute every credential and private package unit suite on installed bytes
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            CREDENTIAL_PYTHON="$RUNNER_TEMP/credential-wheel/installed/Scripts/python.exe"
+          else
+            CREDENTIAL_PYTHON="$RUNNER_TEMP/credential-wheel/installed/bin/python"
+          fi
+          uv pip install --python "$CREDENTIAL_PYTHON" pytest==8.4.2
+          cd "$RUNNER_TEMP"
+          "$CREDENTIAL_PYTHON" -I -m pytest "$GITHUB_WORKSPACE/plugins/credential_detector/tests" "$GITHUB_WORKSPACE/examples/private_credential_pack/tests" -q
+
   presidio-smoke:
     strategy:
       fail-fast: false
@@ -107,17 +151,39 @@ jobs:
           python -m pip install .
           python -m pip install --require-hashes -r plugins/presidio_detector/requirements-py311.lock
       - name: Install adapter and synthetic firm recognizer as wheels
-        run: >-
-          python -m pip install --no-deps
-          ./plugins/presidio_detector
-          ./plugins/jose_recognizers
-          ./plugins/presidio_detector/examples/firm_presidio_recognizer
+        shell: bash
+        run: |
+          python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/composed-wheels" . ./plugins/presidio_detector ./plugins/jose_recognizers ./plugins/credential_detector ./examples/private_credential_pack ./packages/leakguard_vault ./packages/leakguard_host ./plugins/presidio_detector/examples/firm_presidio_recognizer
+          python -m pip install --no-index --no-deps --force-reinstall "$RUNNER_TEMP"/composed-wheels/*.whl
+      - name: Install host integration dependencies
+        run: python -m pip install ./packages/leakguard_vault ./packages/leakguard_host
       - name: Check installed JOSE, firm adapter and owned worker session
         run: python -I tools/check_presidio_smoke.py
       - name: Check JOSE vectors and adapter regressions
         run: |
           python -m pip install pytest==8.4.2 cryptography==50.0.2
           python -I -m pytest plugins/jose_recognizers/tests plugins/presidio_detector/tests -k "not test_required_spacy_ner_uses_configured_model_without_fallback and not test_required_ner_rejects_a_model_for_the_wrong_language and not test_required_ner_rejects_a_mismatched_model_identity" -q
+      - name: Check all installed composed profiles, actual Git guards and encrypted host
+        shell: bash
+        run: |
+          python tools/install_gitleaks.py .tools
+          if [ "$RUNNER_OS" = Windows ]; then
+            GITLEAKS_BIN="$GITHUB_WORKSPACE/.tools/gitleaks.exe"
+          else
+            GITLEAKS_BIN="$GITHUB_WORKSPACE/.tools/gitleaks"
+          fi
+          python -I tools/check_recognizer_profiles.py --source-root "$GITHUB_WORKSPACE" --gitleaks "$GITLEAKS_BIN" --output-dir "$RUNNER_TEMP/composed-profiles"
+      - name: Exercise installed credential CLI, Git, host, privacy and continuation gates
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          CANDIDATE_SHA=$(git rev-parse HEAD)
+          FIXTURE_SHA=$(python -c 'import hashlib; from pathlib import Path; print(hashlib.sha256(Path("tests/credentials_acceptance/development.json").read_bytes()).hexdigest())')
+          WHEEL_ARGS=()
+          for artifact in "$RUNNER_TEMP"/composed-wheels/*.whl; do
+            WHEEL_ARGS+=(--wheel "$artifact")
+          done
+          python -I scripts/credential_acceptance.py --source-root "$GITHUB_WORKSPACE" --expected-sha "$CANDIDATE_SHA" --gitleaks "$GITHUB_WORKSPACE/.tools/gitleaks" --sealed-fixture "$GITHUB_WORKSPACE/tests/credentials_acceptance/development.json" --sealed-sha256 "$FIXTURE_SHA" --fixture-kind development --output-dir "$RUNNER_TEMP/credential-development" "${WHEEL_ARGS[@]}"
 
   broker-installed:
     runs-on: ubuntu-latest

@@ -18,6 +18,17 @@ bundled. Firm rules stay in a separately reviewed private wheel. Tika is an
 optional local parser requiring Java 17+ and its separately approved archive.
 Core-only defaults do not detect general compact JWE. The [synthetic evaluation report](docs/recognizer-evaluation.md) records measured coverage and preset limitations. Consult the release's platform receipts before making native support claims.
 
+Composed credentials, sensitive and firm profiles explicitly add the
+[credential detector wheel](plugins/credential_detector/README.md) alongside
+Gitleaks and JOSE. Its six scoped alias groups and literal Authorization
+Basic/Bearer scanner produce value-free blocking findings; see the
+[coverage matrix](docs/credential-coverage.md) and
+[credential taxonomy](docs/credential-taxonomy.md) for representations and gaps.
+The [private alias example](examples/private_credential_pack/README.md) adds a
+pack through DetectorV2 without editing core. Missing required wheels fail
+closed. Unknown plugin state disables result reuse and audit continuation;
+such audits must finish in a single bounded invocation.
+
 ## Plugin guide
 
 Author firm recognizers as a **separate private wheel**, using native Presidio

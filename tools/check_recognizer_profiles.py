@@ -109,7 +109,7 @@ def main():
     owned.mkdir(parents=True, exist_ok=False)
     source_root = args.source_root.resolve()
     origins = {}
-    for name in ('leakguard_core', 'presidio_detector', 'jose_recognizers', 'leakguard_host',
+    for name in ('leakguard_core', 'credential_detector', 'presidio_detector', 'jose_recognizers', 'leakguard_host',
                  'leakguard_vault', 'firm_presidio_recognizer'):
         module = importlib.import_module(name)
         origin = Path(module.__file__).resolve()

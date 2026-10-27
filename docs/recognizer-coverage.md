@@ -14,7 +14,7 @@ key, or identifies a provider from public algorithm names.
 | Configuration | General compact JOSE coverage | Other native entities |
 | --- | --- | --- |
 | Unmodified core defaults | Unavailable | None |
-| Composed `credentials` | JWE, JWS candidates, unverified JOSE | None added |
+| Composed `credentials` | JWE, JWS candidates, unverified JOSE | Credential flat fields and literal HTTP Authorization |
 | Composed `sensitive` | Same | Default PII plus financial and identity presets |
 | Composed `firm` | Same | Same presets; retains supplied firm recognizer factories |
 
@@ -28,7 +28,7 @@ choice, not an unavailable enabled detector being ignored.
 
 ## Compose and use a configuration
 
-Build the core, Presidio adapter and JOSE recognizer wheels from the same task
+Build the core, credential detector, Presidio adapter and JOSE recognizer wheels from the same task
 branch. Use a new, unused private Python 3.11 environment and install the
 coordinated wheel set. These local feature artifacts retain checkpoint
 prerelease versions; wheel digests and the installed-origin gate identify the
@@ -45,7 +45,8 @@ python3.11 -m venv /private/leakguard-native
 /private/leakguard-native/bin/python -m pip install \
   /reviewed-wheels/leakguard_core-0.2.1a2-py3-none-any.whl \
   /reviewed-wheels/leakguard_presidio_detector-0.1.0a2-py3-none-any.whl \
-  /reviewed-wheels/leakguard_jose_recognizers-0.1.0a2-py3-none-any.whl
+  /reviewed-wheels/leakguard_jose_recognizers-0.1.0a2-py3-none-any.whl \
+  /reviewed-wheels/leakguard_credential_detector-0.1.0a1-py3-none-any.whl
 
 /private/leakguard-native/bin/leakguard-recognizer-profile \
   --profile credentials --output /private/credentials-native.json
@@ -74,8 +75,9 @@ leakguard-recognizer-profile --profile firm \
 
 The command merges all three JOSE entity IDs and the factory
 `jose_recognizers.plugin:build_recognizers` into one configured Presidio adapter.
-It preserves existing custom entities, factory options, thresholds, block policy
-and unrelated extractors. Multiple Presidio adapter specs are ambiguous and are
+It also appends `credential_detector.plugin` once, preserving existing private
+plugins, custom entities, factory options, thresholds, block policy and unrelated
+extractors. Duplicate credential module entries are rejected. Multiple Presidio adapter specs are ambiguous and are
 rejected. New sensitive and firm profiles select `financial` and `identity`;
 `--healthcare` adds the optional healthcare preset. See the
 [adapter guide](../plugins/presidio_detector/README.md) for exact preset members
@@ -95,6 +97,16 @@ its explicit configuration path. Changing only `detection_profile` in a JSON
 file does not replace its explicit plugin options; compose a new configuration
 when changing coverage. Extension-registry enablement remains a separate,
 explicit operation for registered extension plugins.
+
+The [credential coverage matrix](credential-coverage.md) describes the flat
+field and literal Authorization scope; six data groups are not six complete
+provider grammars. Connection URLs remain a core Gitleaks rule. Generic JOSE
+policy is unchanged. New credential findings block, including an explicit
+Bearer credential context around a JOSE-shaped token.
+
+Credential plugins declare unknown external state. Persistent result reuse and
+cross-slice audit continuation are disabled; audits using them must finish in
+one bounded slice. See the [install guide](CLI-INSTALL.md) for practical limits.
 
 ## Context and result interpretation
 

@@ -165,6 +165,8 @@ class AcceptanceStagingTests(unittest.TestCase):
             (source / "tools").mkdir(parents=True)
             (source / "deploy").mkdir()
             (source / "docs").mkdir()
+            (source / "scripts").mkdir()
+            (source / "scripts" / "credential_install_smoke.py").write_text('credential-smoke', encoding='utf-8')
             for name in expected_tools:
                 (source / "tools" / name).write_text(name, encoding="utf-8")
             for name in run_acceptance.INSTALLED_TEST_DEPLOY_FILES:
@@ -179,6 +181,7 @@ class AcceptanceStagingTests(unittest.TestCase):
                              set(run_acceptance.INSTALLED_TEST_DEPLOY_FILES))
             self.assertEqual((tools_dir / "check_product_journey.py").read_text(),
                              "check_product_journey.py")
+            self.assertEqual((target / 'scripts' / 'credential_install_smoke.py').read_text(), 'credential-smoke')
             self.assertEqual((deploy_dir / "default-config.json").read_text(),
                              "default-config.json")
             self.assertEqual({path.name for path in (target / "docs").iterdir()},
