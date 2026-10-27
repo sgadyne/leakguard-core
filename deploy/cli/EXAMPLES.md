@@ -8,9 +8,21 @@ These wheels are separate from every base deployment kit:
 They contain no real firm rules or credentials. Installation does not activate
 plugins. Verify this archive hash and each manifest file hash against the release
 receipt first. Use a **separate custom runtime**, initialized from a verified kit's
-`requirements.lock` and `wheelhouse`, with the same approved CPython 3.11. Install
-these exact wheel paths using `python -m pip install --no-index --no-deps PATH` and
-run `python -m pip check`. This custom runtime is outside the base kit's exact
+`requirements.lock` and `wheelhouse`, with the same approved CPython 3.11. After
+extracting both archives, use absolute paths (Unix example; Windows uses
+`Scripts/python.exe` instead of `bin/python`):
+
+```sh
+python3.11 -m venv /private/new-lg-custom
+/private/new-lg-custom/bin/python -m pip install --no-index --require-hashes \
+  --find-links /absolute/extracted-kit/wheelhouse -r /absolute/extracted-kit/requirements.lock
+/private/new-lg-custom/bin/python -m pip install --no-index --no-deps \
+  /absolute/extracted-examples/leakguard_private_credential_example-0.1.0-py3-none-any.whl \
+  /absolute/extracted-examples/example_firm_presidio_recognizer-0.1.0-py3-none-any.whl
+/private/new-lg-custom/bin/python -m pip check
+```
+
+ This custom runtime is outside the base kit's exact
 package-set guarantee. Do not add wheels to the managed kit environment.
 
 Compose a new private config with `leakguard-recognizer-profile`, preserving the

@@ -144,7 +144,7 @@ def smoke(env):
         require(a['coverage']['required_complete'] and a['coverage']['enumeration_complete'] and b['coverage']['required_complete'] and b['coverage']['enumeration_complete'], 'smoke-incomplete')
         findings = [f for r in a['results'] for f in r['findings']]
         require(any(f['rule'] == 'credential-password' and f['severity'] == 'block' for f in findings), 'credential-profile-inactive')
-        require(any(f.get('analysis', {}).get('entity_type') == 'JOSE_COMPACT_JWE' and f['severity'] == 'review' for f in findings), 'jose-profile-inactive')
+        require(any((f.get('analysis') or {}).get('entity_type') == 'JOSE_COMPACT_JWE' and f['severity'] == 'review' for f in findings), 'jose-profile-inactive')
         require(not any(r['findings'] for r in b['results']), 'negative-smoke-failed')
         print(json.dumps({'status': 'passed', 'synthetic_only': True, 'credential_block': True, 'jose_review': True, 'negative_clean': True}))
 
