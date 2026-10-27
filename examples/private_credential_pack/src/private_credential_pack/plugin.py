@@ -9,7 +9,7 @@ from leakguard_core.plugins import DistributionSpec, NewFinding, OptionSchema, P
 API_VERSION = 2
 MANIFEST = PluginManifest(
     id='private-credential-example', implementation_version='0.1.0', kind='detector',
-    rules=(RuleSpec('credential-api-key', 'block'),), formats=('text',), part_kinds=('text',),
+    rules=(RuleSpec('credential-api-key', 'block'),), formats=(), part_kinds=(),
     options_schema=OptionSchema(), dependencies=(DistributionSpec('leakguard-core'), DistributionSpec('leakguard-credential-detector'),
                   DistributionSpec('leakguard-private-credential-example')),
     deterministic=True, external_state='unknown', result_schema=2,

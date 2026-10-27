@@ -1,13 +1,11 @@
 """Exercise the private detector and its explicit dependency/resource boundary."""
-import os
-from pathlib import Path
 import subprocess
 import sys
 
 import pytest
 
 from credential_detector.aliases import AliasPackError
-from leakguard_core.plugins import DetectionContext
+from leakguard_core.plugins import DetectionContext, detect, load
 from private_credential_pack import MANIFEST, create_plugin
 from private_credential_pack import plugin
 
@@ -44,16 +42,33 @@ def test_manifest_declares_dependencies_and_unknown_external_state():
     assert MANIFEST.external_state == 'unknown'
 
 
+def test_extracted_part_dispatch_preserves_original_offsets():
+    # Exercise the actual worker-backed dispatcher, not just the detector method.
+    text = 'é prefix\nacme_deploy_key="x"\n'
+    plugins = load([{'module': 'private_credential_pack.plugin'}])
+    findings = list(detect(plugins, text, 'synthetic.pdf', 'page-1', format_id='pdf-text'))
+    assert len(findings) == 1
+    finding = findings[0]
+    start = text.index('"x"') + 1
+    assert (finding.rule, finding.line, finding.severity) == ('credential-api-key', 2, 'block')
+    assert (finding.analysis.start, finding.analysis.end) == (start, start + 1)
+    assert text == 'é prefix\nacme_deploy_key="x"\n'
+
+
 def test_missing_engine_is_not_silently_ignored():
-    # Isolated interpreter with only core and this example on sys.path: the
-    # engine distribution is intentionally absent even if installed in pytest's venv.
-    root = Path(__file__).resolve().parents[3]
-    private_src = root / 'examples/private_credential_pack/src'
-    core_src = root / 'src'
-    script = ('import sys; sys.path[:0] = ' + repr([str(private_src), str(core_src)]) +
-              '; import private_credential_pack')
-    env = dict(os.environ)
-    result = subprocess.run([sys.executable, '-I', '-S', '-c', script],
-                            capture_output=True, text=True, env=env, check=False)
+    # Block the dependency in a fresh interpreter while importing the installed
+    # private package. No checkout paths are added to the interpreter.
+    script = """
+import importlib.abc
+import sys
+class MissingEngine(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'credential_detector':
+            raise ModuleNotFoundError("No module named 'credential_detector'", name=fullname)
+sys.meta_path.insert(0, MissingEngine())
+import private_credential_pack
+"""
+    result = subprocess.run([sys.executable, '-I', '-c', script],
+                            capture_output=True, text=True, check=False)
     assert result.returncode != 0
     assert "No module named 'credential_detector'" in result.stderr

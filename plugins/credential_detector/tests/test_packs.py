@@ -1,5 +1,6 @@
 """Coverage of every shipped field alias against synthetic literals and controls."""
 import json
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -14,10 +15,10 @@ PACK = load_packs('credential_detector.resources', tuple(f'{group}.json' for gro
 
 
 def test_fixture_inventory_matches_all_bundled_aliases():
-    resources = ROOT.parent / 'src' / 'credential_detector' / 'resources'
+    bundled = resources.files('credential_detector.resources')
     inventory = []
     for group in GROUPS:
-        doc = json.loads((resources / f'{group}.json').read_text())
+        doc = json.loads(bundled.joinpath(f'{group}.json').read_text(encoding='utf-8'))
         assert doc['pack_id'] == group
         for item in doc['aliases']:
             assert item['group'] == group

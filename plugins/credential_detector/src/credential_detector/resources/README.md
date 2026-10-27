@@ -24,3 +24,5 @@ quoted reference-looking strings are literals. Unquoted null/none/true/false/~, 
 The key-material group covers only literal values assigned to these names; it
 does not parse JWK, WireGuard, PEM containers, nested semantic records, or
 binary key stores. Unlabelled arbitrary strings are outside this pack's scope.
+An unmatched standalone quote or apostrophe suppresses scanning of the remaining
+text on that line; the flat scanner does not parse general source syntax.
