@@ -39,6 +39,9 @@ def main():
     parser.add_argument('--wheel', action='append', default=[], type=Path)
     args = parser.parse_args()
     source, owned = args.source_root.resolve(strict=True), args.output_dir.absolute()
+    args.sealed_fixture = args.sealed_fixture.resolve(strict=True)
+    args.gitleaks = args.gitleaks.resolve(strict=True)
+    args.wheel = [path.resolve(strict=True) for path in args.wheel]
     require(not owned.resolve().is_relative_to(source) and not owned.exists(), 'output-location')
     require(not Path(sys.prefix).resolve().is_relative_to(source), 'venv-location')
     os.umask(0o077)
@@ -115,7 +118,8 @@ def main():
             e = dict(env, CREDENTIAL_ACCEPTANCE_FIXTURE=str(fixture))
             run([sys.executable, '-I', test_path], extra_env=e)
         gate('development-taxonomy', lambda: taxonomy(source / 'tests/credentials_acceptance/development.json'))
-        gate(args.fixture_kind + '-taxonomy', lambda: taxonomy(args.sealed_fixture))
+        if args.fixture_kind == 'sealed':
+            gate('sealed-taxonomy', lambda: taxonomy(args.sealed_fixture))
 
         marker = 'lg-synthetic-acceptance-M7q6v9R4'
         private.append(marker)
