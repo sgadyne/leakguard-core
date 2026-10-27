@@ -13,6 +13,7 @@ import importlib
 import importlib.metadata as metadata
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -90,8 +91,20 @@ def inspect_install(source_root: Path, wheel_dir: Path) -> dict:
                                 'wheel_sha256': sha(candidates[0].read_bytes()),
                                 'requires': sorted(dist.requires or []), 'files_sha256': hashes}
     private_reqs = result['leakguard-private-credential-example']['requires']
-    if not any(r.lower().replace('_', '-').startswith('leakguard-credential-detector') for r in private_reqs):
+    if not any(re.match(r'^leakguard[-_.]credential[-_.]detector(?=$|[\s<>=!~;(\[])', r, re.I) for r in private_reqs):
         raise ValueError('private-dependency-missing')
+    for module, sample, rule in (
+        ('credential_detector.plugin', 'password=synthetic-example', 'credential-password'),
+        ('private_credential_pack.plugin', 'acme_deploy_key=synthetic-example', 'credential-api-key'),
+    ):
+        plugin = importlib.import_module(module)
+        if not Path(plugin.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()):
+            raise ValueError('plugin-origin-invalid')
+        if plugin.MANIFEST.external_state != 'unknown':
+            raise ValueError('resource-fence-missing')
+        findings = tuple(plugin.create_plugin({}).detect(sample, None))
+        if not any(f.rule == rule for f in findings):
+            raise ValueError('installed-detector-smoke-failed')
     return result
 
 
