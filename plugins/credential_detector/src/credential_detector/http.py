@@ -15,6 +15,8 @@ import re
 from .types import CredentialSpan
 
 # Bounds are in input Unicode codepoints. Decoding is limited to 3 KiB.
+_MAX_TEXT = 10_000_000
+_MAX_SPANS = 10_000
 _MAX_LINE = 8192
 _MAX_TOKEN = 4096
 _HEADER = re.compile(
@@ -63,17 +65,22 @@ def scan_http(text: str) -> tuple[CredentialSpan, ...]:
     HTTP SP/HTAB. Bare environment/template references and malformed headers
     are excluded; oversized inputs raise ValueError. No folding is performed.
     """
+    if len(text) > _MAX_TEXT:
+        raise ValueError("HTTP text exceeds scan bound")
     found: list[CredentialSpan] = []
     offset = 0
-    lines = text.split("\n")
-    for index, line in enumerate(lines):
-        length = len(line)
+    while True:
+        newline = text.find("\n", offset)
+        end = len(text) if newline < 0 else newline
         # A CR is allowed only as the line terminator in CRLF.
-        content = line[:-1] if line.endswith("\r") and index < len(lines) - 1 else line
-        next_line = lines[index + 1] if index + 1 < len(lines) else ""
-        continuation = next_line.startswith((" ", "\t")) and not _NEXT_HEADER.match(next_line)
-        if len(content) > _MAX_LINE:
+        content_end = end - 1 if newline >= 0 and end > offset and text[end - 1] == "\r" else end
+        if content_end - offset > _MAX_LINE:
             raise ValueError("HTTP header line exceeds scan bound")
+        content = text[offset:content_end]
+        next_offset = end + 1
+        continuation = (newline >= 0 and next_offset < len(text)
+                        and text[next_offset] in " \t"
+                        and not _NEXT_HEADER.match(text, next_offset))
         if not continuation:
             match = _HEADER.fullmatch(content)
             if match:
@@ -85,10 +92,14 @@ def scan_http(text: str) -> tuple[CredentialSpan, ...]:
                     (scheme == "basic" and _basic(token))
                     or (scheme == "bearer" and _BEARER.fullmatch(token))
                 ):
+                    if len(found) >= _MAX_SPANS:
+                        raise ValueError("HTTP findings exceed scan bound")
                     found.append(CredentialSpan(
                         rule=f"credential-http-{scheme}",
                         start=offset + match.start("token"),
                         end=offset + match.end("token"),
                     ))
-        offset += length + 1
+        if newline < 0:
+            break
+        offset = next_offset
     return tuple(found)

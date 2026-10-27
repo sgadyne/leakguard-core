@@ -108,3 +108,27 @@ def test_exceeding_scan_bound_fails_closed_without_values(line):
     with pytest.raises(ValueError, match="exceeds scan bound") as exc:
         scan_http(line)
     assert line not in str(exc.value)
+
+
+def test_total_text_limit_counts_unicode_codepoints_and_fails_closed():
+    header = "Authorization: Bearer z"
+    # Short lines avoid the independent per-line bound; the marker at EOF
+    # checks that the entire input at the limit was processed.
+    prefix_length = 10_000_000 - len(header)
+    whole_lines, tail = divmod(prefix_length, 8_000)
+    prefix = ("π" * 7_999 + "\n") * whole_lines + "π" * (tail - 1) + "\n"
+    text = prefix + header
+    assert len(text) == 10_000_000
+    assert scan_http(text) == (CredentialSpan("credential-http-bearer", len(text) - 1, len(text)),)
+    with pytest.raises(ValueError, match="^HTTP text exceeds scan bound$"):
+        scan_http(text + "π")
+
+
+def test_finding_limit_accepts_exactly_10000_and_rejects_next():
+    line = "Authorization: Bearer z\n"
+    text = line * 10_000
+    spans = scan_http(text)
+    assert len(spans) == 10_000
+    assert spans[-1] == CredentialSpan("credential-http-bearer", len(text) - 2, len(text) - 1)
+    with pytest.raises(ValueError, match="^HTTP findings exceed scan bound$"):
+        scan_http(text + line)
