@@ -51,6 +51,11 @@ regex = '''(?i)(?:^|[\s{,.])((?:["']?(?:password|passwd|passphrase|pwd|user[_-]?
 secretGroup = 1
 entropy = 0
 keywords = ["password", "passwd", "passphrase", "pwd"]
+  # Only the entire, standalone Python-shaped lookup is exempt. Do not
+  # exempt a prefix: a fallback or an appended expression can contain a secret.
+  [[rules.allowlists]]
+  regexTarget = "line"
+  regexes = ['''^[ \t]*password[ \t]*=[ \t]*credentials\.get\([ \t]*(?:"password"|'password')[ \t]*,[ \t]*(?:""|'')[ \t]*\)[ \t]*,?[ \t]*\r?$''']
   [[rules.allowlists]]
   regexTarget = "secret"
   regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*[:=]\s*["']?(?:\$\{[a-z_][a-z0-9_]*\}?|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password|change[-_ ]?me|replace[-_ ]?me|not[-_ ]?a[-_ ]?secret|test|none|null|undefined)["']?$''']

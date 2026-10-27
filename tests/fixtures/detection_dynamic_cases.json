@@ -1,0 +1,21 @@
+{
+  "provenance": "Authored synthetic regression cases, not an independent holdout or original pilot content. Labels require independent security review.",
+  "cases": [
+    {"id":"pilot-analogue-double", "text":"password = credentials.get(\"password\", \"\")", "native":[], "plugin":[]},
+    {"id":"pilot-analogue-single", "text":"  password = credentials.get('password', ''),", "native":[], "plugin":[]},
+    {"id":"fallback", "text":"password = credentials.get(\"password\", \"synth-fallback\")", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"append", "text":"password = credentials.get(\"password\", \"\") + \"synth-suffix\"", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"quoted-expression", "text":"password = 'credentials.get(\"password\", \"\")'", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"other-key", "text":"password = credentials.get(\"key\", \"\")", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"other-dict", "text":"password = config.get(\"password\", \"\")", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"same-line", "text":"password = credentials.get(\"password\", \"\"); password = \"synthetic-two\"", "native":["literal-password","literal-password"], "plugin":["credential-password","credential-password"]},
+    {"id":"short", "text":"password = \"x\"", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"unicode", "text":"password = \"päss語\"", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"env", "text":"password = os.getenv(\"PASSWORD\")", "native":[], "plugin":[]},
+    {"id":"quoted-env", "text":"password = 'os.getenv(\"PASSWORD\")'", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"placeholder", "text":"password = \"${PASSWORD}\"", "native":[], "plugin":[]},
+    {"id":"encoded-literal", "text":"password = \"c3ludGhldGlj\"", "native":["literal-password"], "plugin":["credential-password"]},
+    {"id":"url", "text":"postgres://user:samplepass@localhost/db", "native":["credential-connection-url"], "plugin":[]},
+    {"id":"duplicate-lines", "text":"password = \"synth-value\"\npassword = \"synth-value\"", "native":["literal-password","literal-password"], "plugin":["credential-password","credential-password"]}
+  ]
+}

@@ -30,6 +30,13 @@ _PLACEHOLDER_PATTERN = r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\{\{[A-Za-z_][A-Za-z0-9
 _PLACEHOLDER = re.compile(_PLACEHOLDER_PATTERN + r'\Z', re.ASCII)
 _PLACEHOLDER_PREFIX = re.compile(_PLACEHOLDER_PATTERN, re.ASCII)
 
+# An intentionally narrow lexical exemption, not expression evaluation. The
+# whole line must consist of this lookup; concatenation, literal fallbacks,
+# comments, other assignments and quoted expression text remain candidates.
+_EMPTY_CREDENTIAL_LOOKUP = re.compile(
+    r'''[ \t]*password[ \t]*=[ \t]*credentials\.get\([ \t]*(?:"password"|'password')[ \t]*,[ \t]*(?:""|'')[ \t]*\)[ \t]*,?[ \t]*\r?\Z''',
+    re.ASCII)
+
 
 def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
     """Scan flat assignments, returning offsets over literal value content only.
@@ -73,6 +80,14 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
         role = pack.aliases.get(normalize_key(key))
         start = match.end()
         cursor = start
+        if key == 'password' and match.group('bare'):
+            line_start = text.rfind('\n', 0, match.start()) + 1
+            line_end = text.find('\n', start)
+            if line_end < 0:
+                line_end = len(text)
+            if _EMPTY_CREDENTIAL_LOOKUP.fullmatch(text[line_start:line_end]):
+                cursor = line_end
+                continue
         if start >= len(text):
             continue
         quoted = text[start] in "\"'"
