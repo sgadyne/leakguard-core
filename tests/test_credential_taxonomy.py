@@ -2,7 +2,9 @@
 import base64
 import os
 import json
+from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -85,6 +87,73 @@ class CredentialTaxonomyTests(unittest.TestCase):
             with self.subTest(scheme=scheme):
                 findings = self.detect(scheme + '://alice@host.example/db')
                 self.assertNotIn('credential-connection-url', {f.rule for f in findings})
+
+    def test_encoded_references_only_excluded_as_whole_password(self):
+        markers = ('%24ENV', '%24%7BENV%7D', '%25ENV%25',
+                   '%3CENV%3E', '%7B%7BENV%7D%7D')
+        for index, marker in enumerate(markers):
+            for kind, user, password, expected in (
+                ('pure', 'u', marker, False),
+                ('pure-empty-user', '', marker, False),
+                ('pure-encoded-colon-user', 'u%3Aname', marker, False),
+                ('embedded', 'u', 'prefix:' + marker, True),
+                ('multiple-colons', '', 'prefix::' + marker, True),
+                ('encoded-colon-user', 'u%3Aname', 'prefix:' + marker, True),
+            ):
+                with self.subTest(marker=index, kind=kind):
+                    text = 'before\nmysql://' + user + ':' + password + '@host\nafter'
+                    own = [f for f in self.detect(text)
+                           if f.rule == 'credential-connection-url']
+                    self.assertEqual(len(own), int(expected))
+                    if own:
+                        self.assertEqual((own[0].start_line, own[0].end_line), (2, 2))
+                        self.assertEqual(own[0].severity, 'block')
+                        self.assertNotIn(password, repr(own))
+
+    def test_embedded_encoded_reference_blocks_and_redacts_in_scan_service(self):
+        literal = 'mysql://u:prefix:%24ENV@host'
+        content = 'before\nmysql://u:%24ENV@host ' + literal + '\nafter\n'
+        with tempfile.TemporaryDirectory(prefix='leakguard-credential-test-') as state:
+            service = engine.ScanService({
+                'gitleaks_executable': self.binary,
+                'worker_policy': self.worker_policy,
+            }, state_dir=state)
+            try:
+                report = service.scan(
+                    [models.BytesInput(content.encode(), 'config.txt')],
+                    policy=models.ScanPolicy.inventory(),
+                    limits=models.ScanLimits(30, 1), use_cache=False,
+                )
+            finally:
+                service.close()
+        own = [f for result in report.results for f in result.findings
+               if f.rule == 'credential-connection-url']
+        self.assertEqual(len(own), 1)
+        self.assertEqual((own[0].start_line, own[0].end_line), (2, 2))
+        self.assertEqual(own[0].severity, models.FindingSeverity.BLOCK)
+        self.assertEqual(report.decision.verdict, models.DecisionVerdict.BLOCK)
+        for value in (content, literal, 'prefix:%24ENV'):
+            self.assertNotIn(value, json.dumps(report.to_dict()))
+            self.assertNotIn(value, repr(report))
+
+    def test_embedded_encoded_reference_original_gitleaks_span(self):
+        literal = 'mysql://u:prefix:%24ENV@host'
+        line = 'mysql://u:%24ENV@host ' + literal
+        content = line + '\nafter\n'
+        result = subprocess.run(
+            [self.binary, 'stdin', '--config', str(Path(backends.__file__).with_name('rules.toml')),
+             '--redact=100', '--ignore-gitleaks-allow', '--no-banner', '--no-color',
+             '--log-level', 'fatal', '--report-format', 'json', '--report-path', '-'],
+            input=content.encode(), capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 1)
+        own = [f for f in json.loads(result.stdout or b'null') or []
+               if f['RuleID'] == 'credential-connection-url']
+        self.assertEqual(len(own), 1)
+        start = line.index(literal) + 1  # Gitleaks columns are 1-based, inclusive.
+        self.assertEqual((own[0]['StartLine'], own[0]['EndLine']), (1, 1))
+        self.assertEqual((own[0]['StartColumn'], own[0]['EndColumn']),
+                         (start, start + len(literal) - 1))
 
     def test_connection_url_authority_and_boundaries(self):
         # Labels distinguish cases without emitting synthetic input on failure.

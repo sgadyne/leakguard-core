@@ -23,11 +23,12 @@ keywords = ["postgres", "mysql", "mariadb", "mongodb", "redis", "rediss", "amqp"
   [[rules.allowlists]]
   regexTarget = "match"
   regexes = ['''(?i)^[^\s"'=({,;\[\]})](?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|amqps)://''']
-  # Exact encoded placeholder/reference forms are excluded; embedded markers
+  # Exact encoded placeholder/reference forms are excluded only when they are
+  # the whole password after the first raw userinfo colon. Embedded markers
   # remain literal candidates. This does not recursively decode userinfo.
   [[rules.allowlists]]
   regexTarget = "secret"
-  regexes = ['''(?i)://[^@]*:(?:%24%7b[a-z_][a-z0-9_]*%7d|%24[a-z_][a-z0-9_]*|%25[a-z_][a-z0-9_]*%25|%3c[a-z_][a-z0-9_]*%3e|%7b%7b[a-z_][a-z0-9_]*%7d%7d)@''', '''(?i)://[^@]*%c2%[89][0-9a-f][^@]*@''', '''(?i)@\[[0-9a-f.:]*:::''']
+  regexes = ['''(?i)://[^@:]*:(?:%24%7b[a-z_][a-z0-9_]*%7d|%24[a-z_][a-z0-9_]*|%25[a-z_][a-z0-9_]*%25|%3c[a-z_][a-z0-9_]*%3e|%7b%7b[a-z_][a-z0-9_]*%7d%7d)@''', '''(?i)://[^@]*%c2%[89][0-9a-f][^@]*@''', '''(?i)@\[[0-9a-f.:]*:::''']
 
 [[rules]]
 id = "literal-client-secret"
