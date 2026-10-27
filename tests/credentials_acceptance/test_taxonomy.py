@@ -64,6 +64,11 @@ class Taxonomy(unittest.TestCase):
                 ('short', 'π\n' + key + ' = "' + templates['literal'] + '"\n', True),
                 ('quoted-reference', key + ' = "' + templates['quoted_reference'] + '"\n', True),
                 ('unquoted-reference', key + ' = ' + templates['reference'] + '\n', False),
+                ('environment-expression', key + ' = os.getenv("ACCEPTANCE_REF")\n', False),
+                ('null-atom', key + ' = null\n', False),
+                ('case-normalized', key.upper() + ' = "' + templates['literal'] + '"\n', True),
+                ('unicode-prefix', 'π' + key + ' = "' + templates['literal'] + '"\n', False),
+                ('dot-prefix', 'prefix.' + key + ' = "' + templates['literal'] + '"\n', False),
                 ('prefix', templates['near_prefix'] + key + ' = "' + templates['literal'] + '"\n', False),
                 ('suffix', key + templates['near_suffix'] + ' = "' + templates['literal'] + '"\n', False),
             ):
@@ -104,15 +109,29 @@ class Taxonomy(unittest.TestCase):
                 check(all(f.severity == 'block' and f.start_line == 1 and f.end_line == 1 for f in matching), 'url-action-location')
                 check(row['text'] not in repr(findings), 'url-finding-privacy')
 
+    def test_alias_bounds(self):
+        key = self.aliases[0]['name']
+        for text in (key + ' = "' + 'q' * 4097 + '"', 'x' * 10_000_001):
+            with self.subTest(case='field-limit'):
+                try:
+                    scan_fields(text, self.pack)
+                except ValueError as error:
+                    check(text not in str(error), 'field-bound-error-privacy')
+                else:
+                    raise AssertionError('field-bound-must-fail-closed')
+
     def test_protocol_bounds(self):
         # No unbounded decoding/output or invalid spans for oversized inputs.
         texts = ('Authorization: Basic ' + 'A' * 100_000 + '\n',
                  'Authorization: Bearer ' + 'z' * 100_000 + '\n')
         for text in texts:
             with self.subTest(case='oversized-protocol'):
-                spans = scan_http(text)
-                check(len(spans) <= 1, 'http-output-bound')
-                check(all(0 <= s.start < s.end <= len(text) for s in spans), 'http-large-span')
+                try:
+                    scan_http(text)
+                except ValueError as error:
+                    check(text not in str(error), 'http-bound-error-privacy')
+                else:
+                    raise AssertionError('http-bound-must-fail-closed')
 
 
 if __name__ == '__main__':
