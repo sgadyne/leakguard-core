@@ -13,7 +13,7 @@ def basic(value):
 @pytest.mark.parametrize("header,rule,token", [
     ("Authorization: Basic dXNlcjpwYXNz", "credential-http-basic", "dXNlcjpwYXNz"),
     ("aUtHoRiZaTiOn:\t bAsIc\t" + basic("üser:päss:more") + "  ", "credential-http-basic", basic("üser:päss:more")),
-    ("Authorization: Bearer a", "credential-http-bearer", "a"),
+    (" \tAuthorization: Bearer a", "credential-http-bearer", "a"),
     ("AUTHORIZATION: bearer Az09-._~+/==\t", "credential-http-bearer", "Az09-._~+/=="),
 ])
 def test_literal_headers_and_original_unicode_offsets(header, rule, token):
@@ -37,8 +37,7 @@ def test_multiple_lines_and_end_of_input():
 
 @pytest.mark.parametrize("line", [
     "Proxy-Authorization: Bearer abc", "X-Authorization: Bearer abc",
-    "prefix Authorization: Bearer abc", " Authorization: Bearer abc",
-    "\tAuthorization: Bearer abc", "Authorization : Bearer abc",
+    "prefix Authorization: Bearer abc", "Authorization : Bearer abc",
     "Authorization:Bearer", "Authorization: Bearer", "Authorization:Bearerabc",
     "Authorization: Bearer abc trailing", "Authorization: Bearer abc,def",
     "Authorization: Bearer abc\rjunk", "Authorization: Bearer abc\v",
@@ -47,18 +46,15 @@ def test_multiple_lines_and_end_of_input():
     "Authorization: Bearer $TOKEN", "Authorization: Bearer ${TOKEN}",
     "Authorization: Bearer {{TOKEN}}", 'Authorization: Bearer "${TOKEN}"',
     "Authorization: Bearer <token>", "Authorization: Bearer %TOKEN%",
-    "Authorization: Bearer " + "a" * 4097,
-    "Authorization: Bearer " + " " * 8192 + "abc",
     "Authorization: Basic dTpw!", "Authorization: Basic dTpw=",
     "Authorization: Basic dTpwAAAA=", "Authorization: Basic dT",
-    "Authorization: Basic " + "Y" * 4100,
 ])
 def test_reject_incomplete_malformed_and_non_headers(line):
     assert scan_http(line) == ()
 
 
 @pytest.mark.parametrize("value", [
-    "no-colon", ":password", "user:", "  :password", "user:  ",
+    "no-colon", "user:", "user:  ",
     "user:pass\nInjected: value", "user:pass\rnext", "user:pass\x00",
     "user:${PASSWORD}", "${USER}:secret", "user:$PASSWORD", "user:$(secret)",
     "user:%PASSWORD%", "user:{{password}}", "user:<password>",
@@ -85,4 +81,24 @@ def test_bounds_and_line_ending_edges():
     assert scan_http("Authorization: Bearer a\r") == ()
     assert scan_http("Authorization: Bearer a\r\n continued") == ()
     assert scan_http("Authorization: Bearer a\n\tcontinued") == ()
+    assert len(scan_http("Authorization: Bearer a\n Authorization: Bearer b")) == 2
     assert scan_http("Authorization: Basic " + basic(basic("user:pass"))) == ()
+
+
+def test_empty_basic_username_is_permitted():
+    token = basic(":password")
+    assert scan_http("Authorization: Basic " + token) == (
+        CredentialSpan("credential-http-basic", 21, 21 + len(token)),
+    )
+
+
+@pytest.mark.parametrize("line", [
+    "Authorization: Bearer " + "a" * 4097,
+    "Authorization: Basic " + "Y" * 4100,
+    "unrelated " + "x" * 8192,
+    "Authorization: Bearer " + " " * 8192 + "abc",
+])
+def test_exceeding_scan_bound_fails_closed_without_values(line):
+    with pytest.raises(ValueError, match="exceeds scan bound") as exc:
+        scan_http(line)
+    assert line not in str(exc.value)

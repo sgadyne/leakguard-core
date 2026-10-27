@@ -2,7 +2,7 @@
 
 Spans identify only the original wire token; decoded Basic credentials never
 leave this module. The input is not interpreted as a request or sent anywhere.
-Only complete, unindented header lines and the Basic and Bearer schemes are
+Only complete header lines and the Basic and Bearer schemes are
 recognized. CRLF, LF and a final line at EOF are supported.
 """
 
@@ -18,10 +18,11 @@ from .types import CredentialSpan
 _MAX_LINE = 8192
 _MAX_TOKEN = 4096
 _HEADER = re.compile(
-    r"(?i:authorization):[ \t]*(?P<scheme>(?i:basic|bearer))[ \t]+"
+    r"[ \t]*(?i:authorization):[ \t]*(?P<scheme>(?i:basic|bearer))[ \t]+"
     r"(?P<token>[^ \t\r\n]+)[ \t]*\Z",
     re.ASCII,
 )
+_NEXT_HEADER = re.compile(r"[ \t]+[!#$%&'*+.^_`|~0-9A-Za-z-]+:", re.ASCII)
 _BEARER = re.compile(r"[A-Za-z0-9._~+/-]+=*\Z", re.ASCII)
 _REFERENCE = re.compile(
     r"\$\{[^}]*\}|\$\([^)]+\)|\$[A-Za-z_][A-Za-z0-9_]*"
@@ -41,8 +42,8 @@ def _basic(token: str) -> bool:
         return False
     if not value.isprintable() or ":" not in value or _REFERENCE.search(value):
         return False
-    user, password = value.split(":", 1)
-    return bool(user.strip() and password.strip())
+    _, password = value.split(":", 1)
+    return bool(password.strip())
 
 
 def scan_http(text: str) -> tuple[CredentialSpan, ...]:
@@ -50,7 +51,7 @@ def scan_http(text: str) -> tuple[CredentialSpan, ...]:
 
     Header names and schemes are ASCII case-insensitive; whitespace is only
     HTTP SP/HTAB. Bare environment/template references and malformed or
-    oversized lines are excluded. No continuation/folding is performed.
+    oversized inputs raise ValueError. No continuation/folding is performed.
     """
     found: list[CredentialSpan] = []
     offset = 0
@@ -59,13 +60,18 @@ def scan_http(text: str) -> tuple[CredentialSpan, ...]:
         length = len(line)
         # A CR is allowed only as the line terminator in CRLF.
         content = line[:-1] if line.endswith("\r") and index < len(lines) - 1 else line
-        continuation = index + 1 < len(lines) and lines[index + 1].startswith((" ", "\t"))
-        if len(content) <= _MAX_LINE and not continuation:
+        next_line = lines[index + 1] if index + 1 < len(lines) else ""
+        continuation = next_line.startswith((" ", "\t")) and not _NEXT_HEADER.match(next_line)
+        if len(content) > _MAX_LINE:
+            raise ValueError("HTTP header line exceeds scan bound")
+        if not continuation:
             match = _HEADER.fullmatch(content)
             if match:
                 token = match.group("token")
                 scheme = match.group("scheme").lower()
-                if len(token) <= _MAX_TOKEN and (
+                if len(token) > _MAX_TOKEN:
+                    raise ValueError("HTTP authorization token exceeds scan bound")
+                if (
                     (scheme == "basic" and _basic(token))
                     or (scheme == "bearer" and _BEARER.fullmatch(token))
                 ):
