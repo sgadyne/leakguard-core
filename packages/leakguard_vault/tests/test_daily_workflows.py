@@ -98,3 +98,30 @@ def test_rekey_failed_write_and_concurrent_edits(tmp_path, monkeypatch):
     assert len(session.list_entries()) == 25
     assert {session.reveal_entry(i)['secret'] for i in ids} == {f'synthetic-value-{i}' for i in range(24)}
     vault.lock()
+
+
+def test_rekey_directory_sync_failure_requires_reopen(tmp_path, monkeypatch):
+    vault = CredentialVault(tmp_path / 'credentials.lgv')
+    session = vault.create(OLD)
+    entry = session.save_entry(title='before', secret='synthetic-committed-value')
+    original_fsync = _files.os.fsync
+    calls = 0
+    def fail_directory_sync(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError('simulated directory sync failure')
+        return original_fsync(fd)
+    with monkeypatch.context() as patch:
+        patch.setattr(_files.os, 'fsync', fail_directory_sync)
+        with pytest.raises(VaultError, match='vault-io-failed'):
+            session.change_passphrase(NEW, current_passphrase=OLD)
+    assert not vault.status()['unlocked']
+    with pytest.raises(VaultError, match='vault-locked'):
+        session.save_entry(title='stale write', secret='synthetic-stale-value')
+    # The failed directory sync occurred after replacement: the new state may
+    # be visible, but the failed operation was never acknowledged as durable.
+    reopened = vault.unlock(NEW)
+    assert reopened.reveal_entry(entry['id'])['secret'] == 'synthetic-committed-value'
+    assert len(reopened.list_entries()) == 1
+    vault.lock()
