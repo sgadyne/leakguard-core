@@ -110,7 +110,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix='leakguard-cli-build-',dir=out.parent) as temp:
         temp=Path(temp); source=temp/'source'; source.mkdir()
         data=run(['git','archive',commit],cwd=ROOT)
-        with tarfile.open(fileobj=io.BytesIO(data)) as z: z.extractall(source,filter='data')
+        with tarfile.open(fileobj=io.BytesIO(data)) as z:
+            for member in z.getmembers():
+                if (not (member.isfile() or member.isdir()) or member.name.startswith('/') or '..' in Path(member.name).parts):
+                    raise ValueError('tracked-archive-member-invalid')
+            z.extractall(source)
         spec=json.loads((source/'deploy/cli/spec.json').read_text()); label=spec['version']
         built=temp/'built';built.mkdir()
         projects={**spec['projects'],**spec['examples']}
