@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "private-credential-example",
   "api_version": 2,
-  "module": "private_credential_pack",
+  "module": "private_credential_pack.plugin",
   "component": "private-credential-example",
   "version": "0.1.0",
   "conformance": "private_credential_pack/cases.json"
