@@ -154,7 +154,7 @@ def main():
     p.add_argument('--env', type=Path, required=True)
     p.add_argument('--profile', choices=('credentials', 'sensitive', 'firm'), default='credentials')
     p.add_argument('paths', nargs='*')
-    a = p.parse_intermixed_args(); env = a.env.absolute()
+    a = p.parse_intermixed_args(); env = a.env.resolve()
     try:
         if a.command == 'install': install(env, a.profile)
         elif a.command == '_configure': configure(env, a.profile)

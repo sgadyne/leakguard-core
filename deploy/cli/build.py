@@ -110,7 +110,7 @@ def main():
     p.add_argument('--output',required=True,type=Path,help='new directory outside checkout')
     p.add_argument('--target',action='append',choices=TARGETS,required=True)
     p.add_argument('--find-links',type=Path,help='optional immutable wheel cache for staging')
-    a=p.parse_args(); out=a.output.absolute()
+    a=p.parse_args(); out=a.output.resolve()
     if out.exists() or out.is_relative_to(ROOT): raise ValueError('new-output-outside-source-required')
     if run(['git','status','--porcelain','--untracked-files=all'],cwd=ROOT): raise ValueError('clean-source-required')
     commit=run(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
