@@ -1,5 +1,9 @@
 # Recognizer implementation and evaluation handoff
 
+This document describes the historical recognizer evaluation. Its results do not
+qualify the current CLI deployment kit. Exact 0.2.1a3 artifact/platform outcomes
+belong in the separately retained release receipts.
+
 The optional native profiles now detect the described compact JWE format,
 distinguish JWS candidates, and retain bounded unsupported JOSE candidates for
 review. Installed CLI, Git hooks and encrypted host tests pass. The sealed
@@ -176,9 +180,10 @@ This run does not verify new Windows/macOS behavior.
 
 ## Evidence and reproduction
 
-See the [full evaluator report](../tools/recognizer_eval/REPORT.md),
-[holdout artifact index](../tools/recognizer_eval/HOLDOUT_ARTIFACTS.json), and
-[compact machine-readable results](recognizer-results.json). Frozen manifests,
+The full evaluator report, holdout artifact index and compact machine-readable
+results are retained in the reviewed Git history and private qualification
+evidence. Those historical run artifacts are excluded from the CLI source
+archive. Frozen manifests,
 seeds and hashed evaluation locks are in `tools/recognizer_eval`; preserve V1
 as superseded. The run handoff contains raw candidates/scores, exact wheel
 digests, source freeze, threshold/profile hashes, installed receipts and the

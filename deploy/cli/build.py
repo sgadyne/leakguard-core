@@ -122,7 +122,7 @@ def main():
     receipt={'schema':1,'source_commit':commit,'source_tree':tree,'artifacts':[],'platform_qualification':'built; native receipts required separately'}
     with tempfile.TemporaryDirectory(prefix='leakguard-cli-build-',dir=out.parent) as temp:
         temp=Path(temp); source=temp/'source'; source.mkdir()
-        data=run(['git','archive',commit],cwd=ROOT)
+        data=run(['git','-c','core.autocrlf=false','-c','core.eol=lf','archive',commit],cwd=ROOT)
         with tarfile.open(fileobj=io.BytesIO(data)) as z:
             for member in z.getmembers():
                 if (not (member.isfile() or member.isdir()) or member.name.startswith('/') or '..' in Path(member.name).parts):
@@ -138,18 +138,19 @@ def main():
         # machine-specific handoff/design/validation evidence and UI bundles.
         allowed_roots = {'.github', 'src', 'plugins', 'examples', 'tests', 'tools', 'scripts', 'native', 'packages', 'docs', 'deploy'}
         excluded = ('docs/design/', 'docs/handoff/', 'docs/validation/', 'deploy/desktop/')
+        excluded_files = {'tools/recognizer_eval/REPORT.md', 'tools/recognizer_eval/HOLDOUT_ARTIFACTS.json', 'docs/recognizer-results.json'}
         source_members = []
         with tarfile.open(fileobj=io.BytesIO(data)) as origin, tarfile.open(source_archive, 'w:gz') as dest:
             for member in origin.getmembers():
                 name = member.name
-                if not member.isfile() or name.startswith(excluded): continue
+                if not member.isfile() or name.startswith(excluded) or name in excluded_files: continue
                 if '/' in name and name.split('/')[0] not in allowed_roots: continue
                 content = origin.extractfile(member)
                 member.name = f'leakguard-source-{label}/' + name
                 dest.addfile(member, content)
                 source_members.append(name)
         receipt['source_archive_policy'] = {'tracked_files_only': True, 'allowed_roots': sorted(allowed_roots),
-                                            'excluded_prefixes': list(excluded), 'members': source_members}
+                                            'excluded_prefixes': list(excluded), 'excluded_files': sorted(excluded_files), 'members': source_members}
         receipt['artifacts'].append({'filename':source_archive.name,'sha256':sha(source_archive),'kind':'tracked-source'})
         for target in dict.fromkeys(a.target):
             stage=temp/target;stage.mkdir(); wh=stage/'wheelhouse';wh.mkdir()

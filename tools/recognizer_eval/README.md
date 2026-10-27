@@ -147,3 +147,8 @@ with nearby terms, misleading numeric context, and field terms more than 96
 characters away. It is not folded into JOSE structure performance. Numeric
 identity-shaped negatives can still alert and this must remain visible in its
 own slice.
+
+Historical run reports/indexes `REPORT.md` and `HOLDOUT_ARTIFACTS.json` remain in
+reviewed Git history and private evidence; they are omitted from the CLI release
+source archive. This harness source is retained for review and new development
+qualification; it does not make historical holdouts newly unseen.
