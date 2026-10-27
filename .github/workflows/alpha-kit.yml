@@ -16,6 +16,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11'
@@ -44,6 +46,14 @@ jobs:
           python alpha-kit/kit.py verify --env "$RUNNER_TEMP/alpha-runtime"
           python alpha-kit/kit.py smoke --env "$RUNNER_TEMP/alpha-runtime"
           python alpha-kit/kit.py smoke --env "$RUNNER_TEMP/alpha-runtime"
+      - name: Exercise prior alpha upgrade and rollback on native platform
+        shell: bash
+        run: >-
+          python -I tools/qualify_alpha_upgrade.py
+          --repository "$GITHUB_WORKSPACE"
+          --kit "$RUNNER_TEMP/alpha-kit"
+          --kit-archive "$RUNNER_TEMP"/alpha-dist/leakguard-cli-*.zip
+          --output-dir "$RUNNER_TEMP/alpha-upgrade"
       - name: Retain exact target deployment artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
