@@ -17,8 +17,10 @@ rule, line, and bounded analysis offsets into the original input, not values.
 Keys are ASCII case-insensitive with `_`, `-`, and `.` removed; matching is for
 the complete key. A quoted scalar is literal, including a quoted `$NAME`;
 unquoted environment references and pure placeholder forms are excluded. Empty
-values and unquoted null/boolean atoms are excluded. Inputs and resources are
-bounded; exceeding bounds fails the operation instead of silently reporting a
+values and unquoted null/boolean atoms are excluded. The lexer handles flat
+field syntax rather than interpreting prose: an unmatched quote or apostrophe
+earlier on a line can suppress a later assignment on that line. Inputs and
+resources are bounded; exceeding bounds fails the operation instead of silently reporting a
 clean result. See the implementation and coverage document for exact syntax,
 limits, controls, and the supported profile wiring. The [alias resource
 inventory and provenance](src/credential_detector/resources/README.md) lists
