@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 
@@ -178,7 +179,7 @@ def main():
         base_path = lane / 'base-profile.json'
         base_path.write_text(json.dumps(base))
         path = lane / 'profile.json'
-        composer = Path(sys.executable).with_name('leakguard-recognizer-profile' + ('.exe' if os.name == 'nt' else ''))
+        composer = Path(sysconfig.get_path('scripts')) / ('leakguard-recognizer-profile' + ('.exe' if os.name == 'nt' else ''))
         _run([composer, '--profile', profile, '--base-config', base_path, '--output', path],
              cwd=owned, env=env, private_values=private_values)
         config = json.loads(path.read_text())
