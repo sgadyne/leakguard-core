@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--gitleaks', required=True, type=Path)
     parser.add_argument('--sealed-fixture', required=True, type=Path)
     parser.add_argument('--sealed-sha256', required=True)
+    parser.add_argument('--fixture-kind', choices=('sealed', 'development'), default='sealed')
     parser.add_argument('--output-dir', required=True, type=Path)
     parser.add_argument('--wheel', action='append', default=[], type=Path)
     args = parser.parse_args()
@@ -80,11 +81,12 @@ def main():
         require(all(not p.is_relative_to(source) and p.is_relative_to(Path(sys.prefix).resolve()) for p in origins.values()), 'installed-origin')
         receipt['installed_origins'] = {name: str(path) for name, path in origins.items()}
         receipt['gitleaks_sha256'] = sha(args.gitleaks)
-        receipt['sealed_fixture_sha256'] = args.sealed_sha256
+        receipt['fixture_kind'] = args.fixture_kind
+        receipt['fixture_sha256'] = args.sealed_sha256
 
         from leakguard_core import ScanConfig, ScanLimits, parse_report
         from leakguard_core.recognizer_profiles import compose, JOSE_ENTITIES, JOSE_FACTORY
-        base = {'gitleaks_executable': str(args.gitleaks.resolve()), 'worker_policy': 'strict',
+        base = {'gitleaks_executable': str(args.gitleaks.resolve()), 'worker_policy': 'supervised-alpha' if sys.platform == 'darwin' else 'strict',
                 'worker_memory_bytes': 1024 * 1024 * 1024, 'scan_workers': 1}
         config = compose('credentials', base)
         config_path = owned / 'profile.json'
@@ -113,7 +115,7 @@ def main():
             e = dict(env, CREDENTIAL_ACCEPTANCE_FIXTURE=str(fixture))
             run([sys.executable, '-I', test_path], extra_env=e)
         gate('development-taxonomy', lambda: taxonomy(source / 'tests/credentials_acceptance/development.json'))
-        gate('sealed-taxonomy', lambda: taxonomy(args.sealed_fixture))
+        gate(args.fixture_kind + '-taxonomy', lambda: taxonomy(args.sealed_fixture))
 
         marker = 'lg-synthetic-acceptance-M7q6v9R4'
         private.append(marker)
@@ -203,20 +205,18 @@ def main():
             service = engine.ScanService(values, state_dir=owned / 'audit-state')
             try:
                 limits = models.ScanLimits(60, 1, worker_memory_bytes=1024*1024*1024)
+                policy = models.ScanPolicy.inventory()
+                identity1 = service.work_identity(policy=policy, limits=limits)
+                identity2 = service.work_identity(policy=policy, limits=limits)
+                require(identity1 != identity2, 'unknown-state-identity-stable')
                 first = service.audit('acceptance', limits=limits, use_cache=True)
                 second = service.audit('acceptance', limits=limits, use_cache=True)
-                # A blocked continuation is a valid fail-closed result. If a slice
-                # starts, another slice must not complete by trusting old work.
-                require(not first.coverage.required_complete and not second.coverage.required_complete,
-                        'unknown-state-continuation-completed')
-                if first.results and second.results:
-                    require(first.results[0].source.path == second.results[0].source.path,
-                            'unknown-state-continuation-advanced')
-                if not first.results and not second.results:
-                    issues = [issue.code.value for report in (first, second) for issue in report.issues if issue.required]
-                    require('work-identity-unavailable' in issues, 'continuation-no-witness')
-                require(not any(r.outcome.value == 'reused' for report in (first, second) for r in report.results),
-                        'unknown-state-continuation-reused')
+                require(not first.coverage.required_complete and not second.coverage.required_complete, 'unknown-state-continuation-completed')
+                require(len(first.results) == 1 and len(second.results) == 1, 'continuation-no-executed-slice')
+                require(first.results[0].source.path == second.results[0].source.path, 'unknown-state-continuation-advanced')
+                require(all(r.outcome.value == 'scanned' for report in (first, second) for r in report.results), 'unknown-state-continuation-reused')
+                complete = service.audit('acceptance', limits=models.ScanLimits(60, 10, worker_memory_bytes=1024*1024*1024), use_cache=True)
+                require(complete.coverage.required_complete and len(complete.results) == 2, 'unknown-state-single-slice-incomplete')
             finally:
                 service.close()
         gate('installed-unknown-state-continuation-disabled', continuation)
@@ -241,14 +241,16 @@ def main():
                 require(any(f.rule.startswith('credential-') and f.severity.value == 'block' for f in reports[-1].results[0].findings), 'private-alias-missing')
                 require(marker2 not in reports[-1].to_json(), 'private-report-value-leak')
                 (source / 'b.txt').write_text('clean synthetic\n')
+                identity1 = service.work_identity(policy=models.ScanPolicy.inventory(), limits=limits)
+                identity2 = service.work_identity(policy=models.ScanPolicy.inventory(), limits=limits)
+                require(identity1 != identity2, 'private-state-identity-stable')
                 first = service.audit('private', limits=limits, use_cache=True)
                 second = service.audit('private', limits=limits, use_cache=True)
                 require(not first.coverage.required_complete and not second.coverage.required_complete, 'private-continuation-completed')
-                if first.results and second.results:
-                    require(first.results[0].source.path == second.results[0].source.path, 'private-continuation-advanced')
-                else:
-                    issues = [i.code.value for report in (first, second) for i in report.issues if i.required]
-                    require('work-identity-unavailable' in issues, 'private-continuation-no-witness')
+                require(len(first.results) == 1 and len(second.results) == 1, 'private-continuation-no-executed-slice')
+                require(first.results[0].source.path == second.results[0].source.path, 'private-continuation-advanced')
+                complete = service.audit('private', limits=models.ScanLimits(60, 10, worker_memory_bytes=1024*1024*1024), use_cache=True)
+                require(complete.coverage.required_complete and len(complete.results) == 2, 'private-single-slice-incomplete')
             finally:
                 service.close()
             require(file.read_text() == key + ' = "' + marker2 + '"\n', 'private-input-changed')
