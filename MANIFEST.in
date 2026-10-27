@@ -13,3 +13,5 @@ recursive-include native/scan_walk *.rs *.md Cargo.toml Cargo.lock
 prune native/scan_walk/target
 recursive-include .github *.yml
 global-exclude __pycache__ *.py[cod]
+
+recursive-include deploy/cli *.py *.json *.md

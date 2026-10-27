@@ -32,7 +32,7 @@ activate a service or modify Keychain. This recipe uses only synthetic data.
    python3.11 -m venv "$LG_PRIVATE/core-only"
    LG_CORE_VENV="$LG_PRIVATE/core-only"
    "$LG_CORE_VENV/bin/python" -m pip install --no-index --find-links "$LG_WHEELHOUSE" \
-     "$LG_WHEELHOUSE/leakguard_core-0.2.1a2-py3-none-any.whl"
+     "$LG_WHEELHOUSE/leakguard_core-0.2.1a3-py3-none-any.whl"
    "$LG_CORE_VENV/bin/python" -m pip check
    ```
 

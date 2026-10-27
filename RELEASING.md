@@ -2,26 +2,13 @@
 
 ## Integrated CLI-first alpha
 
-Build from the reviewed integrated commit into fresh target-specific
-wheelhouses and verify the receipt and hashes. Use the [CLI install and
-rollback guide](docs/CLI-INSTALL.md) for the Python 3.11 Presidio/JOSE and firm
-wheel path. Run the combined installed Linux gate from the clean integrated
-checkout with an unused private artifact directory outside it, an approved
-Gitleaks 8.30.1 executable and an available `uv` binary:
-
-```sh
-python3.11 tools/qualify_combined_installed.py \
-  --artifacts /private/new-combined-gate --gitleaks /approved/bin/gitleaks \
-  --uv /approved/bin/uv
-```
-
-The gate records the commit, wheel hashes, source/wheel/installed identity and
-synthetic installed receipts. Check its exit status and receipt, plus the
-independent security review and cross-platform CI. The [Mac CLI qualification
-recipe](docs/MAC-CLI-QUALIFICATION.md) is a separate local gate, including the
-synthetic vault and Mac client to Linux broker; report completed and deferred
-checks. Native Windows core/plugin CI does not qualify a Windows broker. Never
-publish private receipts or real state.
+Use the [CLI kit staging and install guide](docs/CLI-INSTALL.md). Build from a
+clean tracked task commit into a new output directory with `deploy/cli/build.py`.
+The independent target kit CI and native Mac checks must install the actual
+archive offline outside source and repeat its smoke. Retain SHA-256/source/tree
+identity and independent review receipts separately from the user kit. Verify
+profile activation, fail-closed corruption controls and upgrade/rollback. Do not
+publish packages/tags or merge main during internal alpha packaging.
 
 ## Core release checks
 

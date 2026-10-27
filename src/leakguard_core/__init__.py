@@ -19,7 +19,7 @@ from .models import (
     SourceRef,
 )
 
-__version__ = "0.2.1a2"
+__version__ = "0.2.1a3"
 
 __all__ = [
     "AnalysisMetadata",
