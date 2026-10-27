@@ -5,10 +5,6 @@ import types
 from unittest.mock import patch
 import sys
 import unittest
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/credential_detector/src'))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from credential_detector.aliases import AliasPackError, load_pack, merge_packs, parse_pack
 from credential_detector.engine import MAX_TEXT, MAX_VALUE, scan_fields
