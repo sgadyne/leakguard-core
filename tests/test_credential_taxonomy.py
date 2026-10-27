@@ -1,10 +1,12 @@
 """Synthetic regression cases for the default, offline credential detector."""
+import base64
 import os
 import json
 import shutil
 import sys
 import tempfile
 import unittest
+from urllib.parse import quote
 
 from leakguard_core import backends, engine, models
 
@@ -98,6 +100,8 @@ class CredentialTaxonomyTests(unittest.TestCase):
             'bracket-ipv6': 'postgres://u:p@[::1]:65535/db',
             'port-zero': 'redis://u:p@host:0#part',
             'quoted': '["postgres://u:p@host"]',
+            'square-bracket': '[mysql://u:p@host/db]',
+            'semicolon': ';mysql://u:p@host/db',
             'assignment': 'url=postgres://u:p@host;',
         }
         negatives = {
@@ -176,11 +180,47 @@ class CredentialTaxonomyTests(unittest.TestCase):
         findings = self.detect('\n'.join(cases))
         self.assertNotIn('credential-connection-url', {f.rule for f in findings})
 
+    def test_percent_encoded_utf8_c1_controls_are_rejected(self):
+        cases = []
+        for byte in range(0x80, 0xa0):
+            encoded = f'%c2%{byte:02x}'
+            cases.extend(('mysql://u' + encoded + ':p@host',
+                          'mysql://u:p' + encoded + '@host'))
+        findings = self.detect('\n'.join(cases))
+        self.assertNotIn('credential-connection-url', {f.rule for f in findings})
+
+    def test_gitleaks_decoded_input_is_subject_to_same_rule_controls(self):
+        # Gitleaks 8.30.1 decodes whole input independently of this regex.
+        def encode(value):
+            return base64.b64encode(value.encode()).decode()
+        literal = 'mysql://u:Literal42@host'
+        placeholder = 'mysql://u:%7b%7bPASSWORD%7d%7d@host'
+        reference = 'mysql://u:%24FOO@host'
+        control = 'mysql://u:p%09word@host'
+        cases = {
+            'base64-literal': (encode(literal), True),
+            'nested-base64-literal': (encode(encode(literal)), True),
+            'percent-literal': (quote(literal, safe=''), True),
+            'base64-placeholder': (encode(placeholder), False),
+            'nested-base64-placeholder': (encode(encode(placeholder)), False),
+            'percent-placeholder': (quote(placeholder, safe=''), False),
+            'base64-reference': (encode(reference), False),
+            'percent-reference': (quote(reference, safe=''), False),
+            'base64-control': (encode(control), False),
+            'nested-base64-control': (encode(encode(control)), False),
+            'percent-control': (quote(control, safe=''), False),
+        }
+        for label, (text, expected) in cases.items():
+            with self.subTest(case=label):
+                found = any(f.rule == 'credential-connection-url' for f in self.detect(text))
+                self.assertEqual(found, expected)
+
     def test_connection_url_produces_redacted_blocking_scan_result(self):
         urls = [scheme + '://alice:K7fx9yQP2mR8@db.internal/app'
                 for scheme in SCHEMES]
         content = 'first line\n' + ''.join('connection = "' + url + '"\n' for url in urls)
         content += 'mysql://u:%24FOO@host mysql://v:Adjacent42@host\n'
+        encoded = base64.b64encode(b'mysql://u:Encoded42@host').decode()
         with tempfile.TemporaryDirectory(prefix='leakguard-credential-test-') as state:
             service = engine.ScanService({
                 'gitleaks_executable': self.binary,
@@ -189,6 +229,11 @@ class CredentialTaxonomyTests(unittest.TestCase):
             try:
                 report = service.scan(
                     [models.BytesInput(content.encode(), 'config.txt')],
+                    policy=models.ScanPolicy.inventory(),
+                    limits=models.ScanLimits(30, 1), use_cache=False,
+                )
+                wrapped_report = service.scan(
+                    [models.BytesInput(encoded.encode(), 'encoded.txt')],
                     policy=models.ScanPolicy.inventory(),
                     limits=models.ScanLimits(30, 1), use_cache=False,
                 )
@@ -202,9 +247,18 @@ class CredentialTaxonomyTests(unittest.TestCase):
         self.assertEqual({(f.start_line, f.end_line) for f in own},
                          {(line, line) for line in range(2, 13)})
         serialized = json.dumps(report.to_dict())
-        for value in (*urls, 'K7fx9yQP2mR8', 'Adjacent42', content):
+        for value in (*urls, 'K7fx9yQP2mR8', 'Adjacent42', 'Encoded42', encoded, content):
             self.assertNotIn(value, serialized)
             self.assertNotIn(value, repr(report))
+        self.assertEqual(wrapped_report.decision.verdict, models.DecisionVerdict.BLOCK)
+        wrapped = [finding for result in wrapped_report.results for finding in result.findings
+                   if finding.rule == 'credential-connection-url']
+        self.assertEqual(len(wrapped), 1)
+        self.assertEqual(wrapped[0].severity, models.FindingSeverity.BLOCK)
+        self.assertEqual((wrapped[0].start_line, wrapped[0].end_line), (1, 1))
+        self.assertNotIn(encoded, json.dumps(wrapped_report.to_dict()))
+        self.assertNotIn('Encoded42', json.dumps(wrapped_report.to_dict()))
+        self.assertNotIn(encoded, repr(wrapped_report))
 
 
 if __name__ == '__main__':
