@@ -181,6 +181,14 @@ class CredentialTaxonomyTests(unittest.TestCase):
         findings = self.detect('\n'.join(cases))
         self.assertNotIn('credential-connection-url', {f.rule for f in findings})
 
+    def test_bare_authority_finding_stays_on_its_source_line(self):
+        for name, separator in (('lf', '\n'), ('crlf', '\r\n')):
+            with self.subTest(separator=name):
+                text = separator.join(('before', 'mysql://u:p@host', 'after'))
+                own = [f for f in self.detect(text) if f.rule == 'credential-connection-url']
+                self.assertEqual(len(own), 1)
+                self.assertEqual((own[0].start_line, own[0].end_line), (2, 2))
+
     def test_percent_encoded_utf8_c1_controls_are_rejected(self):
         cases = []
         for byte in range(0x80, 0xa0):
