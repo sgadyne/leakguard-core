@@ -154,7 +154,7 @@ def main():
 
         def jose_review():
             def b64(data): return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
-            token = '.'.join((b64(b'{"alg":"HS256"}'), b64(b'{"sub":"synthetic"}'), b64(b'j' * 32)))
+            token = '.'.join((b64(b' {"alg":"HS256"}'), b64(b'{"sub":"synthetic"}'), b64(b'j' * 32)))
             private.append(token)
             path = owned / 'jose.txt'; path.write_text(token + '\n')
             command = [sys.executable, '-I', '-m', 'leakguard_core', 'scan', path, '--config', config_path,
