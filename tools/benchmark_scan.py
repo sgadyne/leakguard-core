@@ -485,6 +485,14 @@ def _aggregate_checks(benchmarks: list[dict], part_curve: list[dict],
             not all(item["equivalence"].values()) for item in benchmarks
         ),
         "cache_reuse_failures": cache_reuse_failures,
+        "mutation_failures": sum(
+            not mutation["matches_uncached"]
+            or mutation["reused_unchanged_results"] != item["files"] - 1
+            or not mutation["cached"]["coverage_complete"]
+            or not mutation["uncached"]["coverage_complete"]
+            for item in benchmarks
+            for mutation in (item["mutation"], item["reference_mutation"])
+        ),
         "coverage_failures": coverage_failures
         + sum(not item["covered_text_surfaces_complete"] for item in part_curve),
         "source_hook_failures": sum(
@@ -562,6 +570,7 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
             measurements_by_workers = {}
             normalized_by_workers = {}
             warm_reused_by_workers = {}
+            mutated_by_workers = {}
             for workers in WORKER_COUNTS:
                 measurements = {}
                 normalized = {}
@@ -574,6 +583,22 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                     if mode == "warm":
                         warm_reused = sum(result.outcome is models.ScanOutcome.REUSED
                                           for result in report.results)
+                # Change exactly one synthetic file after the warm sample. Compare
+                # cached mutation against a fresh uncached scan of the same bytes.
+                changed = case_root / "fixture-000.txt"
+                original = changed.read_text(encoding="utf-8")
+                changed.write_text(original + "synthetic mutation\n", encoding="utf-8")
+                try:
+                    mutated, mutated_findings, mutated_report = _measure(service, paths, use_cache=True)
+                    fresh, fresh_findings, _ = _measure(service, paths, use_cache=False)
+                    mutated_by_workers[workers] = {
+                        "cached": mutated, "uncached": fresh,
+                        "matches_uncached": mutated_findings == fresh_findings,
+                        "reused_unchanged_results": sum(
+                            result.outcome is models.ScanOutcome.REUSED for result in mutated_report.results),
+                    }
+                finally:
+                    changed.write_text(original, encoding="utf-8")
                 measurements_by_workers[workers] = measurements
                 normalized_by_workers[workers] = normalized
                 warm_reused_by_workers[workers] = warm_reused
@@ -596,6 +621,8 @@ def run_benchmark(*, config: Path, state: Path, gitleaks: Path,
                 "reference_measurements": measurements_by_workers[1],
                 "warm_reused_results": warm_reused_by_workers[2],
                 "reference_warm_reused_results": warm_reused_by_workers[1],
+                "mutation": mutated_by_workers[2],
+                "reference_mutation": mutated_by_workers[1],
                 "equivalence": equivalence,
             })
 

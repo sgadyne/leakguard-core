@@ -1,0 +1,14 @@
+{
+  "name": "jose-no-context",
+  "factory": "presidio_detector.plugin:PresidioDetector",
+  "review_score_threshold": 0.35,
+  "block_score_threshold": 1.0,
+  "options": {
+    "entities": ["EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "US_SSN", "IBAN_CODE", "IP_ADDRESS", "JOSE_COMPACT_JWE", "JOSE_COMPACT_JWS_CANDIDATE", "JOSE_COMPACT_UNVERIFIED"],
+    "score-threshold": "0",
+    "context-mode": "none",
+    "ner-mode": "pattern-only",
+    "recognizer-modules": ["jose_recognizers.plugin:build_recognizers"],
+    "recognizer-options": "{\"jose_recognizers.plugin:build_recognizers\":{}}"
+  }
+}

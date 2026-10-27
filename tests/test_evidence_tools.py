@@ -383,7 +383,7 @@ class ProductJourneyArtifactTests(unittest.TestCase):
             self.assertEqual(set(runtime_info["versions"]), set(check_product_journey._PACKAGES))
             self.assertEqual(set(runtime_info["versions"].values()), {"0.2.0"})
             self.assertEqual(runtime_info["python_executable"], str(python.absolute()))
-            self.assertEqual(runtime_info["runtime_prefix"], str(runtime.absolute()))
+            self.assertEqual(Path(runtime_info["runtime_prefix"]).resolve(), runtime.resolve())
 
 
 class SafeInputTests(unittest.TestCase):
@@ -439,7 +439,7 @@ class SafeInputTests(unittest.TestCase):
             with patch.object(safe_inputs.os, "open", side_effect=AssertionError("must not follow symlink")):
                 safe_inputs._update_file_digest(digest, link, root.resolve())
             expected = hashlib.sha256(
-                b"symlink\0" + os.fsencode(str(outside)) + b"\0"
+                b"symlink\0" + os.fsencode(os.readlink(link)) + b"\0"
             ).digest()
             self.assertEqual(digest.digest(), expected)
 
@@ -503,6 +503,7 @@ class BenchmarkAggregationTests(unittest.TestCase):
             self.assertEqual(benchmark_scan._installed_dependencies(), {
                 "packaging": "unavailable", "pypdf": "unavailable",
                 "olefile": "unavailable", "psutil": "7.2.2",
+                "cachetools": "unavailable",
             })
 
     def test_benchmark_module_uses_its_copied_tool_root(self):
@@ -550,6 +551,10 @@ class BenchmarkAggregationTests(unittest.TestCase):
             return {
                 "files": files, "content": "clean", "repetition": 0,
                 "measurements": rows, "warm_reused_results": files,
+                "mutation": {"matches_uncached": True, "reused_unchanged_results": files - 1,
+                             "cached": {"coverage_complete": True}, "uncached": {"coverage_complete": True}},
+                "reference_mutation": {"matches_uncached": True, "reused_unchanged_results": files - 1,
+                                       "cached": {"coverage_complete": True}, "uncached": {"coverage_complete": True}},
                 "equivalence": {"warm_matches_cold": True,
                                 "uncached_matches_cold": True},
             }
@@ -561,13 +566,16 @@ class BenchmarkAggregationTests(unittest.TestCase):
         checks, identities = benchmark_scan._aggregate_checks(benchmarks, part_curve, hooks)
 
         self.assertEqual(checks, {
-            "equivalence_failures": 0, "cache_reuse_failures": 0,
+            "equivalence_failures": 0, "cache_reuse_failures": 0, "mutation_failures": 0,
             "coverage_failures": 0, "source_hook_failures": 0,
             "scan_identity_failures": 0,
         })
         self.assertTrue(all(row["consistent_within_case"] for row in identities))
         self.assertEqual(identities[0]["policy_ids"]["cold"], "policy-small-limit")
         self.assertEqual(identities[1]["policy_ids"]["cold"], "policy-large-limit")
+        benchmarks[0]["mutation"]["matches_uncached"] = False
+        bad_checks, _ = benchmark_scan._aggregate_checks(benchmarks, part_curve, hooks)
+        self.assertEqual(bad_checks["mutation_failures"], 1)
 
     def test_report_aggregation_keeps_serial_and_parallel_identities_separate(self):
         def measurements(policy_id, runtime_id):
@@ -583,6 +591,10 @@ class BenchmarkAggregationTests(unittest.TestCase):
             "measurements": measurements("policy-workers-2", "runtime-workers-2"),
             "reference_measurements": measurements("policy-workers-1", "runtime-workers-1"),
             "warm_reused_results": 50, "reference_warm_reused_results": 50,
+            "mutation": {"matches_uncached": True, "reused_unchanged_results": 49,
+                         "cached": {"coverage_complete": True}, "uncached": {"coverage_complete": True}},
+            "reference_mutation": {"matches_uncached": True, "reused_unchanged_results": 49,
+                                   "cached": {"coverage_complete": True}, "uncached": {"coverage_complete": True}},
             "equivalence": {
                 "warm_matches_cold": True, "uncached_matches_cold": True,
                 "reference_warm_matches_cold": True,
@@ -639,6 +651,10 @@ class BenchmarkAggregationTests(unittest.TestCase):
         checks, identities = benchmark_scan._aggregate_checks([{
             "files": 10, "content": "clean", "repetition": 0,
             "measurements": measurements, "warm_reused_results": 10,
+            "mutation": {"matches_uncached": True, "reused_unchanged_results": 9,
+                         "cached": {"coverage_complete": True}, "uncached": {"coverage_complete": True}},
+            "reference_mutation": {"matches_uncached": True, "reused_unchanged_results": 9,
+                                   "cached": {"coverage_complete": True}, "uncached": {"coverage_complete": True}},
             "equivalence": {"warm_matches_cold": True,
                             "uncached_matches_cold": True},
         }], [{"covered_text_surfaces_complete": True}], [{

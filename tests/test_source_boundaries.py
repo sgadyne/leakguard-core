@@ -2,12 +2,89 @@
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from leakguard_core import backends, engine, models as m
+from leakguard_core import backends, engine, models as m, sources
 from leakguard_core.scan_store import MemoryScanStore
 from leakguard_core.sources import AcquisitionError, FilesystemBoundary, acquire_file, capture_anchor, confirm_absence, scoped_scandir, _bounded_file
+
+
+class RegularAcquisitionTests(unittest.TestCase):
+    def test_executable_suffix_has_a_verifiable_content_identity(self):
+        import hashlib
+        from leakguard_core import scan_policy
+        with tempfile.TemporaryDirectory(prefix='leakguard-executable-metadata-') as temporary:
+            path = Path(temporary) / 'synthetic.exe'
+            path.write_bytes(b'synthetic executable bytes')
+            self.assertEqual(scan_policy._file_identity(path), hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_windows_path_birthtime_and_descriptor_changetime_are_not_confused(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-stat-domain-') as temporary:
+            path = Path(temporary) / 'synthetic.txt'
+            path.write_bytes(b'synthetic content')
+            real_stat = os.stat
+            def birthtime_stat(*args, **kwargs):
+                value = real_stat(*args, **kwargs)
+                fields = {key: getattr(value, key) for key in dir(value) if key.startswith('st_')}
+                fields['st_ctime_ns'] -= 1_000_000
+                return SimpleNamespace(**fields)
+            with patch.object(sources.os, 'name', 'nt'), patch.object(sources.os, 'stat', side_effect=birthtime_stat):
+                self.assertEqual(_bounded_file(path, 1024), b'synthetic content')
+
+    def test_descriptor_change_time_still_rejects_mutation_during_read(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-stat-change-') as temporary:
+            path = Path(temporary) / 'synthetic.txt'
+            path.write_bytes(b'synthetic content')
+            real_fstat = os.fstat
+            calls = []
+            def changed_fstat(descriptor):
+                value = real_fstat(descriptor)
+                fields = {key: getattr(value, key) for key in dir(value) if key.startswith('st_')}
+                calls.append(1)
+                if len(calls) == 2:
+                    fields['st_ctime_ns'] += 1
+                return SimpleNamespace(**fields)
+            with patch.object(sources.os, 'fstat', side_effect=changed_fstat):
+                with self.assertRaises(AcquisitionError) as failure:
+                    _bounded_file(path, 1024)
+            self.assertEqual(failure.exception.code, 'input-changed')
+
+    def test_windows_metadata_reopen_rejects_a_replaced_path(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-stat-replacement-') as temporary:
+            path = Path(temporary) / 'synthetic.txt'
+            path.write_bytes(b'synthetic content')
+            real_stat = os.stat
+            calls = []
+            def replaced_stat(*args, **kwargs):
+                value = real_stat(*args, **kwargs)
+                fields = {key: getattr(value, key) for key in dir(value) if key.startswith('st_')}
+                calls.append(1)
+                if len(calls) == 2:
+                    fields['st_ino'] += 1
+                return SimpleNamespace(**fields)
+            with patch.object(sources.os, 'name', 'nt'), patch.object(sources.os, 'stat', side_effect=replaced_stat):
+                with self.assertRaises(AcquisitionError) as failure:
+                    sources._path_stat(path)
+            self.assertEqual(failure.exception.code, 'input-changed')
+
+    def test_regular_file_acquisition_preserves_native_metadata_checks(self):
+        with tempfile.TemporaryDirectory(prefix='leakguard-regular-acquisition-') as temporary:
+            path = Path(temporary) / 'synthetic.txt'
+            path.write_bytes(b'synthetic content')
+            try:
+                acquired = _bounded_file(path, 1024)
+            except AcquisitionError as error:
+                # Synthetic metadata makes native stat/fstat differences
+                # diagnosable without exposing file contents or source paths.
+                named = path.stat()
+                with path.open('rb') as stream:
+                    opened = os.fstat(stream.fileno())
+                fields = ('st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+                self.fail(f'{error.code}: path={tuple(getattr(named, key) for key in fields)}, '
+                          f'fd={tuple(getattr(opened, key) for key in fields)}')
+            self.assertEqual(acquired, b'synthetic content')
 
 
 @unittest.skipIf(os.name == 'nt', 'native Windows reparse validation requires its runner')

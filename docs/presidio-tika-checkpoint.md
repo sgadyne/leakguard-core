@@ -1,8 +1,8 @@
 # Presidio and Tika developer checkpoint
 
-Core `0.2.1a1` retains Gitleaks, Git guards, legacy v2/script extensions,
+Core `0.2.1a2` retains Gitleaks, Git guards, legacy v2/script extensions,
 navigation, source validation and coverage accounting. New sensitive-data
-profiles use `leakguard-presidio-detector==0.1.0a1`, backed by
+profiles use `leakguard-presidio-detector==0.1.0a2`, backed by
 `presidio-analyzer==2.2.365`, with native Presidio custom recognizer packages.
 Do not also enable the overlapping Sensitive Basics compatibility detector.
 Tika is an explicit extractor override, not a silent parser replacement.
@@ -25,15 +25,17 @@ Legacy positioned parsers remain available without an explicit override.
 
 ## Isolated Windows setup
 
-Native Windows execution remains unverified. Use a new workspace/runtime and
+Use the [current integrated CLI install guide](CLI-INSTALL.md) and its release
+receipt to select the revision and wheel set. Historical recognizer results do
+not by themselves qualify this integrated revision on Windows. Use a new workspace/runtime and
 synthetic inputs before firm data. Preserve your existing profiles and credentials.
 The source/bundle is not a complete Windows interpreter, Java or backend package.
 Use an approved Python 3.11, Java 17+ and Gitleaks 8.30.1 distribution. Python
 navigation remains the default; the optional Rust FD bridge is POSIX-only.
 
 ```powershell
-git fetch origin feature/presidio-tika-checkpoint-20261026
-git switch -c review/presidio-tika FETCH_HEAD
+# Start in the reviewed integrated checkout identified by the release receipt.
+# Confirm git rev-parse HEAD matches that receipt before building any wheels.
 py -3.11 -m venv C:\Work\LeakGuardFrameworkTest\runtime
 $PY = 'C:\Work\LeakGuardFrameworkTest\runtime\Scripts\python.exe'
 ```
@@ -48,8 +50,8 @@ excluded. Then install into the new runtime using the staged wheelhouse:
 & $PY -m pip install --no-index --find-links $WH --require-hashes `
   -r plugins\presidio_detector\requirements-py311.lock
 & $PY -m pip install --no-index --find-links $WH `
-  (Join-Path $WH 'leakguard_core-0.2.1a1-py3-none-any.whl') `
-  (Join-Path $WH 'leakguard_presidio_detector-0.1.0a1-py3-none-any.whl') `
+  (Join-Path $WH 'leakguard_core-0.2.1a2-py3-none-any.whl') `
+  (Join-Path $WH 'leakguard_presidio_detector-0.1.0a2-py3-none-any.whl') `
   (Join-Path $WH 'leakguard_tika_extractor-0.1.0a1-py3-none-any.whl') `
   (Join-Path $WH 'example_firm_presidio_recognizer-0.1.0-py3-none-any.whl')
 & $PY -m pip check

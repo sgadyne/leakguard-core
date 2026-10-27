@@ -35,8 +35,19 @@ def document(secret):
 
 class IntegrationTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='leakguard-test-', dir=pathlib.Path(tempfile.gettempdir()))
+        # Git remote/clone fixtures live beside the repository. Keep that parent
+        # private to this test so repeated runs cannot reuse a previous remote.
+        self.workspace = tempfile.TemporaryDirectory(prefix='leakguard-git-workspace-')
+        self.addCleanup(self.workspace.cleanup)
+        self.temp = tempfile.TemporaryDirectory(prefix='leakguard-test-', dir=self.workspace.name)
         self.repo = pathlib.Path(self.temp.name)
+        if sys.platform == 'darwin':
+            config = self.repo.parent / (self.repo.name + '-config.json')
+            config.write_text(json.dumps({'worker_policy': 'supervised-alpha'}))
+            self.addCleanup(config.unlink)
+            environment = patch.dict(os.environ, {'LEAKGUARD_CONFIG': str(config)})
+            environment.start()
+            self.addCleanup(environment.stop)
         self.assertTrue(self.repo.resolve().is_relative_to(pathlib.Path(tempfile.gettempdir()).resolve()))
         command(self.repo, '-c', 'init.templateDir=', 'init', '-q').check_returncode()
         command(self.repo, 'config', 'user.name', 'LeakGuard fixture').check_returncode()

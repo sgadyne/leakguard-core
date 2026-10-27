@@ -15,6 +15,7 @@ import tempfile
 import time
 
 from ._supervision import WorkerError, run_worker, worker_environment
+from .sources import AcquisitionError, _path_stat
 
 
 class BackendError(RuntimeError):
@@ -49,7 +50,7 @@ def _pin_executable(executable, scratch, check):
     try:
         if not os.access(selected, os.X_OK):
             return executable, None
-        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
         with os.fdopen(os.open(selected, flags), 'rb') as source:
             before = os.fstat(source.fileno())
             if not stat.S_ISREG(before.st_mode) or before.st_size > 512 * 1024 * 1024:
@@ -70,11 +71,11 @@ def _pin_executable(executable, scratch, check):
                 return (value.st_dev, value.st_ino, value.st_mode, value.st_size,
                         value.st_mtime_ns, value.st_ctime_ns)
             if (consumed != before.st_size or any(signature(value) != signature(before)
-                    for value in (os.fstat(source.fileno()), selected.stat(), Path(executable).stat()))):
+                    for value in (os.fstat(source.fileno()), _path_stat(selected), _path_stat(Path(executable), follow_symlinks=True)))):
                 raise BackendError('source-unavailable')
         destination.chmod(0o500)
         return str(destination), digest.hexdigest()
-    except (OSError, ValueError):
+    except (OSError, ValueError, AcquisitionError):
         # Keep normal unavailable-backend behavior; no observations may be reused.
         return executable, None
 

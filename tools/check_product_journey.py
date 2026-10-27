@@ -245,10 +245,14 @@ print(json.dumps({'prefix': sys.prefix, 'executable': sys.executable,
     # A venv's Python executable is commonly a symlink to its base interpreter;
     # the interpreter's sys.prefix and installed console entry points bind the
     # private runtime, while resolving sys.executable may legitimately escape.
-    prefix = Path(os.path.abspath(data.get("prefix", "")))
-    executable = Path(os.path.abspath(data.get("executable", "")))
+    prefix = Path(os.path.abspath(data.get("prefix", ""))).resolve()
+    # Resolve directory aliases without following a venv's interpreter symlink.
+    def parent_resolved(path):
+        path = Path(os.path.abspath(path))
+        return path.parent.resolve() / path.name
+    executable = parent_resolved(data.get("executable", ""))
     try:
-        if not executable.is_relative_to(prefix) or not python.absolute().is_relative_to(prefix) or not buddy.absolute().is_relative_to(prefix):
+        if not executable.is_relative_to(prefix) or not parent_resolved(python).is_relative_to(prefix) or not parent_resolved(buddy).is_relative_to(prefix):
             raise JourneyFailure("runtime-not-private")
     except (OSError, RuntimeError, ValueError):
         raise JourneyFailure("runtime-not-private") from None
@@ -259,7 +263,7 @@ print(json.dumps({'prefix': sys.prefix, 'executable': sys.executable,
         raise JourneyFailure("installed-runtime-probe-failed")
     return {"python": Path(data["executable"]).name,
             "python_executable": str(python.absolute()),
-            "runtime_prefix": str(prefix),
+            "runtime_prefix": str(Path(os.path.abspath(data["prefix"]))),
             "python_version": data["python_version"],
             "versions": {name: versions[name] for name in _PACKAGES}}
 

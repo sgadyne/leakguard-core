@@ -1,0 +1,2 @@
+-r requirements-py311.in
+pytest>=8,<10

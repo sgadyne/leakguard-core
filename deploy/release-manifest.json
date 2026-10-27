@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "release_version": "0.2.0-alpha.1",
+  "release_version": "0.2.0-alpha.2",
   "python_requires": ">=3.11",
   "wheelhouse": "wheelhouse",
   "pinned_distributions": {
     "pip": "26.2.2",
     "cryptography": "50.0.2",
     "keyring": "25.7.0",
-    "leakguard-core": "0.2.1a1",
+    "leakguard-core": "0.2.1a2",
     "leakguard-buddy": "0.1.0a1",
     "leakguard-host": "0.2.0",
     "leakguard-vault": "0.1.0",

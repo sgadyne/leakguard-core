@@ -37,8 +37,10 @@ does not fetch or cache public-suffix data.
 ```json
 {
   "entities": ["EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "US_SSN", "IBAN_CODE", "IP_ADDRESS"],
+  "presets": [],
   "language": "en",
   "score-threshold": "0.35",
+  "context-mode": "local",
   "ner-mode": "pattern-only",
   "model-name": "en_core_web_sm",
   "model-sha256": "",
@@ -54,10 +56,44 @@ the listed entity types to LeakGuard's `block` severity; every other result is
 The plugin declares the static rule `presidio-entity`; the specific Presidio
 entity type is stored in structured analysis metadata.
 
+The default entity allowlist stays small. `presets` adds only the selected
+entity groups to that list: `financial` adds `US_BANK_NUMBER`, `identity` adds
+`US_DRIVER_LICENSE`, `US_ITIN`, and `US_PASSPORT`, and the optional
+`healthcare` preset adds `MEDICAL_LICENSE` and `UK_NHS`. Presets are additive to
+`entities`; preset-expanded IDs already listed in `entities` are included once.
+Repeated IDs in `entities` or repeated preset names are rejected. Set `entities`
+explicitly when a profile needs a narrower base. The adapter registers only
+recognizers that can serve the resolved entity list.
+It does not enable URL, UUID, MAC, date/time, or every registry entity by
+default. `US_BANK_NUMBER` has a deliberately weak built-in pattern score, so
+the default threshold emits it only when its recognizer's own context terms
+occur near that match.
+Local context only raises a weak pattern score; it does not suppress candidates
+that have a misleading numeric shape. Numeric lookalikes can therefore still
+produce findings when their pattern score clears the configured threshold.
+Identity preset pattern scores are structural hints only: they do not prove that
+an identifier was issued, belongs to a particular person, or represents
+actionable exposure.
+
 The options accept one language and an explicit entity allowlist. The model name
 must already be installed in the private Python runtime. The adapter never
 silently falls back to a different model. `capabilities()` reports whether NER
 is active and the configured model identity without exposing recognizer patterns.
+
+With the NoOp NLP engine, Presidio receives no tokens or lemmas for its usual
+context enhancer. The adapter restores narrow context handling by checking each
+recognizer's context terms in a bounded window on the same source line as that
+match. A matching term can raise only that candidate's score before the
+configured threshold is applied. Set `context-mode` to `none` for an ablation
+without that adjustment; evaluation can set `score-threshold` to `0` to retain
+raw candidates. If Presidio 2.2.365 already marks a result as context
+enhanced in its metadata or analysis explanation, the adapter skips its local
+fallback for that result. The explanation is retained only inside the adapter
+while it filters candidates; it is not included in findings. The adapter does
+not use `logical_path` or `part_id` as semantic field labels: the core
+`DetectionContext` contains only
+`logical_path`, `part_id`, and `format_id`, and those values do not identify a
+column or field. Match offsets remain relative to the original text part.
 
 ## A firm-owned recognizer package
 
@@ -77,6 +113,24 @@ The adapter does not scan installed entry points or discover packages. It import
 only reviewed module factories named in the profile, checks the returned objects
 are Presidio `EntityRecognizer` instances, and registers them through
 `RecognizerRegistry.add_recognizer`. The fixtures use synthetic identifiers only.
+
+The JOSE recognizer package uses the same seam. Install
+`leakguard-jose-recognizers`, then explicitly include all three structural
+entities and its factory in any profile intended to scan compact JOSE tokens:
+
+```json
+{
+  "entities": ["JOSE_COMPACT_JWE", "JOSE_COMPACT_JWS_CANDIDATE", "JOSE_COMPACT_UNVERIFIED"],
+  "recognizer-modules": ["jose_recognizers.plugin:build_recognizers"],
+  "recognizer-options": "{\"jose_recognizers.plugin:build_recognizers\":{}}"
+}
+```
+
+This package does not install or auto-enable the JOSE recognizer. Its labels
+describe bounded compact structure, not credential validity or exposure; the
+default severity remains `review` unless a separate policy explicitly changes
+it. Add the recognizer module and its entity IDs in the effective profile for
+each CLI, hook, or host configuration that needs this coverage.
 
 ## Installation and focused checks
 
@@ -113,5 +167,19 @@ python -m leakguard_core.conformance \
   --cases src/presidio_detector/cases.json
 ```
 
-The core's session worker should also be checked with two sequential requests:
-one adapter construction, two detections, and one cleanup.
+The installed-package CI smoke uses Python 3.11 on Linux, macOS and Windows:
+
+```sh
+# From the repository root, after installing core, adapter, locked dependencies
+# and the synthetic firm example into the selected Python 3.11 environment:
+python tools/check_presidio_smoke.py
+```
+
+It checks built-in email and firm pattern positives, a negative control,
+value-free results, two requests in one owned worker session, and cleanup.
+The direct analyzer probe denies socket connections. No NER model is installed
+or downloaded. The worker smoke explicitly uses a 2 GiB memory budget; macOS
+selects `supervised-alpha` (RSS supervision), while Linux and Windows retain
+`strict` allocation/Job Object limits. This lane does not establish NER, Tika,
+or production corporate-recognizer acceptance. The adapter and example remain
+pinned to Python 3.11 until their dependency stack is separately qualified.

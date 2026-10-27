@@ -33,3 +33,12 @@ explains when the completed decision includes aggregate evidence; the text
 renderer labels counts as belonging to this slice. CLI `--fail-on block` exits
 1 for a completed blocking cycle even when this slice has zero blocking findings;
 incomplete coverage continues to exit 2.
+
+Reconciliation orders reservations and cycle starts even when the operating
+system clock returns the same timestamp for both. Memory stores advance a local
+microsecond counter; SQLite stores use one `ordering_clock` row inside the
+existing write transaction, shared by connections and retained on reopening.
+This metadata table is created alongside existing state without rewriting prior
+evidence or changing the public report schema. The ordering timestamps are
+fences, not measurements of elapsed time. A newer reservation cannot be marked
+unknown by an older cycle merely because their wall clock readings tie.

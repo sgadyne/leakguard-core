@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -392,7 +393,7 @@ class RegistryTests(unittest.TestCase):
     def test_script_activation_is_explicit_checked_profile_scoped_and_private(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-registry-') as folder:
             registry = ExtensionRegistry(Path(folder))
-            spec = {'id': 'firm-check', 'argv': ['/private/runtime/python', '/private/firm/check.py'],
+            spec = {'id': 'firm-check', 'argv': [str(Path(sys.executable).absolute()), str(Path(folder) / 'check.py')],
                     'rules': [{'id': 'firm-code', 'minimum_severity': 'review'}]}
             with patch('leakguard_core.plugins.load_scripts', side_effect=AssertionError('registration executed code')):
                 registered = registry.register_script(spec)
@@ -411,7 +412,28 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual(registry.apply({}, 'credentials')['script_checks'], [])
             registry.disable('firm-check')
             self.assertEqual(registry.apply({}, 'firm')['script_checks'], [])
-            self.assertEqual(registry.path.stat().st_mode & 0o777, 0o600)
+            if os.name == 'nt':
+                # POSIX mode bits do not describe Windows confidentiality.
+                # Check this private fixture's inherited DACL instead.
+                script = '''
+$ErrorActionPreference = 'Stop'
+$allowed = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+$acl = Get-Acl -LiteralPath $env:LEAKGUARD_TEST_REGISTRY
+if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed) { exit 2 }
+# Python 3.13's 0700 directory DACL uses OWNER RIGHTS (OW), not a user SID.
+# Admit OW only after checking that the actual owner is private/privileged.
+$allowed += 'S-1-3-4'
+$bad = @($acl.Access | Where-Object {
+    $_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed
+})
+if ($bad.Count -ne 0) { exit 1 }
+'''
+                checked = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
+                                         text=True, capture_output=True, timeout=15,
+                                         env=dict(os.environ, LEAKGUARD_TEST_REGISTRY=str(registry.path)))
+                self.assertEqual(checked.returncode, 0, 'registry fixture grants access beyond its owner, SYSTEM and administrators')
+            else:
+                self.assertEqual(registry.path.stat().st_mode & 0o777, 0o600)
             registry.path.unlink()
             with self.assertRaises(ExtensionError):
                 registry.apply({}, 'firm')

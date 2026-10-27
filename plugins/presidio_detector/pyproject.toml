@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "leakguard-presidio-detector"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "LeakGuard detector adapter for the Presidio Analyzer API"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-  "leakguard-core>=0.2.1a1,<0.3.0",
+  "leakguard-core>=0.2.1a2,<0.3.0",
   "presidio-analyzer==2.2.365",
   "tldextract==5.4.0",
 ]

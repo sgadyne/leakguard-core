@@ -69,6 +69,9 @@ class NavigationTests(unittest.TestCase):
                     entry = self._entries(nav, root)[0]
                     self.assertEqual(entry.stat().st_mtime_ns, expected.st_mtime_ns)
                     self.assertEqual(entry.stat().st_atime_ns, expected.st_atime_ns)
+                    self.assertEqual(entry.stat().st_dev, expected.st_dev)
+                    self.assertEqual(entry.stat().st_ino, expected.st_ino)
+                    self.assertEqual(entry.stat().st_nlink, expected.st_nlink)
 
     def test_boundary_fd_and_same_filesystem_mode(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -106,7 +109,8 @@ class NavigationTests(unittest.TestCase):
             missing = Path(temporary) / "does-not-exist"
             with self.assertRaises(NavigationError) as failure:
                 Navigation(missing)
-            self.assertEqual(failure.exception.code, "helper-unavailable")
+            self.assertEqual(failure.exception.code,
+                             "helper-unavailable" if os.name == "posix" else "secure-fd-unavailable")
 
     def test_helper_handshake_rejects_boolean_protocol_version(self):
         if os.name != "posix":

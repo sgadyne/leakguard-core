@@ -12,12 +12,14 @@ packages such as cryptography and psutil need wheels compatible with that target
 The release manifest pins the direct distribution versions; the builder records
 the complete wheel closure and SHA-256 for each wheel.
 
-From an integrated source checkout, build the local package wheels into a clean
-wheelhouse, then download the pinned public dependencies and the transitive
-closure declared by those local wheel metadata files:
+From the reviewed integrated source checkout, build the local package wheels into
+an empty revision-specific wheelhouse (the example path must not already exist),
+then download the pinned public dependencies and the transitive closure declared
+by those local wheel metadata files:
 
 ```sh
-mkdir -p artifacts/wheelhouse
+mkdir -p artifacts
+mkdir artifacts/wheelhouse
 python -m build --wheel --outdir artifacts/wheelhouse .
 python -m build --wheel --outdir artifacts/wheelhouse packages/leakguard_host
 python -m build --wheel --outdir artifacts/wheelhouse packages/leakguard_vault
@@ -29,7 +31,7 @@ python -m pip download --only-binary=:all: --dest artifacts/wheelhouse \
   pypdf==6.21.2 olefile==0.47 'packaging>=24,<27'
 python -m pip download --only-binary=:all: --no-index \
   --find-links artifacts/wheelhouse --dest artifacts/wheelhouse \
-  'leakguard-core[documents]==0.2.0' leakguard-host==0.2.0 leakguard-vault==0.1.0 \
+  'leakguard-core[documents]==0.2.1a2' leakguard-host==0.2.0 leakguard-vault==0.1.0 \
   leakguard-buddy==0.1.0a1 leakguard-sensitive-basics==0.1.0 \
   leakguard-firm-example==0.1.0
 ```
@@ -55,7 +57,7 @@ unavailable. Labels use `linux-x86_64`, `macos-arm64`, or `windows-x86_64`
 ```sh
 python deploy/build_bundle.py \
   --wheelhouse artifacts/wheelhouse \
-  --output artifacts/LeakGuard-0.2.0-alpha.1-linux-x86_64.zip \
+  --output artifacts/LeakGuard-0.2.0-alpha.2-linux-x86_64.zip \
   --source-commit "$(git rev-parse HEAD)" \
   --target-platform linux-x86_64 \
   --target-python 3.11 \
@@ -86,7 +88,7 @@ check before activating the release.
 Extract the archive and run the platform bootstrap from its `LeakGuard` folder:
 
 ```sh
-unzip LeakGuard-0.2.0-alpha.1-linux-x86_64.zip
+unzip LeakGuard-0.2.0-alpha.2-linux-x86_64.zip
 cd LeakGuard
 ./deploy/install.sh
 ```
@@ -116,7 +118,7 @@ rather than falling back to a plaintext database.
 Extract the archive, then run PowerShell as the current user:
 
 ```powershell
-Expand-Archive .\LeakGuard-0.2.0-alpha.1-windows-x86_64.zip .\LeakGuardBundle
+Expand-Archive .\LeakGuard-0.2.0-alpha.2-windows-x86_64.zip .\LeakGuardBundle
 & .\LeakGuardBundle\LeakGuard\deploy\install.ps1 `
   -BundleDirectory .\LeakGuardBundle\LeakGuard
 ```
@@ -164,7 +166,7 @@ releases, then start it again to register the selected version:
 
 ```sh
 leakguard-install service disable
-leakguard-install install /path/to/LeakGuard-0.2.0-alpha.2.zip
+leakguard-install install /path/to/LeakGuard-0.2.0-alpha.3.zip
 leakguard-install service enable
 ```
 

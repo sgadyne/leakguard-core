@@ -175,7 +175,7 @@ class RuntimeIdentityTests(unittest.TestCase):
     @unittest.skipIf(os.name == 'nt', 'POSIX FIFO race regression')
     def test_regular_artifact_replaced_by_fifo_at_open_is_nonblocking(self):
         with tempfile.TemporaryDirectory(prefix='leakguard-artifact-race-') as temporary:
-            artifact = Path(temporary) / 'artifact.bin'
+            artifact = Path(temporary).resolve() / 'artifact.bin'
             artifact.write_bytes(b'synthetic artifact before race')
             script = r'''
 import os

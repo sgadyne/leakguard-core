@@ -117,7 +117,7 @@ class CompleteBundleDocumentsTests(unittest.TestCase):
         self.assertEqual(pins["olefile"], "0.47")
         recipe = (root / "docs" / "INSTALL.md").read_text(encoding="utf-8")
         self.assertIn("pypdf==6.21.2 olefile==0.47", recipe)
-        self.assertIn("'leakguard-core[documents]==0.2.0'", recipe)
+        self.assertIn(f"'leakguard-core[documents]=={pins['leakguard-core']}'", recipe)
 
     def test_alpha_audit_continuation_guide_is_explicit_hashed_support(self):
         self.assertIn("docs/audit-continuation.md", build_bundle.SUPPORT_FILES)

@@ -1,10 +1,11 @@
 """Explicit policy selection and supervised memory failure, with no real inputs."""
 import psutil
+import os
 import sys
 import unittest
 from unittest.mock import patch
 
-from leakguard_core._supervision import WorkerError, run_worker, worker_capabilities
+from leakguard_core._supervision import WorkerError, run_worker, worker_capabilities, _RSSWatchdog
 from leakguard_core.api import ConfigurationError, ScanConfig
 
 
@@ -26,6 +27,17 @@ class WorkerPolicyTests(unittest.TestCase):
             self.assertEqual(capability['memory_enforcement'], 'rss-watchdog')
 
     def test_watchdog_aborts_memory_overshoot(self):
+        # Sample a live process synchronously, without a launch/exit race.
+        watchdog = _RSSWatchdog(1_000_000)
+        watchdog.attach(os.getpid())
+        with self.assertRaises(WorkerError) as sampled:
+            watchdog.check()
+        self.assertEqual(sampled.exception.code, 'worker-memory-limit')
+        if os.name == 'nt':
+            # Patching sys.platform alone cannot simulate macOS on Windows:
+            # its native Job Object may kill the child before RSS is sampled.
+            # Native Job Object overshoot/cleanup has separate conformance tests.
+            return
         with patch('leakguard_core._supervision.sys.platform', 'darwin'):
             with self.assertRaises(WorkerError) as failure:
                 run_worker([sys.executable, '-I', '-c', 'import time;x=bytearray(16000000);time.sleep(2)'], b'', timeout=3, memory_bytes=1_000_000, worker_policy='supervised-alpha')

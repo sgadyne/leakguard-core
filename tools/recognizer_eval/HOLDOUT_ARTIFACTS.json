@@ -1,0 +1,490 @@
+{
+  "authorization": {
+    "authorized_at": "2026-10-26T22:07:08.768063+00:00",
+    "contract_revision": 10,
+    "scope": "one final sealed holdout run per5frozen native profiles + stock/shipped Gitleaks; final freeze2/source/profiles/manifest; no tuning detector/labels/thresholds from errors"
+  },
+  "commands": [
+    "python3 RUN_ROOT/run-heavy.py evaluation -- RUN_ROOT/venvs/evaluation/bin/python -m tools.recognizer_eval.evaluate --profile tools/recognizer_eval/profiles/baseline.json --source-root SOURCE_ROOT --manifest tools/recognizer_eval/split_manifest_v2.json --split holdout --output RUN_ROOT/artifacts/evaluation-v2-holdout-freeze2/baseline-holdout.json",
+    "python3 RUN_ROOT/run-heavy.py evaluation -- RUN_ROOT/venvs/evaluation/bin/python -m tools.recognizer_eval.evaluate --profile tools/recognizer_eval/profiles/jose-no-context.json --source-root SOURCE_ROOT --manifest tools/recognizer_eval/split_manifest_v2.json --split holdout --output RUN_ROOT/artifacts/evaluation-v2-holdout-freeze2/jose-no-context-holdout.json",
+    "python3 RUN_ROOT/run-heavy.py evaluation -- RUN_ROOT/venvs/evaluation/bin/python -m tools.recognizer_eval.evaluate --profile tools/recognizer_eval/profiles/jose-local-context.json --source-root SOURCE_ROOT --manifest tools/recognizer_eval/split_manifest_v2.json --split holdout --output RUN_ROOT/artifacts/evaluation-v2-holdout-freeze2/jose-local-context-holdout.json",
+    "python3 RUN_ROOT/run-heavy.py evaluation -- RUN_ROOT/venvs/evaluation/bin/python -m tools.recognizer_eval.evaluate --profile tools/recognizer_eval/profiles/jose-no-context-presets.json --source-root SOURCE_ROOT --manifest tools/recognizer_eval/split_manifest_v2.json --split holdout --output RUN_ROOT/artifacts/evaluation-v2-holdout-freeze2/jose-no-context-presets-holdout.json",
+    "python3 RUN_ROOT/run-heavy.py evaluation -- RUN_ROOT/venvs/evaluation/bin/python -m tools.recognizer_eval.evaluate --profile tools/recognizer_eval/profiles/jose-local-presets.json --source-root SOURCE_ROOT --manifest tools/recognizer_eval/split_manifest_v2.json --split holdout --output RUN_ROOT/artifacts/evaluation-v2-holdout-freeze2/jose-local-presets-holdout.json",
+    "python3 RUN_ROOT/run-heavy.py evaluation -- RUN_ROOT/venvs/evaluation/bin/python -m tools.recognizer_eval.gitleaks --gitleaks RUN_ROOT/artifacts/bin/gitleaks --manifest tools/recognizer_eval/split_manifest_v2.json --split holdout --output RUN_ROOT/artifacts/evaluation-v2-holdout-freeze2/gitleaks-stock-holdout.json",
+    "python3 RUN_ROOT/run-heavy.py evaluation -- RUN_ROOT/venvs/evaluation/bin/python -m tools.recognizer_eval.gitleaks --gitleaks RUN_ROOT/artifacts/bin/gitleaks --config SOURCE_ROOT/src/leakguard_core/rules.toml --manifest tools/recognizer_eval/split_manifest_v2.json --split holdout --output RUN_ROOT/artifacts/evaluation-v2-holdout-freeze2/gitleaks-shipped-rules-holdout.json"
+  ],
+  "corpus": {
+    "holdout_counts": {
+      "clean_negative": 2000,
+      "jwe": 400,
+      "jws": 200,
+      "total": 2600
+    },
+    "labels_sha256": "605e3ad37b9f762fc7863ec390b09cff1f581b5bf57f71a253b6c689183c96c1",
+    "manifest_path": "tools/recognizer_eval/split_manifest_v2.json",
+    "manifest_sha256": "813ce2075d226a9d482ec184f40e57d4059b2f6fdd75b9443bd8678ad6c71021"
+  },
+  "evaluator": {
+    "commit": "ca97e1e82fb120874dc3ade3346ebb6cba65d76c",
+    "python": "3.11.2",
+    "tree_clean": true
+  },
+  "freeze": {
+    "detector_freeze_sha256": "96adcf2d1b694875b31378271fa782e355cf3f84b5238ec705cfd94c6d19a0a9",
+    "detector_freeze_version": 2,
+    "detector_source_commit": "ddddd050ed3127a513169cb537c61fcb4cc34296",
+    "detector_source_root": "SOURCE_ROOT",
+    "detector_tree_clean": true,
+    "files": {
+      "plugins/jose_recognizers/src/jose_recognizers/plugin.py": {
+        "sha256": "8296421a208d880ab6d0e11ef25b3c2dab1e2a311bde767ee62ef4b931771597"
+      },
+      "plugins/jose_recognizers/src/jose_recognizers/recognizer.py": {
+        "sha256": "a29a91a453a8c171f23149a28db3dc99ab93624d7fb8730a04cd18144c4e604e"
+      },
+      "plugins/jose_recognizers/src/jose_recognizers/scanner.py": {
+        "sha256": "4a8615e548935f7be71df67d75db84c6cd544b91ad7dfe2735c25592bf0014ca"
+      },
+      "plugins/presidio_detector/src/presidio_detector/plugin.py": {
+        "sha256": "8832d19fc12d91432356963fa7c7a59d316892064ea6ff9a938cec67bf51b87c"
+      },
+      "src/leakguard_core/recognizer_profiles.py": {
+        "sha256": "20a2cdbcbbd18e89928deca0cccc1c805bdb47f70f9c5753d431df71c7327685"
+      }
+    },
+    "threshold_freeze_sha256": "b16ba42019c0d324da724577e4d19867c068f35471711af5290b2aabf9e60a4b"
+  },
+  "gitleaks_outputs": [
+    {
+      "adversarial_cases": 120,
+      "binary_path": "RUN_ROOT/artifacts/bin/gitleaks",
+      "binary_sha256": "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509",
+      "config_path": null,
+      "config_sha256": null,
+      "configuration": "gitleaks-built-in-defaults",
+      "counts": {
+        "jose_union": {
+          "f1": 0.2857142857142857,
+          "fn": 500,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 0.16666666666666666,
+          "tn": 2000,
+          "tp": 100
+        },
+        "jwe_target": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2200,
+          "tp": 0
+        },
+        "jwe_vs_clean": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2000,
+          "tp": 0
+        },
+        "jws_target": {
+          "f1": 0.6666666666666666,
+          "fn": 100,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 0.5,
+          "tn": 2400,
+          "tp": 100
+        }
+      },
+      "elapsed_seconds": 0.418896,
+      "invocations": 1,
+      "labels_sha256": "605e3ad37b9f762fc7863ec390b09cff1f581b5bf57f71a253b6c689183c96c1",
+      "manifest_sha256": "813ce2075d226a9d482ec184f40e57d4059b2f6fdd75b9443bd8678ad6c71021",
+      "path": "artifacts/evaluation-v2-holdout-freeze2/gitleaks-stock-holdout.json",
+      "sha256": "94b65f5195538ae761f21a4dd1fda86298b26fc1cd2d10f99733b334ab004fdd",
+      "split_cases": 2600,
+      "throughput_cases_per_second": 6493.253534198471,
+      "version": "8.30.1"
+    },
+    {
+      "adversarial_cases": 120,
+      "binary_path": "RUN_ROOT/artifacts/bin/gitleaks",
+      "binary_sha256": "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509",
+      "config_path": "SOURCE_ROOT/src/leakguard_core/rules.toml",
+      "config_sha256": "18b69dbd64b74486a42bc9db414910208ec69f049b911618becd80a16d9e42c8",
+      "configuration": "explicit-config-file",
+      "counts": {
+        "jose_union": {
+          "f1": 0.2857142857142857,
+          "fn": 500,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 0.16666666666666666,
+          "tn": 2000,
+          "tp": 100
+        },
+        "jwe_target": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2200,
+          "tp": 0
+        },
+        "jwe_vs_clean": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2000,
+          "tp": 0
+        },
+        "jws_target": {
+          "f1": 0.6666666666666666,
+          "fn": 100,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 0.5,
+          "tn": 2400,
+          "tp": 100
+        }
+      },
+      "elapsed_seconds": 0.413277,
+      "invocations": 1,
+      "labels_sha256": "605e3ad37b9f762fc7863ec390b09cff1f581b5bf57f71a253b6c689183c96c1",
+      "manifest_sha256": "813ce2075d226a9d482ec184f40e57d4059b2f6fdd75b9443bd8678ad6c71021",
+      "path": "artifacts/evaluation-v2-holdout-freeze2/gitleaks-shipped-rules-holdout.json",
+      "sha256": "467f7346f113a292558b33f022c48542d80847363e9c57087a82c63f59971afe",
+      "split_cases": 2600,
+      "throughput_cases_per_second": 6581.546749155654,
+      "version": "8.30.1"
+    }
+  ],
+  "native_outputs": [
+    {
+      "counts": {
+        "actual_block_severity": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2200,
+          "tp": 0
+        },
+        "jose_union": {
+          "f1": 0.0,
+          "fn": 600,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2000,
+          "tp": 0
+        },
+        "jwe_target": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2200,
+          "tp": 0
+        },
+        "jwe_vs_clean": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2000,
+          "tp": 0
+        },
+        "jws_target": {
+          "f1": 0.0,
+          "fn": 200,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2400,
+          "tp": 0
+        }
+      },
+      "path": "artifacts/evaluation-v2-holdout-freeze2/baseline-holdout.json",
+      "profile": "baseline-presidio-default-entities",
+      "profile_file": "tools/recognizer_eval/profiles/baseline.json",
+      "profile_sha256": "c9c1362f34e0c2c99ea4f3a6dc17bf1be5b97581f5d9196163777adc91f01112",
+      "sha256": "80af7d5f15f3a9128176a00b78673dcb875e83d4465d08345643f04f50029282",
+      "source_commit": "ddddd050ed3127a513169cb537c61fcb4cc34296",
+      "split_cases": 2600
+    },
+    {
+      "counts": {
+        "actual_block_severity": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2200,
+          "tp": 0
+        },
+        "jose_union": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2000,
+          "tp": 600
+        },
+        "jwe_target": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2200,
+          "tp": 400
+        },
+        "jwe_vs_clean": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2000,
+          "tp": 400
+        },
+        "jws_target": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2400,
+          "tp": 200
+        }
+      },
+      "path": "artifacts/evaluation-v2-holdout-freeze2/jose-no-context-holdout.json",
+      "profile": "jose-no-context",
+      "profile_file": "tools/recognizer_eval/profiles/jose-no-context.json",
+      "profile_sha256": "bcc341590ad9a5998ca689044c005dbb612907857eb353aab638bf66d5472848",
+      "sha256": "f10442619824c3c0ca5c0465bda3302c9ceaa4c6174e19cf5255336c32ee5730",
+      "source_commit": "ddddd050ed3127a513169cb537c61fcb4cc34296",
+      "split_cases": 2600
+    },
+    {
+      "counts": {
+        "actual_block_severity": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2200,
+          "tp": 0
+        },
+        "jose_union": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2000,
+          "tp": 600
+        },
+        "jwe_target": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2200,
+          "tp": 400
+        },
+        "jwe_vs_clean": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2000,
+          "tp": 400
+        },
+        "jws_target": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2400,
+          "tp": 200
+        }
+      },
+      "path": "artifacts/evaluation-v2-holdout-freeze2/jose-local-context-holdout.json",
+      "profile": "jose-local-context",
+      "profile_file": "tools/recognizer_eval/profiles/jose-local-context.json",
+      "profile_sha256": "6ff7f9bcb50f5a1f8c9ae8eabec01263502c45969eba71d31fa788c275c95edd",
+      "sha256": "38aee86e23cabda6a55a7f3812fd019307de2132bf14a8c636000a996b63de0b",
+      "source_commit": "ddddd050ed3127a513169cb537c61fcb4cc34296",
+      "split_cases": 2600
+    },
+    {
+      "counts": {
+        "actual_block_severity": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2200,
+          "tp": 0
+        },
+        "jose_union": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2000,
+          "tp": 600
+        },
+        "jwe_target": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2200,
+          "tp": 400
+        },
+        "jwe_vs_clean": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2000,
+          "tp": 400
+        },
+        "jws_target": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2400,
+          "tp": 200
+        }
+      },
+      "path": "artifacts/evaluation-v2-holdout-freeze2/jose-no-context-presets-holdout.json",
+      "profile": "jose-no-context-financial-identity-presets",
+      "profile_file": "tools/recognizer_eval/profiles/jose-no-context-presets.json",
+      "profile_sha256": "d553ae90e06b33e36ec8c5e5f06075c95addb7fb59c050a82be2a4271cd5b22b",
+      "sha256": "388e571bf6c3036956cd749b3a02a8b38fe6be1e8e6c26b882f0bb139948d6b5",
+      "source_commit": "ddddd050ed3127a513169cb537c61fcb4cc34296",
+      "split_cases": 2600
+    },
+    {
+      "counts": {
+        "actual_block_severity": {
+          "f1": 0.0,
+          "fn": 400,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": null,
+          "recall": 0.0,
+          "tn": 2200,
+          "tp": 0
+        },
+        "jose_union": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2000,
+          "tp": 600
+        },
+        "jwe_target": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2200,
+          "tp": 400
+        },
+        "jwe_vs_clean": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2000,
+          "tp": 400
+        },
+        "jws_target": {
+          "f1": 1.0,
+          "fn": 0,
+          "fp": 0,
+          "fpr": 0.0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "tn": 2400,
+          "tp": 200
+        }
+      },
+      "path": "artifacts/evaluation-v2-holdout-freeze2/jose-local-presets-holdout.json",
+      "profile": "jose-local-context-financial-identity-presets",
+      "profile_file": "tools/recognizer_eval/profiles/jose-local-presets.json",
+      "profile_sha256": "21c729735fa80e25ad249c8a606212aabef274895e0108f076d24d77ff7fbb9c",
+      "sha256": "7713d4ee430e7bd601ed771c4b1cd3e5e8efc614f99b2e754953814a7cc7882a",
+      "source_commit": "ddddd050ed3127a513169cb537c61fcb4cc34296",
+      "split_cases": 2600
+    }
+  ],
+  "schema_version": 1,
+  "thresholds": {
+    "block_score_comparison_threshold": 1.0,
+    "production_block_entities": [],
+    "review_score_threshold": 0.35
+  }
+}

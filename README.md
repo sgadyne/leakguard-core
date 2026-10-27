@@ -1,40 +1,22 @@
 # LeakGuard Core
 
-## Install the current plugin-development checkpoint
+## Install the current integrated revision
 
-Start with the [Presidio/Tika setup and Windows corporate guide](docs/presidio-tika-checkpoint.md).
-Core `0.2.1a1` uses maintained Presidio recognizers plus explicitly registered
-[firm recognizer packages](plugins/presidio_detector/README.md#a-firm-owned-recognizer-package),
-with Gitleaks retained for credentials. Presidio defaults to **pattern-only**;
-no NER model is bundled. Tika is an **opt-in** local document parser requiring
-Java 17+ and the pinned Tika 4.1.0 archive. Native Windows execution remains
-unverified; this is a developer checkpoint with explicit prerequisites, not a
-self-contained all-platform installer.
+Use the reviewed integrated source commit and matching fresh wheel set recorded
+in the release receipt; package versions alone do not identify a build. Follow
+[CLI installation, upgrade and rollback](docs/CLI-INSTALL.md) for macOS and
+corporate Windows Python 3.11, and the [broker guide](packages/leakguard_broker/README.md)
+for a Linux broker. Core and optional recognizers use explicit configuration;
+installing a plugin does not enable it. The Linux broker is a generic scoped
+HTTP credential-injection service; no Bitwarden provider or frontend integration
+is provided. Native Windows broker operation is not qualified.
 
-For an existing clone, use a new Python 3.11 environment and the approved
-target-specific wheelhouse prepared as described in the guide:
-
-```powershell
-git fetch origin feature/presidio-tika-checkpoint-20261026
-git switch -c review/presidio-tika FETCH_HEAD
-py -3.11 -m venv C:\Work\LeakGuardFrameworkTest\runtime
-$PY = 'C:\Work\LeakGuardFrameworkTest\runtime\Scripts\python.exe'
-$WH = 'C:\Approved\LeakGuardWheelhouse'
-& $PY -m pip install --no-index --find-links $WH --require-hashes `
-  -r plugins\presidio_detector\requirements-py311.lock
-& $PY -m pip install --no-index --find-links $WH `
-  (Join-Path $WH 'leakguard_core-0.2.1a1-py3-none-any.whl') `
-  (Join-Path $WH 'leakguard_presidio_detector-0.1.0a1-py3-none-any.whl') `
-  (Join-Path $WH 'leakguard_tika_extractor-0.1.0a1-py3-none-any.whl') `
-  (Join-Path $WH 'example_firm_presidio_recognizer-0.1.0-py3-none-any.whl')
-& $PY -m pip check
-```
-
-Then follow the guide's explicit private config, capability doctor and synthetic
-scan before firm files. The firm example returns native Presidio recognizers;
-the [adapter guide](plugins/presidio_detector/README.md) explains registration,
-entity allowlists, confidence thresholds and independent severity policy.
-Python traversal remains the default and needs no Rust compiler.
+The [recognizer coverage guide](docs/recognizer-coverage.md) describes JOSE and
+the existing Presidio factory seam. Generic JOSE is review-only unless the
+operator explicitly changes policy. Pattern-only is the default; no NER model is
+bundled. Firm rules stay in a separately reviewed private wheel. Tika is an
+optional local parser requiring Java 17+ and its separately approved archive.
+Core-only defaults do not detect general compact JWE. The [synthetic evaluation report](docs/recognizer-evaluation.md) records measured coverage and preset limitations. Consult the release's platform receipts before making native support claims.
 
 ## Plugin guide
 
@@ -49,6 +31,7 @@ Build on your approved development/staging machine and install the reviewed
 wheel into the isolated Python 3.11 runtime from the setup guide:
 
 ```powershell
+$PY = 'C:\Work\lg-runtime-REVISION\Scripts\python.exe'
 & $PY -m pip wheel --no-deps --wheel-dir .\dist `
   .\plugins\presidio_detector\examples\firm_presidio_recognizer
 & $PY -m pip install --no-deps `
@@ -105,6 +88,8 @@ This is an initial public core, not a claim that every file type or credential c
 
 ## Install and run
 
+The following editable install is for development in a checkout. For the current
+integrated wheel release, use [the CLI install guide](docs/CLI-INSTALL.md).
 Python 3.11+ and Git are required. Install Gitleaks 8.30.1 separately from its official releases and put it on PATH, or set `LEAKGUARD_GITLEAKS` to its executable. No scanner binary, local configuration, runtime database or real finding is shipped here.
 
 ```sh

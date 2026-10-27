@@ -1,0 +1,3 @@
+-r ../../plugins/presidio_detector/requirements-py311.in
+cryptography==50.0.2
+pypdf>=6,<7

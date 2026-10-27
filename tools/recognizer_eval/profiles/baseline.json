@@ -1,0 +1,11 @@
+{
+  "name": "baseline-presidio-default-entities",
+  "factory": "presidio_detector.plugin:PresidioDetector",
+  "review_score_threshold": 0.35,
+  "block_score_threshold": 1.0,
+  "options": {
+    "score-threshold": "0",
+    "context-mode": "none",
+    "ner-mode": "pattern-only"
+  }
+}

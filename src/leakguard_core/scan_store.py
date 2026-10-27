@@ -6,13 +6,24 @@ an ephemeral scanner and as a reference for application-owned encrypted stores.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 from typing import Protocol, runtime_checkable
 import uuid
 import threading
 from functools import wraps
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _wall_tick():
+    return (datetime.now(timezone.utc) - _EPOCH) // timedelta(microseconds=1)
+
+
+def _tick_stamp(tick):
+    return (_EPOCH + timedelta(microseconds=tick)).isoformat()
 
 
 def _synchronized(method):
@@ -192,6 +203,7 @@ class MemoryScanStore:
     def __init__(self, *, config=None):
         self._lock = threading.RLock()
         self._deadlines = {}
+        self._order_tick = 0
         self.config = config or {}
         self.generations = {}
         self.reservation_times = {}
@@ -223,8 +235,14 @@ class MemoryScanStore:
         key = source_key(source, scope)
         generation = self.generations.get(key, 0) + 1
         self.generations[key] = generation
-        self.reservation_times[key] = datetime.now(timezone.utc).isoformat()
+        self.reservation_times[key] = self._ordering_stamp()
         return generation
+
+    def _ordering_stamp(self):
+        # Coarse clocks (notably Windows Python 3.11) can tie a reservation and
+        # cycle start. The fence needs their operation order, not a time tie.
+        self._order_tick = max(_wall_tick(), self._order_tick + 1)
+        return _tick_stamp(self._order_tick)
 
     @_synchronized
     def get_cached(self, cache_key):
@@ -314,7 +332,7 @@ class MemoryScanStore:
         fresh = current is None or current['completed'] is not None
         generation = (current['generation'] + 1) if current and fresh else current['generation'] if current else 1
         owner = uuid.uuid4().hex
-        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None, 'started': datetime.now(timezone.utc).isoformat() if fresh else current['started'], 'has_checked': bool(current and not fresh and current.get('has_checked')), 'work_identity': current.get('work_identity') if current else None}
+        cycle = {'generation': generation, 'owner': owner, 'lease_until': now + lease_seconds, 'completed': None, 'started': self._ordering_stamp() if fresh else current['started'], 'has_checked': bool(current and not fresh and current.get('has_checked')), 'work_identity': current.get('work_identity') if current else None}
         self.cycles[scope] = cycle
         lease = WorkLease(scope, generation, owner)
         for key, work in self.work.items():
@@ -336,7 +354,7 @@ class MemoryScanStore:
         for key in tuple(self.work):
             if key[:2] == (lease.scope, lease.generation):
                 del self.work[key]
-        cycle.update(work_identity=identity, started=datetime.now(timezone.utc).isoformat(), has_checked=False)
+        cycle.update(work_identity=identity, started=self._ordering_stamp(), has_checked=False)
         self.enqueue_work(lease, ((str(__import__('pathlib').Path(root).absolute()), 'directory', 10),))
         return True
 
@@ -734,6 +752,7 @@ def _anchor_from(payload):
 
 
 _SCHEMA = '''
+CREATE TABLE IF NOT EXISTS ordering_clock(id INTEGER PRIMARY KEY CHECK(id=1),tick INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS cache(path TEXT PRIMARY KEY,size INTEGER,mtime INTEGER,status TEXT,policy TEXT,digest TEXT,payload TEXT,executed_at TEXT);
 CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY,path TEXT,rule TEXT,line INTEGER,part TEXT,severity TEXT,first_seen TEXT,last_seen TEXT);
 CREATE TABLE IF NOT EXISTS directories(scope TEXT,path TEXT,priority INTEGER NOT NULL DEFAULT 100,PRIMARY KEY(scope,path));
@@ -980,8 +999,15 @@ class SQLiteScanStore:
     def reserve(self, source, *, scope=''):
         key = source_key(source, scope)
         with self.conn:
-            self.conn.execute('INSERT INTO current_inputs(input_key,generation,reserved_at) VALUES(?,1,?) ON CONFLICT(input_key) DO UPDATE SET generation=generation+1,reserved_at=excluded.reserved_at', (key, datetime.now(timezone.utc).isoformat()))
+            self.conn.execute('INSERT INTO current_inputs(input_key,generation,reserved_at) VALUES(?,1,?) ON CONFLICT(input_key) DO UPDATE SET generation=generation+1,reserved_at=excluded.reserved_at', (key, self._ordering_stamp()))
             return self.conn.execute('SELECT generation FROM current_inputs WHERE input_key=?', (key,)).fetchone()[0]
+
+    def _ordering_stamp(self):
+        # Called inside the reservation/cycle write transaction. One durable
+        # clock row orders concurrent connections and survives store reopening.
+        self.conn.execute('INSERT INTO ordering_clock(id,tick) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET tick=max(tick+1,excluded.tick)', (_wall_tick(),))
+        tick = self.conn.execute('SELECT tick FROM ordering_clock WHERE id=1').fetchone()[0]
+        return _tick_stamp(tick)
 
     @_bounded_sql
     def get_cached(self, cache_key):
@@ -1149,7 +1175,7 @@ class SQLiteScanStore:
             self.conn.execute('INSERT INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,10)',
                               (lease.scope, lease.generation, root, 'directory'))
             self.conn.execute('UPDATE audit_cycles SET work_identity=?,started=?,failed=0 WHERE scope=? AND generation=? AND owner=?',
-                              (identity, datetime.now(timezone.utc).isoformat(), lease.scope, lease.generation, lease.owner))
+                              (identity, self._ordering_stamp(), lease.scope, lease.generation, lease.owner))
         return True
 
     @_bounded_sql
@@ -1165,7 +1191,7 @@ class SQLiteScanStore:
             fresh = not row or row[1] is not None
             generation = row[0] + 1 if row and fresh else row[0] if row else 1
             owner = uuid.uuid4().hex
-            self.conn.execute('INSERT INTO audit_cycles(scope,generation,started,completed,failed,owner,lease_until) VALUES(?,?,?,NULL,0,?,?) ON CONFLICT(scope) DO UPDATE SET generation=excluded.generation,started=CASE WHEN ? THEN excluded.started ELSE started END,completed=NULL,owner=excluded.owner,lease_until=excluded.lease_until', (scope, generation, datetime.now(timezone.utc).isoformat(), owner, now + lease_seconds, fresh))
+            self.conn.execute('INSERT INTO audit_cycles(scope,generation,started,completed,failed,owner,lease_until) VALUES(?,?,?,NULL,0,?,?) ON CONFLICT(scope) DO UPDATE SET generation=excluded.generation,started=CASE WHEN ? THEN excluded.started ELSE started END,completed=NULL,owner=excluded.owner,lease_until=excluded.lease_until', (scope, generation, self._ordering_stamp(), owner, now + lease_seconds, fresh))
             self.conn.execute('UPDATE audit_work SET claimed=NULL WHERE scope=? AND generation=?', (scope, generation))
             if fresh and root is not None:
                 self.conn.execute('INSERT OR IGNORE INTO audit_work(scope,generation,path,kind,priority) VALUES(?,?,?,?,10)', (scope, generation, str(root), 'directory'))

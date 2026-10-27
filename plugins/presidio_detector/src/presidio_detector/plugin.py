@@ -44,7 +44,19 @@ DEFAULT_ENTITIES = (
     "IBAN_CODE",
     "IP_ADDRESS",
 )
+PRESET_ENTITIES = {
+    # The default profile already includes cards and IBANs. Add the weaker
+    # domestic bank-number recognizer only when financial coverage is selected.
+    "financial": ("US_BANK_NUMBER",),
+    "identity": ("US_DRIVER_LICENSE", "US_ITIN", "US_PASSPORT"),
+    "healthcare": ("MEDICAL_LICENSE", "UK_NHS"),
+}
+_CONTEXT_WINDOW_CHARS = 96
+_CONTEXT_SCORE_BONUS = 0.35
+_CONTEXT_MODES = ("local", "none")
+_CONTEXT_ENHANCED_METADATA_KEY = "is_score_enhanced_by_context"
 _TOKEN = re.compile(r"[A-Z][A-Z0-9_]{0,79}\Z")
+_WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,3}\Z")
 _MODEL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
 _MODEL_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -52,8 +64,10 @@ _FACTORY = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*):([A-Za-z_][A-Za-z0-9_]*)\Z")
 _NER_MODES = ("required", "pattern-only")
 _OPTION_FIELDS = (
     OptionSpec("entities", "list", default=list(DEFAULT_ENTITIES), max_length=64),
+    OptionSpec("presets", "list", default=[], max_length=len(PRESET_ENTITIES)),
     OptionSpec("language", "string", default="en", max_length=16),
     OptionSpec("score-threshold", "string", default="0.35", max_length=16),
+    OptionSpec("context-mode", "enum", default="local", choices=_CONTEXT_MODES),
     OptionSpec("ner-mode", "enum", default="pattern-only", choices=_NER_MODES),
     OptionSpec("model-name", "string", default="en_core_web_sm", max_length=64),
     OptionSpec("model-sha256", "string", default="", max_length=64),
@@ -153,6 +167,20 @@ def _validate_options(options: Mapping[str, object]) -> dict[str, Any]:
         raise PresidioConfigurationError("invalid entity list")
     if len(set(entities)) != len(entities):
         raise PresidioConfigurationError("invalid entity list")
+    presets = options.get("presets", [])
+    if (type(presets) is not list or len(presets) > len(PRESET_ENTITIES)
+            or any(type(preset) is not str or preset not in PRESET_ENTITIES for preset in presets)
+            or len(set(presets)) != len(presets)):
+        raise PresidioConfigurationError("invalid recognizer presets")
+    selected_entities = list(entities)
+    selected_entity_set = set(selected_entities)
+    for preset in presets:
+        for entity in PRESET_ENTITIES[preset]:
+            if entity not in selected_entity_set:
+                selected_entities.append(entity)
+                selected_entity_set.add(entity)
+    if len(selected_entities) > 64:
+        raise PresidioConfigurationError("invalid entity list")
 
     language = options.get("language", "en")
     if type(language) is not str or not _LANGUAGE.fullmatch(language):
@@ -160,6 +188,9 @@ def _validate_options(options: Mapping[str, object]) -> dict[str, Any]:
     ner_mode = options.get("ner-mode", "pattern-only")
     if type(ner_mode) is not str or ner_mode not in _NER_MODES:
         raise PresidioConfigurationError("invalid NER mode")
+    context_mode = options.get("context-mode", "local")
+    if type(context_mode) is not str or context_mode not in _CONTEXT_MODES:
+        raise PresidioConfigurationError("invalid context mode")
     model_name = options.get("model-name", "en_core_web_sm")
     if type(model_name) is not str or len(model_name) > 64 or not _MODEL_NAME.fullmatch(model_name):
         raise PresidioConfigurationError("invalid model name")
@@ -173,7 +204,7 @@ def _validate_options(options: Mapping[str, object]) -> dict[str, Any]:
         raise PresidioConfigurationError("invalid severity policy")
     if any(type(entity) is not str or not _TOKEN.fullmatch(entity) for entity in block_entities):
         raise PresidioConfigurationError("invalid severity policy")
-    if len(set(block_entities)) != len(block_entities) or not set(block_entities) <= set(entities):
+    if len(set(block_entities)) != len(block_entities) or not set(block_entities) <= set(selected_entities):
         raise PresidioConfigurationError("invalid severity policy")
     modules = options.get("recognizer-modules", [])
     if type(modules) is not list or len(modules) > 16:
@@ -191,9 +222,11 @@ def _validate_options(options: Mapping[str, object]) -> dict[str, Any]:
     if any(type(value) is not dict for value in custom_options.values()):
         raise PresidioConfigurationError("invalid recognizer options")
     return {
-        "entities": tuple(entities),
+        "entities": tuple(selected_entities),
+        "presets": tuple(presets),
         "language": language,
         "score_threshold": _parse_threshold(options.get("score-threshold", "0.35")),
+        "context_mode": context_mode,
         "ner_mode": ner_mode,
         "model_name": model_name,
         "model_sha256": model_sha256,
@@ -381,6 +414,19 @@ def _build_analyzer(config: dict[str, Any]):
         custom_origins[getattr(recognizer, "id", None)] = module_name
     if not set(config["entities"]) <= set(registry.get_supported_entities()):
         raise PresidioConfigurationError("configured entities are not supported by the selected recognizers")
+    # Keep only recognizers that can contribute to this explicit profile. The
+    # AnalyzerEngine still receives the same entity allowlist at call time.
+    selected_entities = set(config["entities"])
+    # Filter instances directly: Presidio's remove_recognizer removes every
+    # recognizer with a matching name/language, which can also remove a firm
+    # recognizer when it shares a name with an unselected built-in.
+    registry.recognizers = [
+        recognizer
+        for recognizer in registry.recognizers
+        if selected_entities.intersection(getattr(recognizer, "supported_entities", ()))
+    ]
+    if not selected_entities <= set(registry.get_supported_entities(languages=[language])):
+        raise PresidioConfigurationError("configured entities are not supported by the selected recognizers")
     for recognizer in registry.get_recognizers(language=language, entities=list(config["entities"])):
         identifier = getattr(recognizer, "id", None)
         module_name = custom_origins.get(identifier)
@@ -393,7 +439,21 @@ def _build_analyzer(config: dict[str, Any]):
         supported_languages=[language],
         default_score_threshold=0.0,
     )
-    return analyzer, len(custom), assigned_ids
+    context_terms = {}
+    for recognizer in registry.get_recognizers(language=language, entities=list(config["entities"])):
+        instance_id = getattr(recognizer, "id", None)
+        terms = getattr(recognizer, "context", ())
+        if type(terms) in (list, tuple, set, frozenset):
+            normalized = tuple(
+                tokens
+                for term in terms
+                if type(term) is str and len(term) <= 80
+                for tokens in (tuple(word.casefold() for word in _WORD.findall(term)),)
+                if tokens
+            )
+            if normalized:
+                context_terms[instance_id] = normalized
+    return analyzer, len(custom), assigned_ids, context_terms
 
 
 class PresidioDetector:
@@ -410,7 +470,8 @@ class PresidioDetector:
         self._model_id, expected_model_version, expected_model_sha256 = _model_identity(
             self._config["model_name"], self._config["ner_mode"], self._config["model_sha256"]
         )
-        self._analyzer, self._custom_recognizer_count, self._recognizer_ids = _build_analyzer(self._config)
+        (self._analyzer, self._custom_recognizer_count, self._recognizer_ids,
+         self._recognizer_context_terms) = _build_analyzer(self._config)
         if expected_model_sha256 is not None:
             actual_model_version, actual_model_sha256 = _hash_model_distribution(self._config["model_name"])
             if (actual_model_version, actual_model_sha256) != (expected_model_version, expected_model_sha256):
@@ -425,7 +486,9 @@ class PresidioDetector:
             "expected_model_sha256": self._config["model_sha256"],
             "language": self._config["language"],
             "entities": sorted(self._config["entities"]),
+            "presets": sorted(self._config["presets"]),
             "score_threshold": str(self._config["score_threshold"]),
+            "context_mode": self._config["context_mode"],
             "block_entities": sorted(self._config["block_entities"]),
             "recognizer_modules": list(self._config["recognizer_modules"]),
             "recognizer_options": self._config["recognizer_options"],
@@ -435,7 +498,6 @@ class PresidioDetector:
         ).hexdigest()
 
     def detect(self, text: str, context) -> Iterable[NewFinding]:
-        del context
         if self._closed or self._analyzer is None:
             raise RuntimeError("Presidio session is closed")
         self._calls += 1
@@ -443,8 +505,14 @@ class PresidioDetector:
             text=text,
             entities=list(self._config["entities"]),
             language=self._config["language"],
-            score_threshold=self._config["score_threshold"],
+            # Retain Presidio's internal explanation long enough to recognize
+            # its own context enhancement before applying the local fallback.
+            return_decision_process=True,
+            # Keep raw candidates long enough to apply only local, per-span
+            # context evidence before enforcing the configured score threshold.
+            score_threshold=0.0,
         )
+        # Core findings count LF characters only when validating line bounds.
         newline_positions = [index for index, char in enumerate(text) if char == "\n"]
         deduplicated = {}
         for result in results:
@@ -467,6 +535,23 @@ class PresidioDetector:
             metadata = getattr(result, "recognition_metadata", None)
             instance_id = metadata.get("recognizer_identifier") if type(metadata) is dict else None
             recognizer_id = self._recognizer_ids.get(instance_id, "presidio-unattributed")
+            # Presidio 2.2.365 marks recognizer-level boosts in metadata and
+            # its analyzer enhancer records the supportive word in the
+            # explanation. Do not add this adapter's local fallback twice.
+            already_context_enhanced = (
+                type(metadata) is dict
+                and metadata.get(_CONTEXT_ENHANCED_METADATA_KEY) is True
+            )
+            explanation = getattr(result, "analysis_explanation", None)
+            already_context_enhanced = already_context_enhanced or bool(
+                getattr(explanation, "supportive_context_word", "")
+            )
+            if (self._config["context_mode"] == "local" and not already_context_enhanced
+                    and self._has_local_context(text, start, end,
+                                                self._recognizer_context_terms.get(instance_id, ()))):
+                score = min(1.0, score + _CONTEXT_SCORE_BONUS)
+            if score < self._config["score_threshold"]:
+                continue
             if previous is None or score > previous[0] or score == previous[0] and recognizer_id < previous[1]:
                 deduplicated[key] = (score, recognizer_id)
         for (entity_type, start, end), score in sorted(deduplicated.items(), key=lambda item: (item[0][1], item[0][2], item[0][0])):
@@ -497,7 +582,9 @@ class PresidioDetector:
             "analyzer_version": ANALYZER_VERSION,
             "language": self._config["language"],
             "entities": sorted(self._config["entities"]),
+            "presets": sorted(self._config["presets"]),
             "ner_enabled": self._config["ner_mode"] == "required",
+            "context_mode": self._config["context_mode"],
             "model_id": self._model_id,
             "custom_recognizer_count": self._custom_recognizer_count,
         }
@@ -508,6 +595,41 @@ class PresidioDetector:
     def close(self) -> None:
         self._closed = True
         self._analyzer = None
+
+    @staticmethod
+    def _has_local_context(text: str, start: int, end: int, terms) -> bool:
+        """Match recognizer context terms in a bounded window on this line only."""
+        if not terms:
+            return False
+        left_limit = max(0, start - _CONTEXT_WINDOW_CHARS)
+        left_break = max(text.rfind("\n", left_limit, start),
+                         text.rfind("\r", left_limit, start))
+        left_start = left_break + 1 if left_break >= 0 else left_limit
+        right_limit = min(len(text), end + _CONTEXT_WINDOW_CHARS)
+        right_breaks = [position for position in (
+            text.find("\n", end, right_limit), text.find("\r", end, right_limit)
+        ) if position >= 0]
+        right_end = min(right_breaks) if right_breaks else right_limit
+        left_tokens = [word.casefold() for word in _WORD.findall(text[left_start:start])]
+        if (left_start == left_limit and left_start > 0
+                and _WORD.fullmatch(text[left_start - 1])
+                and _WORD.fullmatch(text[left_start])):
+            # The bounded slice begins inside a token; discard its fragment.
+            left_tokens = left_tokens[1:]
+        right_tokens = [word.casefold() for word in _WORD.findall(text[end:right_end])]
+        if (right_end == right_limit and right_end < len(text)
+                and _WORD.fullmatch(text[right_end])
+                and _WORD.fullmatch(text[right_end - 1])):
+            # The bounded slice ends inside a token; discard its fragment.
+            right_tokens = right_tokens[:-1]
+        for term_tokens in terms:
+            width = len(term_tokens)
+            if width:
+                for local_tokens in (left_tokens, right_tokens):
+                    if any(tuple(local_tokens[index:index + width]) == term_tokens
+                           for index in range(len(local_tokens) - width + 1)):
+                        return True
+        return False
 
 
 def create_plugin(options: Mapping[str, object]) -> PresidioDetector:

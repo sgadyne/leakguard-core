@@ -60,7 +60,7 @@ class StoreLifecycleTests(unittest.TestCase):
     def make_result(self, *, findings=True, complete=True, policy='policy', runtime='runtime'):
         from datetime import datetime, timezone
         from leakguard_core import models as m
-        source = m.SourceRef(m.SourceKind.FILESYSTEM, '/synthetic/candidate.txt')
+        source = m.SourceRef(m.SourceKind.FILESYSTEM, str(Path('/synthetic/candidate.txt').absolute()))
         when = datetime.now(timezone.utc)
         finding = m.FindingRecord('1' * 64, source, 'text', 1, 1, 'literal-password', 'gitleaks', m.DetectorSeverity.BLOCK, m.FindingSeverity.BLOCK, m.FindingClassification.CREDENTIAL_CANDIDATE)
         return m.ScanResult(source, m.ContentIdentity('sha256', '0' * 64, 1), m.RuntimeIdentity(policy, runtime, 'context', True), m.ScanOutcome.SCANNED, m.CoverageState.COMPLETE if complete else m.CoverageState.INCOMPLETE, (finding,) if findings else (), (), when, when, when if complete else None)
@@ -738,7 +738,13 @@ class IdentityBudgetServiceTests(unittest.TestCase):
 
 class ReconciliationFenceTests(unittest.TestCase):
     def test_reconciliation_fences_older_publish_but_preserves_newer_reservation(self):
+        from leakguard_core import scan_store
         from leakguard_core.scan_store import MemoryScanStore, SQLiteScanStore
+        # Give every operation the same coarse wall clock tick. Ordering must
+        # come from the store's fence, on all OSes and across SQLite reopening.
+        tick = scan_store._wall_tick() + 1_000_000
+        clock = patch.object(scan_store, '_wall_tick', return_value=tick)
+        clock.start(); self.addCleanup(clock.stop)
         for store_type in (MemoryScanStore, SQLiteScanStore):
             for newer in (False, True):
                 with self.subTest(store=store_type.__name__, newer=newer), tempfile.TemporaryDirectory(prefix='leakguard-reconcile-fence-') as folder:
@@ -749,6 +755,9 @@ class ReconciliationFenceTests(unittest.TestCase):
                         if not newer:
                             generation = store.reserve(result.source)
                         lease = store.acquire_cycle('synthetic', None, lease_seconds=60)
+                        if store_type is SQLiteScanStore:
+                            store.close()
+                            store = SQLiteScanStore(folder)
                         if newer:
                             generation = store.reserve(result.source)
                         store.reconcile_cycle(lease, '/synthetic')
@@ -767,7 +776,7 @@ class MaterialEventTests(unittest.TestCase):
             for kind in ('deleted', 'renamed'):
                 with self.subTest(store=store_type.__name__, kind=kind), tempfile.TemporaryDirectory(prefix='leakguard-material-event-') as folder:
                     store = store_type(folder) if store_type is SQLiteScanStore else store_type()
-                    path = '/synthetic/candidate.txt'
+                    path = str(Path('/synthetic/candidate.txt').absolute())
                     try:
                         if store_type is MemoryScanStore:
                             store.locations[path] = {'present': True}
@@ -776,7 +785,7 @@ class MaterialEventTests(unittest.TestCase):
                             store.conn.execute('INSERT INTO locations(host,path,present) VALUES(?,?,1)', (catalog.HOST, path))
                             store.conn.execute('INSERT INTO material_locations(host,name,path,present) VALUES(?,?,?,1)', (catalog.HOST, 'private-registration', path))
                             store.conn.commit()
-                        store.record_event(path if kind == 'deleted' else '/synthetic/new.txt', kind, old_path=path if kind == 'renamed' else None)
+                        store.record_event(path if kind == 'deleted' else str(Path('/synthetic/new.txt').absolute()), kind, old_path=path if kind == 'renamed' else None)
                         if store_type is MemoryScanStore:
                             self.assertIsNone(store.locations[path]['present'])
                             self.assertIsNone(store.material_locations[('private-registration', path)]['present'])
@@ -956,14 +965,15 @@ class FindingAdmissionTests(unittest.TestCase):
         service = engine.ScanService({'gitleaks_executable': str(engine.EXE)})
         original = service._finding
         calls = []
+        clock = [time.monotonic()]
         def classify(*args, **kwargs):
             calls.append(1)
             finding = original(*args, **kwargs)
-            time.sleep(0.03)
+            clock[0] += 31
             return finding
         try:
-            with patch.object(backends, 'detect', return_value=tuple(backends.BackendFinding('literal-password', 1, 1) for _ in range(10000))), patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(service, '_finding', side_effect=classify):
-                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(0.02, 1))
+            with patch.object(backends, 'detect', return_value=tuple(backends.BackendFinding('literal-password', 1, 1) for _ in range(10000))), patch.object(scan_policy, 'runtime_identity', return_value=(service._runtime, True)), patch.object(service, '_finding', side_effect=classify), patch.object(engine.time, 'monotonic', side_effect=lambda: clock[0]):
+                report = service.scan((m.BytesInput(b'synthetic', 'candidate.txt'),), policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(30, 1))
             self.assertEqual(len(calls), 1)
             self.assertEqual(report.counts.findings, 1)
             self.assertEqual(report.decision.verdict, m.DecisionVerdict.INCOMPLETE)

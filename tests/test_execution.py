@@ -53,9 +53,9 @@ class ExecutionTests(unittest.TestCase):
             service = engine.ScanService({'scan_workers': 2}, store=store)
             report = service.scan(inputs, policy=m.ScanPolicy.inventory(), limits=m.ScanLimits(5, 4))
             service.close()
-        self.assertEqual(peak, 2)
+        self.assertEqual(peak, 2, report.to_json())
         self.assertEqual([r.source.path for r in report.results], [f'{i}.txt' for i in range(4)])
-        self.assertTrue(report.coverage.required_complete)
+        self.assertTrue(report.coverage.required_complete, report.to_json())
         self.assertTrue(calls)
         self.assertEqual(set(calls), {owner})
         with patch.object(backends, 'detect', return_value=(backends.BackendFinding('literal-password', 1, 1),)):

@@ -4,6 +4,6 @@
   "api_version": 2,
   "module": "presidio_detector.plugin",
   "component": "presidio-detector",
-  "version": "0.1.0a1",
+  "version": "0.1.0a2",
   "conformance": "presidio_detector/cases.json"
 }

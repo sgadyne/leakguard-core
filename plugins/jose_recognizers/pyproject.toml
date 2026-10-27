@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leakguard-jose-recognizers"
+version = "0.1.0a2"
+description = "Bounded structural recognizers for compact JOSE values"
+requires-python = ">=3.11,<3.12"
+dependencies = ["presidio-analyzer==2.2.365"]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2", "cryptography==50.0.2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+jose_recognizers = ["py.typed"]

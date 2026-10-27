@@ -280,7 +280,7 @@ def find_bundle_root(path: Path) -> Path:
 
 def _bundle_child(bundle: Path, relative: Path) -> Path:
     root = bundle.resolve()
-    path = bundle / relative
+    path = root / relative
     current = path
     while current != root and root in current.parents:
         if current.is_symlink():
@@ -288,7 +288,7 @@ def _bundle_child(bundle: Path, relative: Path) -> Path:
         current = current.parent
     if current != root:
         raise DeployError("release artifact path escapes the bundle directory")
-    return path
+    return bundle / relative
 
 
 def validate_wheelhouse(bundle: Path, manifest: dict[str, Any]) -> list[Path]:

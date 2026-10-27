@@ -19,6 +19,7 @@ import time
 from .models import (CoverageSummary, CoverageState, DecisionVerdict, ErrorCode,
                      Omission, OmissionSelector, OmissionSelectorKind, PolicyDecision,
                      PolicyReason, ScanPolicy)
+from .sources import AcquisitionError, _path_stat
 
 
 class RuntimeIdentityError(RuntimeError):
@@ -126,7 +127,7 @@ def _file_identity(path):
             source = original.resolve(strict=True)
         except (OSError, ValueError, RuntimeError):
             return 'unavailable'
-        expected = source.stat(follow_symlinks=False)
+        expected = _path_stat(source)
         maximum = 512 * 1024 * 1024
         if not stat.S_ISREG(expected.st_mode) or expected.st_size > maximum:
             return 'unavailable'
@@ -150,10 +151,10 @@ def _file_identity(path):
         def signature(value):
             return value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns
         if any(signature(value) != signature(before)
-               for value in (expected, after, source.stat(follow_symlinks=False), original.stat())):
+               for value in (expected, after, _path_stat(source), _path_stat(original, follow_symlinks=True))):
             return 'unavailable'
         return digest.hexdigest()
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, AcquisitionError):
         return 'unavailable'
 
 

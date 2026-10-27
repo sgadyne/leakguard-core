@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "leakguard-core"
-version = "0.2.1a1"
+version = "0.2.1a2"
 description = "Offline secret scanning, Git guards, and auditable file inventory with explicit plugins"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,7 @@ leakguard = "leakguard_core.cli:main"
 leakguard-manage = "leakguard_core.manage:main"
 leakguard-install-hooks = "leakguard_core.hooks:main"
 leakguard-extensions = "leakguard_core.extension_cli:main"
+leakguard-recognizer-profile = "leakguard_core.recognizer_profiles:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

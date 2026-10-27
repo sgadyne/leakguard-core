@@ -72,8 +72,8 @@ class DirectoryProgressTests(unittest.TestCase):
             original = sources.scoped_scandir
             reverse = False
             @contextmanager
-            def reordered(path, boundary=None):
-                with original(path, boundary) as entries:
+            def reordered(path, boundary=None, **kwargs):
+                with original(path, boundary, **kwargs) as entries:
                     yield iter(sorted(entries, key=lambda entry: entry.name, reverse=reverse))
             limits = m.ScanLimits(5, 10, max_directory_entries=2)
             with patch.object(sources, 'scoped_scandir', reordered):

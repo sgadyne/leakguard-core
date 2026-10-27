@@ -999,7 +999,8 @@ class PublicApiTests(unittest.TestCase):
 
     def test_repository_argument_preserves_git_path_bytes_except_terminating_lf(self):
         with tempfile.TemporaryDirectory(prefix="leakguard-test-repo-path-") as directory:
-            repo = Path(directory) / "repo-é with space \n"
+            # Windows disallows newline and trailing whitespace in file names.
+            repo = Path(directory) / ("repo-é with space suffix" if os.name == 'nt' else "repo-é with space \n")
             repo.mkdir()
             subprocess.run(
                 ["git", "init", "-q", str(repo)], capture_output=True, check=True,
@@ -1007,7 +1008,7 @@ class PublicApiTests(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(repo)
-                self.assertEqual(manage._repository_argument(None), str(repo.resolve()))
+                self.assertEqual(Path(manage._repository_argument(None)), repo.resolve())
             finally:
                 os.chdir(previous)
 

@@ -26,7 +26,7 @@ reviewed option-specific case JSON files; these sidecars are delivered
 separately from the wheelhouse, which contains only hash-pinned wheels.
 
 ```sh
-RELEASE=/absolute/path/from-install-receipt/releases/0.2.0-alpha.1
+RELEASE=/absolute/path/from-install-receipt/releases/REVISION
 RELEASE_WHEELHOUSE="$RELEASE/wheelhouse"
 PY="$RELEASE/venv/bin/python"
 EXT="$RELEASE/venv/bin/leakguard-extensions"
