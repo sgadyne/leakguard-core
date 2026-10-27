@@ -42,18 +42,17 @@ def _basic(token: str) -> bool:
         return False
     if not value.isprintable() or ":" not in value:
         return False
-    user, password = value.split(":", 1)
-    if not password.strip():
+    _, password = value.split(":", 1)
+    if not password:
         return False
-    for component in (user, password):
-        if _REFERENCE.fullmatch(component):
-            return False
-        # Quoted pure template placeholders are references; a quoted $NAME
-        # or an embedded marker is a literal, not an expression to expand.
-        if (len(component) >= 2 and component[0] == component[-1]
-                and component[0] in "\"'"
-                and re.fullmatch(r"\$\{[^}]*\}|\{\{[^}]*\}\}|<[^<>]+>", component[1:-1])):
-            return False
+    if _REFERENCE.fullmatch(password):
+        return False
+    # Quoted pure placeholders are references; quoted $NAME and embedded
+    # markers are literals, not expressions to expand.
+    if (len(password) >= 2 and password[0] == password[-1]
+            and password[0] in "\"'"
+            and re.fullmatch(r"\$\{[^}]*\}|\{\{[^}]*\}\}|<[^<>]+>", password[1:-1])):
+        return False
     return True
 
 
@@ -61,8 +60,8 @@ def scan_http(text: str) -> tuple[CredentialSpan, ...]:
     """Find literal Basic/Bearer credentials in complete header lines.
 
     Header names and schemes are ASCII case-insensitive; whitespace is only
-    HTTP SP/HTAB. Bare environment/template references and malformed or
-    oversized inputs raise ValueError. No continuation/folding is performed.
+    HTTP SP/HTAB. Bare environment/template references and malformed headers
+    are excluded; oversized inputs raise ValueError. No folding is performed.
     """
     found: list[CredentialSpan] = []
     offset = 0

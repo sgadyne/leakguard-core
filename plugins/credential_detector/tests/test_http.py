@@ -54,9 +54,9 @@ def test_reject_incomplete_malformed_and_non_headers(line):
 
 
 @pytest.mark.parametrize("value", [
-    "no-colon", "user:", "user:  ",
+    "no-colon", "user:",
     "user:pass\nInjected: value", "user:pass\rnext", "user:pass\x00",
-    "user:${PASSWORD}", "${USER}:secret", "user:$PASSWORD", "user:$(secret)",
+    "user:${PASSWORD}", "user:$PASSWORD", "user:$(secret)",
     "user:%PASSWORD%", "user:{{password}}", "user:<password>",
     'user:"${PASSWORD}"',
 ])
@@ -64,7 +64,7 @@ def test_basic_requires_literal_printable_user_password(value):
     assert scan_http("Authorization: Basic " + basic(value)) == ()
 
 
-@pytest.mark.parametrize("value", ["u:foo${BAR}baz", 'u:"$PASSWORD"', "u:literal$NAMEsuffix"])
+@pytest.mark.parametrize("value", ["u:foo${BAR}baz", 'u:"$PASSWORD"', "u:literal$NAMEsuffix", "${USER}:secret", "u: "])
 def test_basic_embedded_or_quoted_dollar_is_literal(value):
     token = basic(value)
     assert len(scan_http("Authorization: Basic " + token)) == 1
