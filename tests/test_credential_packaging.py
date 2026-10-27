@@ -18,7 +18,7 @@ class WheelResourcesTest(unittest.TestCase):
             source = root / 'source'
             (source / 'resources').mkdir(parents=True)
             (source / '__init__.py').write_text('', encoding='utf-8')
-            (source / 'resources' / 'common.json').write_text('{"schema_version":1}\n', encoding='utf-8')
+            (source / 'resources' / 'common.json').write_bytes(b'{"schema_version":1}\n')
             wheel = root / 'test.whl'
             def make(files):
                 with zipfile.ZipFile(wheel, 'w') as z:
