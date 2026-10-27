@@ -141,7 +141,7 @@ def main():
                               'PLUGIN_API.md', 'README.md', 'RELEASING.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES.md',
                               'VALIDATION.md', 'pyproject.toml'}
         excluded = ('docs/design/', 'docs/handoff/', 'docs/validation/', 'deploy/desktop/')
-        excluded_files = {'tools/recognizer_eval/REPORT.md', 'tools/recognizer_eval/HOLDOUT_ARTIFACTS.json', 'docs/recognizer-results.json', 'packages/leakguard_broker/SECURITY_REVIEW.md', 'docs/recognizer-evaluation.md'}
+        excluded_files = {'tools/recognizer_eval/REPORT.md', 'tools/recognizer_eval/HOLDOUT_ARTIFACTS.json', 'tools/recognizer_eval/README.md', 'tools/verify_prior_holdout.py', 'docs/recognizer-results.json', 'packages/leakguard_broker/SECURITY_REVIEW.md', 'docs/recognizer-evaluation.md'}
         source_members = []
         with tarfile.open(fileobj=io.BytesIO(data)) as origin, tarfile.open(source_archive, 'w:gz') as dest:
             for member in origin.getmembers():
