@@ -1,0 +1,1 @@
+"""Explicit bundled alias resources."""

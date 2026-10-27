@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leakguard-credential-detector"
+version = "0.1.0a1"
+description = "Bounded, value-free contextual credential detector for LeakGuard"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["leakguard-core>=0.2.1a1,<0.3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+credential_detector = ["*.json", "resources/*.json"]
