@@ -13,10 +13,10 @@ import time
 from typing import Any
 
 _LIMIT = 16 * 1024
-_OPS = {"bootstrap", "status", "lock-credentials", "shutdown"}
+_OPS = {"bootstrap", "status", "lock-credentials", "reconcile-after-wake", "shutdown"}
 _SAFE_ERRORS = {"profile-in-use", "worker-still-running", "requests-still-running",
                 "vault-busy", "vault-io-failed", "state-checkpoint-failed",
-                "state-capacity-limit", "backend-stopping"}
+                "state-capacity-limit", "backend-stopping", "observation-store-locked"}
 
 
 def _code(error: BaseException) -> str:
@@ -48,7 +48,18 @@ def _status(backend) -> dict[str, Any]:
     host = value.get("host", {})
     background = ("available" if observations.get("unattended_available") and not observations.get("startup_error")
                   else "unlock-required" if observations.get("created") else "unavailable")
+    snapshot = host.get("alert_snapshot")
+    if type(snapshot) is dict:
+        revision = snapshot.get("finding_revision")
+        if type(revision) is not int or revision < 0 or revision > 2**53 - 1:
+            revision = None
+        snapshot = {"finding_revision": revision, **{key: snapshot.get(key) is True for key in
+                    ("failed", "paused", "offline", "stale", "stale_warning", "capacity_warning", "pending")},
+                    "last_completed_at": None}
+    else:
+        snapshot = None
     return {
+        "alerts": snapshot,
         "observations": {key: bool(observations.get(key)) for key in ("created", "unlocked")},
         "vault": {key: bool(value["vault"].get(key)) for key in ("created", "unlocked")},
         "scheduler": host.get("scheduler", "stopped"),
@@ -124,6 +135,9 @@ def run(backend, *, input_stream, output_stream) -> int:
                 result = {"token": app.fresh_bootstrap()}
             elif operation == "status":
                 result = _status(backend)
+            elif operation == "reconcile-after-wake":
+                backend.reconcile_after_wake()
+                result = {"reconciled": True}
             elif operation == "lock-credentials":
                 backend.credential_lock()
                 if backend.credential_status().get("unlocked"):

@@ -138,6 +138,9 @@ def make_bundle(args: argparse.Namespace) -> Path:
     wheel_paths = sorted(wheelhouse.glob("*.whl"), key=lambda path: path.name.lower())
     if not wheel_paths:
         raise ValueError("wheelhouse contains no wheel artifacts")
+    default_config = args.default_config.resolve(strict=True)
+    if not default_config.is_file() or args.default_config.is_symlink():
+        raise ValueError("default config must be a regular file")
     support_files, support_sources = support_records()
 
     wheels: list[dict[str, str]] = []
@@ -216,7 +219,8 @@ def make_bundle(args: argparse.Namespace) -> Path:
     uncompressed_bytes += sum(path.stat().st_size for path in support_sources)
     uncompressed_bytes += sum(Path(item["source_path"]).stat().st_size for item in backend_artifacts)
     uncompressed_bytes += sum((ROOT / "deploy" / filename).stat().st_size
-                              for filename in ("installer.py", "install.sh", "install.ps1", "default-config.json"))
+                              for filename in ("installer.py", "install.sh", "install.ps1"))
+    uncompressed_bytes += default_config.stat().st_size
     uncompressed_bytes += release_spec_path.stat().st_size
     if any(path.stat().st_size > 256 * 1024 * 1024 for path in wheel_paths):
         raise ValueError("a wheel exceeds the 256 MiB archive member limit")
@@ -236,8 +240,9 @@ def make_bundle(args: argparse.Namespace) -> Path:
             (stage / "backends").mkdir(mode=0o700)
         for record in wheels:
             shutil.copyfile(wheelhouse / record["filename"], stage / "wheelhouse" / record["filename"])
-        for filename in ("installer.py", "install.sh", "install.ps1", "default-config.json"):
+        for filename in ("installer.py", "install.sh", "install.ps1"):
             shutil.copyfile(ROOT / "deploy" / filename, stage / "deploy" / filename)
+        shutil.copyfile(default_config, stage / "deploy" / "default-config.json")
         shutil.copyfile(release_spec_path, stage / "deploy" / "release-manifest.json")
         for record, source in zip(support_files, support_sources):
             destination = stage / Path(record["path"])
@@ -259,7 +264,7 @@ def make_bundle(args: argparse.Namespace) -> Path:
             "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "python_requires": release_spec.get("python_requires", ">=3.11"),
             "wheelhouse": release_spec.get("wheelhouse", "wheelhouse"),
-            "default_config_sha256": sha256_file(ROOT / "deploy" / "default-config.json"),
+            "default_config_sha256": sha256_file(default_config),
             "pinned_distributions": pins,
             "packages": wheels,
             "support_files": support_files,
@@ -288,6 +293,7 @@ def main() -> int:
     parser.add_argument("--wheelhouse", type=Path, required=True, help="directory containing the exact release wheels")
     parser.add_argument("--output", type=Path, required=True, help="new .zip file to create")
     parser.add_argument("--release-manifest", type=Path, default=ROOT / "deploy" / "release-manifest.json")
+    parser.add_argument("--default-config", type=Path, default=ROOT / "deploy" / "default-config.json")
     parser.add_argument("--version", help="release version label (defaults to the checked-in manifest)")
     parser.add_argument("--source-commit", required=True, help="integrated source commit ID")
     parser.add_argument("--target-platform", required=True, help="target OS-architecture label, e.g. linux-x86_64 or macos-arm64")

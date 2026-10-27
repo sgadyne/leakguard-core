@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { exactOrigin, failure } from './policy.ts';
 
-type Operation='bootstrap'|'status'|'lock-credentials'|'shutdown';
+type Operation='bootstrap'|'status'|'lock-credentials'|'reconcile-after-wake'|'shutdown';
 type Ready={type:'ready'; protocol:1; origin:string; pid:number; apiVersion:1};
 type Pending={resolve:(value:any)=>void; reject:(error:Error)=>void; timer:NodeJS.Timeout};
 const LIMIT=16*1024;

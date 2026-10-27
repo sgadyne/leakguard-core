@@ -66,10 +66,16 @@ checks that `apps/buddy-ui/dist` is byte-identical to the three generated static
 files entering the new Buddy 0.1.0a2 wheel.
 
 ```sh
+# Native macOS arm64 build Python 3.11 with setuptools 80.9.0 and wheel 0.45.1.
+# Build the UI first, copy its three generated assets to apps/buddy static,
+# and commit the integrated sources and assets before either command.
+python3 deploy/desktop/build_backend.py \
+  --qualified-kit /prepared/qualified-macos-cli-kit \
+  --output /new/backend-build
 python3 deploy/desktop/build.py \
   --target macos-arm64 \
-  --runtime-input /prepared/cpython-3.13.13-macos-aarch64-none \
-  --backend-input /prepared/macos-arm64/LeakGuard \
+  --runtime-input /prepared/cpython-3.11.16-macos-aarch64-none \
+  --backend-input /new/backend-build/extracted/LeakGuard \
   --provenance /prepared/runtime-downloads.json \
   --output /new/empty/output
 ```
@@ -82,9 +88,11 @@ Electron 45.0.0. Build-time npm downloads are distinct from offline first launch
 
 The output includes `artifact-receipt.json`, the resource
 `desktop-manifest.json`, input provenance and (for a packaged artifact)
-`artifact-files.json` and the application ZIP. The original alpha wheelhouse and
-historical manifests are read-only inputs. All wheels except Buddy retain their
-original bytes. The new Buddy wheel has newly generated metadata and RECORD.
+`artifact-files.json` and the application ZIP. The qualified scanner kit and historical manifests are read-only inputs. The
+integrated backend builder rebuilds every local product wheel from the exact
+commit, retains the qualified scanner dependency versions, and records the
+complete wheel closure. The backend and desktop manifests must name the same
+source commit.
 Runtime archive URLs may be recorded without upstream archive hashes where
 those hashes were not independently obtained; tree hashes identify the actual
 prepared input bytes.
@@ -145,3 +153,23 @@ Python/uv, test restart with encrypted state retained, exercise hide/reopen/quit
 and confirm owned-process exit. Record OS-lock receipt separately from simulated
 handler tests. The coordinator does not lock the user's OS session without
 coordinating the exact action.
+
+The scanner kit is a dependency input, not the desktop product. The standalone
+Python runtime must be macOS arm64 3.11.16 to match the qualified scanner's
+Python 3.11 closure. Record the runtime archive provenance and hash. First launch
+installs the complete offline wheelhouse; built-in reviewed plugin wheels are
+not a claim that every optional profile is enabled. A backup is published to a
+new filename without overwriting an earlier recovery copy. See
+[exposure response](beta-exposure-response.md) for the operator workflow.
+
+## Update and rollback limitation
+
+The current shell refuses a different runtime identity for an existing desktop
+profile. Same-profile upgrade and old/new/old rollback are not qualified. For a
+synthetic evaluation of a new candidate, keep the old application and profile
+untouched, use a separate new profile, and restore a verified encrypted backup
+into it. The operator must separately configure selected sources; a credential
+backup does not migrate scan observations or configuration. Stop each owned app
+cleanly before selecting its profile. Returning to the old app means using its
+unchanged old profile, not pointing it at a new runtime. This procedure and
+separate-profile restore require native validation before any real onboarding.

@@ -18,3 +18,9 @@ test('encrypted backup accepts one fixed filename and canonical bounded base64',
   assert.equal(inside('/profile','/profile2/python'),false);
   assert.equal(inside('/profile','/profile/runtime/python'),true);
 });
+
+test('maximum valid encrypted backup is accepted and larger is rejected',()=>{
+  const limit=16*1024*1024+8192+128;
+  assert.equal(backupBytes({filename:'leakguard-vault.lgbak',base64:Buffer.alloc(limit).toString('base64')}).length,limit);
+  assert.throws(()=>backupBytes({filename:'leakguard-vault.lgbak',base64:Buffer.alloc(limit+1).toString('base64')}));
+});

@@ -23,14 +23,15 @@ export function record(input:unknown, allowed:string[]): Record<string,unknown> 
       Object.keys(input).some(key=>!allowed.includes(key))) throw failure('argument-invalid');
   return input as Record<string,unknown>;
 }
+const BACKUP_LIMIT = 16*1024*1024 + 8192 + 128;
 export function backupBytes(input:unknown): Buffer {
   const value=record(input,['filename','base64']);
   if (value.filename!=='leakguard-vault.lgbak' || typeof value.base64!=='string' ||
-      !value.base64 || value.base64.length>Math.ceil(16*1024*1024/3)*4 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.base64)) {
+      !value.base64 || value.base64.length>Math.ceil(BACKUP_LIMIT/3)*4 ||
+      value.base64.length%4!==0 || /[^A-Za-z0-9+/=]/.test(value.base64)) {
     throw failure('backup-invalid');
   }
   const bytes=Buffer.from(value.base64,'base64');
-  if(bytes.length>16*1024*1024 || bytes.toString('base64')!==value.base64) throw failure('backup-invalid');
+  if(bytes.length>BACKUP_LIMIT || bytes.toString('base64')!==value.base64) throw failure('backup-invalid');
   return bytes;
 }

@@ -6,7 +6,9 @@ export type DesktopEvent =
   | {type:'clear-sensitive'; reason:ClearReason}
   | {type:'vault-locked'}
   | {type:'backend-state'; state:'ready'|'unavailable'|'stopping'; code?:string};
+import type { AlertSnapshot } from './alerts.ts';
 export type BackendStatus = {
+  alerts:AlertSnapshot|null;
   observations:{created:boolean; unlocked:boolean}; vault:{created:boolean; unlocked:boolean};
   scheduler:string; pending_jobs:number; background:string; error_codes:string[];
 };

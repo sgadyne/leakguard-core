@@ -1,8 +1,10 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, powerMonitor, session, Tray, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, session, Tray, type IpcMainInvokeEvent } from 'electron';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { ClipboardOwner } from './clipboard.ts';
+import { publishBackup } from './backup.ts';
+import { AlertTracker, type AlertKind } from './alerts.ts';
 import { Control } from './control.ts';
 import { CHANNELS, type BackendStatus, type ClearReason, type DesktopEvent, type Page, type Preferences } from './contracts.ts';
 import { backupBytes, failure, pageAllowed, record } from './policy.ts';
@@ -25,6 +27,15 @@ let startup:Promise<void>|undefined;
 let recovering=false;
 let lockInFlight:Promise<void>|undefined;
 const clipboardOwner=new ClipboardOwner({readText:()=>clipboard.readText(),writeText:text=>clipboard.writeText(text),clear:()=>clipboard.clear()});
+const alertTracker=new AlertTracker();
+const alertText:Record<AlertKind,string>={finding:'New exposure findings need review.',failed:'A scan failed. Open sources for details.',paused:'Monitoring is paused. Open sources for details.',offline:'A selected source is unavailable.',stale:'A complete scan is overdue or approaching the freshness target.',locked:'Scan storage locked; monitoring needs attention.',scheduler:'The scan scheduler is stopped.',capacity:'Scan storage is approaching capacity.',backend:'The local monitoring backend is unavailable.'};
+function notifyAlerts(kinds:AlertKind[]){
+  if(!Notification.isSupported())return;
+  for(const kind of kinds){
+    const notice=new Notification({title:'Password Buddy',body:alertText[kind],silent:false});
+    notice.on('click',()=>show(kind==='finding'?'findings':'sources'));notice.show();
+  }
+}
 let statusTimer:NodeJS.Timeout|undefined;
 let idleTimer:NodeJS.Timeout|undefined;
 let idleLocked=false;
@@ -85,6 +96,7 @@ async function refreshStatus(){
     if(!result || typeof result.observations?.unlocked!=='boolean' || typeof result.vault?.unlocked!=='boolean' ||
        !Number.isSafeInteger(result.pending_jobs)||result.pending_jobs<0)throw failure('backend-protocol-invalid');
     const wasUnlocked=status?.vault.unlocked;
+    notifyAlerts(alertTracker.update(result.observations.unlocked,result.scheduler,result.alerts));
     status=result;stage='Ready';updateMenus();
     if(wasUnlocked && !result.vault.unlocked){clearSensitive('disconnect');emit({type:'vault-locked'});}
   }catch(error){
@@ -156,14 +168,11 @@ function registerIPC(){
   handle(CHANNELS.backup,async(...args:unknown[])=>{
     if(args.length!==1)throw failure('argument-invalid');
     const bytes=backupBytes(args[0]);
-    const result=await dialog.showSaveDialog(window!,{title:'Save encrypted credential backup',defaultPath:'leakguard-vault.lgbak',
+    const result=await dialog.showSaveDialog(window!,{title:'Save encrypted credential backup (choose a new file)',defaultPath:'leakguard-vault.lgbak',
       filters:[{name:'Encrypted credential backup',extensions:['lgbak']}],properties:['showOverwriteConfirmation','createDirectory']});
     if(result.canceled||!result.filePath)return {canceled:true,saved:false};
-    const temporary=path.join(path.dirname(result.filePath),'.buddy-backup-'+randomUUID()+'.tmp');
-    try{
-      await fs.writeFile(temporary,bytes,{mode:0o600,flag:'wx'});await fs.rename(temporary,result.filePath);
-      return {canceled:false,saved:true};
-    }finally{await fs.rm(temporary,{force:true}).catch(()=>{});}
+    await publishBackup(result.filePath,bytes);
+    return {canceled:false,saved:true};
   });
   handle(CHANNELS.copy,async(...args:unknown[])=>{
     if(args.length!==1)throw failure('argument-invalid');
@@ -254,7 +263,7 @@ async function startBackend(){
     {cwd:path.join(dataDir,'profile'),env:cleanEnvironment(runtime.stateDir,runtime.config)});
   const current=control;
   current.onUnavailable=code=>{
-    clearSensitive('disconnect');status=undefined;stage='Backend unavailable';updateMenus();
+    clearSensitive('disconnect');if(status)notifyAlerts(['backend']);status=undefined;alertTracker.reset();stage='Backend unavailable';updateMenus();
     emit({type:'backend-state',state:'unavailable',code});
     if(current.hasExited && !quitting && window)void recover(code);
   };
@@ -342,6 +351,10 @@ async function main(){
   tray=new Tray(image);tray.on('click',()=>show());updateMenus();
   await readPreferences();registerIPC();
   powerMonitor.on('suspend',()=>{void lockCredentials('suspend');});
+  powerMonitor.on('resume',()=>{
+    const current=control;
+    if(current && !current.hasExited)void current.request('reconcile-after-wake',60_000).catch(error=>{notifyAlerts([errorCode(error)==='observation-store-locked'?'locked':'failed']);}).finally(()=>{void refreshStatus();});
+  });
   if(supportedLock())powerMonitor.on('lock-screen',()=>{void lockCredentials('os-lock');});
   idleTimer=setInterval(()=>{
     const idle=powerMonitor.getSystemIdleTime()>=300;

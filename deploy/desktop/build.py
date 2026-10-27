@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1]
 DESKTOP_VERSION = "0.1.0-alpha.1"
 BACKEND_RELEASE = "desktop-0.1.0-alpha.1"
-TARGETS = {"macos-arm64": ("darwin", "arm64", "3.13.13", "bin/python3"),
+TARGETS = {"macos-arm64": ("darwin", "arm64", "3.11.16", "bin/python3"),
            "windows-x86_64": ("win32", "x64", "3.11.16", "python.exe"),
            "linux-x86_64": ("linux", "x64", "3.11.16", "bin/python3")}
 
@@ -142,22 +142,26 @@ def assemble(args):
     bundle.parent.mkdir()
     clean_copy(backend_input, bundle)
     shutil.copy2(HERE / "bootstrap.py", resources / "bootstrap.py")
-    wheel = make_buddy_wheel(SOURCE, bundle / "wheelhouse")
-    release = json.loads((bundle / "release.json").read_text())
-    prior_buddy = next(item for item in release["packages"] if item["name"] == "leakguard-buddy")
-    (bundle / "wheelhouse" / prior_buddy["filename"]).unlink()
-    for item in release["packages"]:
-        if item["name"] == "leakguard-buddy":
-            item.update(version="0.1.0a2", filename=wheel.name, sha256=bootstrap.digest(wheel))
-    source_release = json.loads((bundle / "deploy/release-manifest.json").read_text())
-    for manifest in (release, source_release):
-        manifest["release_version"] = BACKEND_RELEASE
-        manifest["source_commit"] = source_commit
-        manifest["pinned_distributions"]["leakguard-buddy"] = "0.1.0a2"
-    release["created_utc"] = source_time
-    write_json(bundle / "deploy/release-manifest.json", source_release)
-    release["source_manifest_sha256"] = bootstrap.digest(bundle / "deploy/release-manifest.json")
-    write_json(bundle / "release.json", release)
+    # The backend builder must rebuild every local product wheel from this
+    # revision. Replacing only Buddy mislabels stale vault/host/scanner bytes.
+    if original_manifest.get("source_commit") != source_commit:
+        raise ValueError("Backend input must be built from the exact integrated commit")
+    required = {"leakguard-core", "leakguard-buddy", "leakguard-host", "leakguard-vault",
+                "leakguard-credential-detector", "leakguard-presidio-detector", "leakguard-jose-recognizers"}
+    present = {item["name"].lower().replace("_", "-") for item in original_manifest["packages"]}
+    if not required.issubset(present):
+        raise ValueError("Backend input is missing required full-product packages")
+    if original_manifest.get("target_python") != ".".join(TARGETS[args.target][2].split(".")[:2]):
+        raise ValueError("Backend wheelhouse does not match bundled Python minor")
+    # Retain the UI source-to-built-byte check for the freshly built Buddy wheel.
+    with tempfile.TemporaryDirectory() as temp:
+        expected_wheel = make_buddy_wheel(SOURCE, Path(temp))
+        buddy = next(item for item in original_manifest["packages"] if item["name"] == "leakguard-buddy")
+        with zipfile.ZipFile(expected_wheel) as expected, zipfile.ZipFile(bundle / "wheelhouse" / buddy["filename"]) as actual:
+            for name in expected.namelist():
+                if name.startswith("leakguard_buddy/") and actual.read(name) != expected.read(name):
+                    raise ValueError("Buddy wheel differs from reviewed source/UI: " + name)
+    release = original_manifest
     # ZIP extraction discarded alpha backend execute modes. Restore owned immutable payload.
     if args.target != "windows-x86_64":
         for item in release["backend_artifacts"]:
@@ -166,7 +170,7 @@ def assemble(args):
         executable = resources / "python" / TARGETS[args.target][3]
         executable.chmod(executable.stat().st_mode | 0o111)
     installer.validate_wheelhouse(bundle, installer.read_manifest(bundle / "release.json"))
-    unchanged = [item for item in release["packages"] if item["name"] != "leakguard-buddy"]
+    unchanged = release["packages"]
     for item in unchanged:
         if bootstrap.digest(bundle / "wheelhouse" / item["filename"]) != item["sha256"]:
             raise ValueError("An original backend wheel changed")
@@ -174,8 +178,8 @@ def assemble(args):
                   "runtimeInput": {"directory": str(runtime_input), "files": input_runtime_files},
                   "backendInput": {"directory": str(backend_input), "files": input_backend_files,
                                    "releaseManifest": original_manifest},
-                  "wheelBuild": {"method": "fresh-stdlib-pep427", "version": "0.1.0a2",
-                                 "sha256": bootstrap.digest(wheel),
+                  "wheelBuild": {"method": "integrated-backend-build", "version": "0.1.0a2",
+                                 "sha256": buddy["sha256"],
                                  "sourceFiles": [{"path": path.relative_to(SOURCE).as_posix(), "sha256": bootstrap.digest(path)}
                                                  for path in sorted((SOURCE / "apps/buddy").rglob("*"))
                                                  if path.is_file() and path.suffix in {".py", ".toml", ".html", ".js", ".css"}
