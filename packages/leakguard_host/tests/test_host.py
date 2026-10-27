@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import hashlib
 import io
+import errno
 import os
 from pathlib import Path
 import plistlib
@@ -368,7 +369,8 @@ class HostTests(unittest.TestCase):
         self.assertIn("$$HOME%%", linux["content"])
         self.assertIn("LEAKGUARD_STATE_DIR=", linux["content"])
         special_state = service_spec(command, self.root / "literal$state%", platform="linux")
-        self.assertIn('Environment="LEAKGUARD_STATE_DIR=' + str(self.root / "literal$state%%") + '"', special_state["content"])
+        escaped_state = str(self.root / "literal$state%%").replace("\\", "\\\\")
+        self.assertIn('Environment="LEAKGUARD_STATE_DIR=' + escaped_state + '"', special_state["content"])
         with self.assertRaisesRegex(HostError, "service-state-invalid"):
             service_spec(command, self.root / "unsafe\nService=extra", platform="linux")
         self.assertFalse(mac["native_verified"])
@@ -419,14 +421,22 @@ class HostTests(unittest.TestCase):
         try:
             self.assertLess(time.monotonic() - started, 2)
             status = Path(f"/proc/{child}/stat")
-            if status.exists():
-                self.assertIn(status.read_text().split()[2], {"Z", "X"})
+            try:
+                state = status.read_text().split()[2]
+            except OSError as error:
+                # The killed child may disappear between /proc lookup and read.
+                # Other failures must remain visible rather than imply reaping.
+                if error.errno not in {errno.ENOENT, errno.ESRCH}:
+                    raise
+            else:
+                self.assertIn(state, {"Z", "X"})
         finally:
             try:
                 os.kill(child, 9)
             except ProcessLookupError:
                 pass
 
+    @unittest.skipUnless(os.name == "posix", "Embedded remote supervisor requires a POSIX target")
     def test_remote_supervisor_reaps_children_in_separate_process_groups(self):
         import psutil
         package = self.root / "fake/leakguard_host"
@@ -460,6 +470,7 @@ time.sleep(30)
             except psutil.Error:
                 pass
 
+    @unittest.skipUnless(os.name == "posix", "Embedded remote installer requires a POSIX target")
     def test_remote_bundle_rejects_traversal_before_writing(self):
         self.root.chmod(0o700)
         artifact = self.root / "release.zip"
@@ -471,6 +482,7 @@ time.sleep(30)
         self.assertFalse((self.root.parent / "escape").exists())
         self.assertEqual(list((self.root / "content").iterdir()), [])
 
+    @unittest.skipUnless(os.name == "posix", "Embedded remote installer requires a POSIX target")
     def test_remote_bundle_install_receipt_stays_inside_chosen_prefix(self):
         self.root.chmod(0o700)
         artifact = self.root / "release.zip"

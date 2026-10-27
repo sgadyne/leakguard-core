@@ -89,6 +89,12 @@ host with the exact Python minor declared by the offline release's
 does not enable services, mounts, hooks, or credential-vault access. SSH process
 output is bounded; stderr and arbitrary command output never enter the response.
 
+The embedded remote installer and process-group supervisor require a POSIX
+target. Their tests execute those target scripts locally on POSIX runners;
+Windows CI retains client, host, service-specification and credential/profile
+checks but does not execute these three POSIX-target fixtures locally. This
+does not qualify a native Windows remote deployment or supervisor.
+
 For one explicit deploy-and-scan journey, pass `--scan-root /chosen/remote/root`
 to `leakguard-host ssh-deploy TARGET bundle.zip /new/private/deployment --sha256
 HASH`. The scan uses the installed receipt's runtime and configuration, including
