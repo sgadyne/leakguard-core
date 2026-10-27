@@ -90,11 +90,16 @@ async function refreshStatus(){
     status=result;stage='Ready';updateMenus();
     const notice=scanNotices.update(Array.isArray(result.scan_events)?result.scan_events:[]);
     if(notice && Notification.isSupported()){
-      const notification=new Notification({title:'Password Buddy',body:notice==='attention'
-        ?'A scan needs attention. Open Sources to review its status.'
-        :'Scan finished. Open Findings to review detected material.',silent:true});
-      notification.on('click',()=>show(notice==='attention'?'sources':'findings'));
-      notification.show();
+      // OS delivery failures must not masquerade as a disconnected backend.
+      try{
+        const notification=new Notification({title:'Password Buddy',body:notice==='attention'
+          ?'A scan needs attention. Open Sources to review its status.'
+          :'Scan finished. Open Findings to review detected material.',silent:true});
+        notification.on('click',()=>show(notice==='attention'?'sources':'findings'));
+        notification.on('show',()=>console.info('buddy-notification-shown',notice));
+        notification.on('failed',()=>console.warn('buddy-notification-unavailable'));
+        notification.show();
+      }catch{console.warn('buddy-notification-unavailable');}
     }
     if(wasUnlocked && !result.vault.unlocked){clearSensitive('disconnect');emit({type:'vault-locked'});}
   }catch(error){
