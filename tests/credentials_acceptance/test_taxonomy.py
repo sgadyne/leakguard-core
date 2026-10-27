@@ -109,6 +109,17 @@ class Taxonomy(unittest.TestCase):
                 check(all(f.severity == 'block' and f.start_line == 1 and f.end_line == 1 for f in matching), 'url-action-location')
                 check(row['text'] not in repr(findings), 'url-finding-privacy')
 
+    def test_each_url_malformed_boundaries(self):
+        schemes = ('postgres', 'postgresql', 'mysql', 'mariadb', 'mongodb', 'mongodb+srv', 'redis', 'rediss', 'amqp', 'amqps')
+        for scheme in schemes:
+            text = '\n'.join((scheme + '://alice:@example.invalid/db',
+                              scheme + '://alice:${PASSWORD}@example.invalid/db',
+                              scheme + '://alice:synthetic@/db'))
+            with self.subTest(scheme=scheme):
+                findings = backends.detect(text, binary=self.binary, worker_policy=self.policy)
+                check(not any(f.rule == 'credential-connection-url' for f in findings), 'url-boundary')
+                check(text not in repr(findings), 'url-boundary-privacy')
+
     def test_alias_bounds(self):
         key = self.aliases[0]['name']
         for text in (key + ' = "' + 'q' * 4097 + '"', 'x' * 10_000_001):

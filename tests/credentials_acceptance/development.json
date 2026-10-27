@@ -323,6 +323,41 @@
       "text": "amqps://example.invalid:3456/db",
       "rule": null,
       "fragment": null
+    },
+    {
+      "id": "http-basic-reference",
+      "family": "http",
+      "text": "Authorization: Basic dXNlcjoke0VOVl9WQVJ9\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-basic-invalid-padding",
+      "family": "http",
+      "text": "Authorization: Basic Zm9vOmJhcg=\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-bearer-illegal-symbol",
+      "family": "http",
+      "text": "Authorization: Bearer ab,c\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-folded-header",
+      "family": "http",
+      "text": "Authorization: Bearer token\n continuation\n",
+      "rule": null,
+      "fragment": null
+    },
+    {
+      "id": "http-case-crlf",
+      "family": "http",
+      "text": "\u03bb\r\n\tAUTHORIZATION: bEaReR n7s9/+a==\r\n",
+      "rule": "credential-http-bearer",
+      "fragment": "n7s9/+a=="
     }
   ],
   "field_templates": {
