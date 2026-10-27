@@ -7,7 +7,7 @@ import path from 'node:path';
 import {canonicalDataDirectory,cleanEnvironment,verifiedResource} from './runtime.ts';
 
 test('manifest-selected interpreter validates link hash and final regular file bytes',async()=>{
-  const root=await fs.mkdtemp(path.join(os.tmpdir(),'buddy-resource-check-'));
+  const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'buddy-resource-check-')));
   const sha=(value:string)=>createHash('sha256').update(value).digest('hex');
   try{
     await fs.writeFile(path.join(root,'python3.11'),'synthetic interpreter');

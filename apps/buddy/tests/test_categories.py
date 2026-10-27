@@ -46,11 +46,28 @@ class FindingCategoryTests(unittest.TestCase):
         backend._observation_store = store
 
         result = backend.findings({"category": "contact", "annotation": "reviewed", "limit": "10"})
+        self.assertEqual(result["coverage"], "unknown")
+        host.jobs = lambda: [{"id": "job-1", "source_id": "source-1", "coverage": "complete", "updated_at": "2026-10-27"}]
+        self.assertEqual(backend.findings({})["coverage"], "complete")
         self.assertEqual(len(result["findings"]), 1)
         self.assertEqual(result["findings"][0]["category"], "contact")
         self.assertEqual(result["findings"][0]["classification"], "credential-candidate")
         self.assertEqual(result["findings"][0]["source_id"], "source-1")
         self.assertEqual(backend.findings({"category": "credentials"})["findings"], [])
+
+    def test_coverage_tracks_all_enabled_sources_not_only_visible_findings(self):
+        from leakguard_buddy.backend import _source_coverage
+        sources = [{"id": "a"}, {"id": "b"}]
+        jobs = {"a": {"coverage": "complete"}}
+        self.assertEqual(_source_coverage(sources, jobs), "unknown")
+        jobs["b"] = {"coverage": "incomplete"}
+        self.assertEqual(_source_coverage(sources, jobs), "incomplete")
+        jobs["b"] = {"coverage": "complete"}
+        self.assertEqual(_source_coverage(sources, jobs), "complete")
+        self.assertEqual(_source_coverage([], jobs), "unknown")
+        sources[1]["enabled"] = False
+        del jobs["b"]
+        self.assertEqual(_source_coverage(sources, jobs), "complete")
 
     def test_backup_uses_the_unlocked_credential_session(self):
         from leakguard_buddy.backend import BuddyBackend

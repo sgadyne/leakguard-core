@@ -202,6 +202,8 @@ def assemble(args):
         run(["npm", "ci", "--no-audit", "--no-fund"], HERE)
         run(["node", HERE / "package.mjs", "--target", args.target, "--source", SOURCE / "apps/desktop",
              "--resources", resources, "--output", output / "apps"])
+        if args.target == "macos-arm64":
+            receipt.update(signed=True, signatureKind="ad-hoc", notarized=False)
         app_paths = list((output / "apps").iterdir())
         if len(app_paths) != 1:
             raise ValueError("Packager returned an unexpected app directory set")

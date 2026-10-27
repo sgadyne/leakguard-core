@@ -400,7 +400,6 @@ class BuddyBackend:
             next_store_cursor = page.next_cursor
             if next_store_cursor is None or len(rows) >= limit:
                 break
-        host_status = host.status()
         source_rows = _as_list(host.sources())
         job_rows = _as_list(host.jobs())
         latest_jobs: dict[str, dict[str, Any]] = {}
@@ -419,7 +418,7 @@ class BuddyBackend:
             "findings": rows,
             "next_cursor": _encode_findings_cursor(next_store_cursor, filter_id) if next_store_cursor is not None else None,
             "state": state,
-            "coverage": host_status.get("coverage") if type(host_status) is dict else None,
+            "coverage": _source_coverage(source_rows, latest_jobs),
         }
 
     @_backend_locked
@@ -879,3 +878,12 @@ def _int(value: str, default: int, minimum: int, maximum: int) -> int:
     try: result = int(value, 10)
     except (TypeError, ValueError): result = default
     return max(minimum, min(maximum, result))
+
+
+def _source_coverage(sources, latest_jobs):
+    """Coverage of enabled sources, never infer a clean scan from no findings."""
+    coverage = [latest_jobs.get(source["id"], {}).get("coverage", "unknown")
+                for source in sources if source.get("enabled", True)]
+    if not coverage or any(value not in {"complete", "incomplete"} for value in coverage):
+        return "unknown"
+    return "complete" if all(value == "complete" for value in coverage) else "incomplete"

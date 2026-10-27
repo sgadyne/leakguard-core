@@ -1,7 +1,8 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, powerMonitor, session, Tray, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, nativeImage, powerMonitor, session, Tray, type IpcMainInvokeEvent } from 'electron';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { ScanNotices } from './scan-notices.ts';
 import { ClipboardOwner } from './clipboard.ts';
 import { Control } from './control.ts';
 import { CHANNELS, type BackendStatus, type ClearReason, type DesktopEvent, type Page, type Preferences } from './contracts.ts';
@@ -25,6 +26,7 @@ let startup:Promise<void>|undefined;
 let recovering=false;
 let lockInFlight:Promise<void>|undefined;
 const clipboardOwner=new ClipboardOwner({readText:()=>clipboard.readText(),writeText:text=>clipboard.writeText(text),clear:()=>clipboard.clear()});
+const scanNotices=new ScanNotices();
 let statusTimer:NodeJS.Timeout|undefined;
 let idleTimer:NodeJS.Timeout|undefined;
 let idleLocked=false;
@@ -86,6 +88,14 @@ async function refreshStatus(){
        !Number.isSafeInteger(result.pending_jobs)||result.pending_jobs<0)throw failure('backend-protocol-invalid');
     const wasUnlocked=status?.vault.unlocked;
     status=result;stage='Ready';updateMenus();
+    const notice=scanNotices.update(Array.isArray(result.scan_events)?result.scan_events:[]);
+    if(notice && Notification.isSupported()){
+      const notification=new Notification({title:'Password Buddy',body:notice==='attention'
+        ?'A scan needs attention. Open Sources to review its status.'
+        :'Scan finished. Open Findings to review detected material.',silent:true});
+      notification.on('click',()=>show(notice==='attention'?'sources':'findings'));
+      notification.show();
+    }
     if(wasUnlocked && !result.vault.unlocked){clearSensitive('disconnect');emit({type:'vault-locked'});}
   }catch(error){
     clearSensitive('disconnect');status=undefined;stage='Backend unavailable';updateMenus();

@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { mkdtemp, mkdir, readFile, cp, rm, writeFile, access } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 
 const { values } = parseArgs({ options: {
   target: { type: 'string' }, source: { type: 'string' }, resources: { type: 'string' }, output: { type: 'string' },
@@ -43,6 +44,20 @@ try {
     await cp(path.resolve(values.resources), path.join(resourceRoot, 'buddy'), {
       recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true,
     });
+    if (platform === 'darwin') {
+      const app = path.join(packaged, 'Password Buddy.app');
+      // Renamed Electron bundles and the new payload need fresh resource seals.
+      // Local ad-hoc signing is not Developer ID signing or notarization.
+      const nested = ['Mantle.framework', 'ReactiveObjC.framework', 'Squirrel.framework',
+        'Password Buddy Helper.app', 'Password Buddy Helper (GPU).app',
+        'Password Buddy Helper (Plugin).app', 'Password Buddy Helper (Renderer).app'];
+      for (const item of nested) execFileSync('/usr/bin/codesign',
+        ['--force', '--sign', '-', '--preserve-metadata=entitlements,requirements,flags',
+         path.join(app, 'Contents', 'Frameworks', item)], {stdio:'inherit'});
+      execFileSync('/usr/bin/codesign', ['--force', '--sign', '-',
+        '--preserve-metadata=entitlements,requirements,flags', app], {stdio:'inherit'});
+      execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', app], {stdio:'inherit'});
+    }
   }
   process.stdout.write(JSON.stringify({ appDirectories: paths, nativeAcceptance: 'not-run' }) + '\n');
 } finally {

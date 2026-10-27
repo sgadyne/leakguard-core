@@ -8,6 +8,7 @@ export type DesktopEvent =
   | {type:'backend-state'; state:'ready'|'unavailable'|'stopping'; code?:string};
 export type BackendStatus = {
   observations:{created:boolean; unlocked:boolean}; vault:{created:boolean; unlocked:boolean};
+  scan_events?: {id:string;state:string}[];
   scheduler:string; pending_jobs:number; background:string; error_codes:string[];
 };
 export const CHANNELS = {

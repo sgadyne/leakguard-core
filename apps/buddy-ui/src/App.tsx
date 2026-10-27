@@ -214,7 +214,7 @@ export default function App() {
             {scanGate ? <StorageGate created={status?.observations?.created} kind="scan" onClick={()=>openGate(status?.observations?.created?"observations":"observations-create")}/> : <>
               <Tabs value={sourceTab} onChange={(_,v)=>setSourceTab(v)} sx={{mb:2}}><Tab label="Sources"/><Tab label="Scan activity"/><Tab label="Git guards"/></Tabs>
               {sourceTab===0 && <Box sx={{display:"grid",gridTemplateColumns:"minmax(0,1fr) 300px",gap:2,alignItems:"start"}}>
-                <SourceTable sources={sources} selected={selected?.id} onSelect={s=>setSelectedSource(s.id)} onScan={s=>void run(()=>startScan(s.id))}/>
+                <SourceTable sources={sources} jobs={jobs} scanDisabled={scanStorageIssue} selected={selected?.id} onSelect={s=>setSelectedSource(s.id)} onScan={s=>void run(()=>startScan(s.id))}/>
                 <SourceInspector source={selected} jobs={jobs} scanDisabled={scanStorageIssue} onSchedule={(s,v)=>void run(()=>updateSourceSchedule(s,v))} onScan={s=>void run(()=>startScan(s.id))} onEnable={s=>void run(()=>setSourceEnabled(s))} onRemove={s=>void run(()=>removeSource(s))}/>
               </Box>}
               {sourceTab===1 && <JobList jobs={jobs} sources={sources} scanDisabled={scanStorageIssue} onAction={(j,a)=>void run(()=>jobAction(j,a))}/>}

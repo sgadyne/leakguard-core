@@ -48,7 +48,13 @@ def _status(backend) -> dict[str, Any]:
     host = value.get("host", {})
     background = ("available" if observations.get("unattended_available") and not observations.get("startup_error")
                   else "unlock-required" if observations.get("created") else "unavailable")
+    # Status notifications contain opaque job IDs and states, never source paths or values.
+    jobs = backend.jobs() if observations.get("unlocked") and hasattr(backend, "jobs") else []
+    events = [{"id": row["id"], "state": row["state"]} for row in jobs[:20]
+              if type(row.get("id")) is str and row.get("state") in
+              {"queued", "running", "completed", "failed", "paused", "backoff", "cancelled"}]
     return {
+        "scan_events": events,
         "observations": {key: bool(observations.get(key)) for key in ("created", "unlocked")},
         "vault": {key: bool(value["vault"].get(key)) for key in ("created", "unlocked")},
         "scheduler": host.get("scheduler", "stopped"),
