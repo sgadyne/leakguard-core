@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from credential_detector.aliases import AliasPackError
-from leakguard_core.plugins import DetectionContext, detect, load
+from leakguard_core.plugins import DetectionContext, close, detect, load
 from private_credential_pack import MANIFEST, create_plugin
 from private_credential_pack import plugin
 
@@ -45,8 +45,13 @@ def test_manifest_declares_dependencies_and_unknown_external_state():
 def test_extracted_part_dispatch_preserves_original_offsets():
     # Exercise the actual worker-backed dispatcher, not just the detector method.
     text = 'é prefix\nacme_deploy_key="x"\n'
-    plugins = load([{'module': 'private_credential_pack.plugin'}])
-    findings = list(detect(plugins, text, 'synthetic.pdf', 'page-1', format_id='pdf-text'))
+    policy = 'supervised-alpha' if sys.platform == 'darwin' else 'strict'
+    plugins = load([{'module': 'private_credential_pack.plugin'}], worker_policy=policy)
+    try:
+        findings = list(detect(plugins, text, 'synthetic.pdf', 'page-1',
+                               format_id='pdf-text', worker_policy=policy))
+    finally:
+        close(plugins)
     assert len(findings) == 1
     finding = findings[0]
     start = text.index('"x"') + 1
