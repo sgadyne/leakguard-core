@@ -60,7 +60,7 @@ def wheel_identity(path: Path) -> tuple[str, str]:
         raise ValueError(f"not a wheel file: {path.name}")
     try:
         with zipfile.ZipFile(path) as archive:
-            metadata_files = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            metadata_files = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA") and name.count("/") == 1]
             if len(metadata_files) != 1:
                 raise ValueError(f"wheel must contain one METADATA file: {path.name}")
             metadata = archive.read(metadata_files[0]).decode("utf-8", "strict")

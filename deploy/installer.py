@@ -328,7 +328,7 @@ def validate_wheelhouse(bundle: Path, manifest: dict[str, Any]) -> list[Path]:
                 members = archive.infolist()
                 if len(members) > 100_000:
                     raise DeployError(f"wheel has too many members: {item['filename']}")
-                metadata_files = [info for info in members if info.filename.endswith(".dist-info/METADATA")]
+                metadata_files = [info for info in members if info.filename.endswith(".dist-info/METADATA") and info.filename.count("/") == 1]
                 if len(metadata_files) != 1 or metadata_files[0].file_size > 1024 * 1024:
                     raise DeployError(f"wheel metadata is ambiguous: {item['filename']}")
                 metadata = archive.read(metadata_files[0]).decode("utf-8", "strict")
