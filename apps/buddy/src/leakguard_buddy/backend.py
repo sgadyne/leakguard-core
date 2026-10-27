@@ -352,6 +352,9 @@ class BuddyBackend:
         return self._require_host().submit(source_id)
 
     @_backend_locked
+    def reconcile_after_wake(self): return self._require_host().reconcile()
+
+    @_backend_locked
     def pause(self, job_id: str): return self._require_host().pause(job_id)
     @_backend_locked
     def resume(self, job_id: str): return self._require_host().resume(job_id)
@@ -429,12 +432,19 @@ class BuddyBackend:
         if store is None:
             raise RuntimeError("observation-store-locked")
         for state in ("current", "history"):
-            page = store.query_findings_page(state=state, limit=1000)
-            for raw in page.rows:
-                if raw.get("id") == finding_id:
-                    row = dict(raw)
-                    row["annotation"] = store.get_annotation(finding_id)
-                    return row
+            cursor = None
+            while True:
+                page = store.query_findings_page(state=state, limit=1000, cursor=cursor)
+                for raw in page.rows:
+                    if raw.get("id") == finding_id:
+                        row = dict(raw)
+                        row["annotation"] = store.get_annotation(finding_id)
+                        return row
+                if page.next_cursor is None:
+                    break
+                if page.next_cursor == cursor:
+                    raise RuntimeError("finding-pagination-failed")
+                cursor = page.next_cursor
         raise KeyError("finding-not-found")
 
     @_backend_locked

@@ -753,6 +753,7 @@ def _anchor_from(payload):
 
 _SCHEMA = '''
 CREATE TABLE IF NOT EXISTS ordering_clock(id INTEGER PRIMARY KEY CHECK(id=1),tick INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS finding_revision(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision>=0));
 CREATE TABLE IF NOT EXISTS cache(path TEXT PRIMARY KEY,size INTEGER,mtime INTEGER,status TEXT,policy TEXT,digest TEXT,payload TEXT,executed_at TEXT);
 CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY,path TEXT,rule TEXT,line INTEGER,part TEXT,severity TEXT,first_seen TEXT,last_seen TEXT);
 CREATE TABLE IF NOT EXISTS directories(scope TEXT,path TEXT,priority INTEGER NOT NULL DEFAULT 100,PRIMARY KEY(scope,path));
@@ -1070,9 +1071,12 @@ class SQLiteScanStore:
         for finding in result.findings:
             row = _query_row(finding, result)
             row.update(state='active' if complete else 'unknown', state_reason='verified-present' if complete else 'partial-observation')
-            previous = self.conn.execute("SELECT json_extract(payload,'$.first_seen') FROM finding_state WHERE input_key=? AND finding_id=?", (key, finding.id)).fetchone()
+            previous = self.conn.execute("SELECT json_extract(payload,'$.first_seen'),state FROM finding_state WHERE input_key=? AND finding_id=?", (key, finding.id)).fetchone()
             if previous:
                 row['first_seen'] = previous[0]
+            if previous is None or previous[1] == 'resolved':
+                # This transition and its evidence commit or roll back together.
+                self.conn.execute('INSERT INTO finding_revision VALUES(1,1) ON CONFLICT(id) DO UPDATE SET revision=revision+1')
             payload = json.dumps(row, separators=(',', ':'))
             self.conn.execute('INSERT INTO finding_state VALUES(?,?,?,?,?,?) ON CONFLICT(input_key,finding_id) DO UPDATE SET state=excluded.state,rule=excluded.rule,path=excluded.path,payload=excluded.payload', (key, finding.id, row['state'], finding.rule, result.source.path, payload))
             self.conn.execute('INSERT INTO finding_current VALUES(?,?,?) ON CONFLICT(input_key,finding_id) DO UPDATE SET payload=excluded.payload', (key, finding.id, payload))
@@ -1104,6 +1108,11 @@ class SQLiteScanStore:
             return _report_from(json.loads(row[0])) if row else None
         except Exception:
             raise StateError() from None
+
+    @_bounded_sql
+    def finding_revision(self):
+        row = self.conn.execute('SELECT revision FROM finding_revision WHERE id=1').fetchone()
+        return row[0] if row else 0
 
     @_bounded_sql
     def query_findings_page(self, *, state='current', profile=None, limit=1000, cursor=None):

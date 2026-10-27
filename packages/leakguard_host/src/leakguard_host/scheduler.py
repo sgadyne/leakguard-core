@@ -22,6 +22,9 @@ from . import navigation
 _ACTIVE = {"queued", "running", "paused", "backoff"}
 _FINAL = {"completed", "cancelled", "failed"}
 _UNSET = object()
+# Candidate beta target; installed-host qualification is still required.
+_FRESHNESS_SECONDS = 600
+_FRESHNESS_WARNING_SECONDS = 480
 
 
 class HostStateStore(Protocol):
@@ -94,9 +97,9 @@ class HostService:
         self._clock = clock
         self._scanner_factory = scanner_factory
         configured = config.to_mapping()
-        self._limits = limits or ScanLimits(deadline_seconds=10, max_files=100,
+        self._limits = limits or ScanLimits(deadline_seconds=60, max_files=100,
             max_file_bytes=configured["max_file_bytes"], max_directory_entries=2000,
-            max_report_bytes=4_000_000, detector_timeout_seconds=min(10, configured["scan_timeout_seconds"]))
+            max_report_bytes=4_000_000, detector_timeout_seconds=min(45, configured["scan_timeout_seconds"]))
         if self._limits.deadline_seconds > 60 or self._limits.max_files > 1000:
             raise HostError("slice-limit-invalid")
         self._lock = threading.RLock()
@@ -112,6 +115,11 @@ class HostService:
             self._state = self._validate_state(value)
         except HostError:
             raise
+        except Exception:
+            raise HostError("host-state-unavailable") from None
+        revision = getattr(self._store, "finding_revision", None)
+        try:
+            self._durable_finding_revision = revision() if callable(revision) else None
         except Exception:
             raise HostError("host-state-unavailable") from None
         changed = False
@@ -144,6 +152,7 @@ class HostService:
                 _interval(source["schedule_seconds"])
                 _seconds(source["next_run_at"])
                 _seconds(source["last_success_at"])
+                _seconds(source.get("last_scan_started_at"))
             for key, job in value["jobs"].items():
                 if type(job) is not dict or job["id"] != key or not isinstance(key, str) or len(key) != 32 or job["source_id"] not in value["sources"] or job["state"] not in _ACTIVE | _FINAL:
                     raise ValueError()
@@ -162,6 +171,8 @@ class HostService:
     def _save(self) -> None:
         try:
             self._state_store.save_host_state(deepcopy(self._state))
+            revision = getattr(self._store, "finding_revision", None)
+            self._durable_finding_revision = revision() if callable(revision) else None
             self._storage_error = None
         except Exception as error:
             code = getattr(error, "code", "state-checkpoint-failed")
@@ -323,12 +334,29 @@ class HostService:
                "updated_at": now, "next_retry_at": None, "attempts": 0, "slices": 0, "files_scanned": 0,
                "stalled_slices": 0,
                "work_identity": None, "policy_resets": 0,
-               "pending_files": None, "pending_directories": None, "coverage": "incomplete", "last_error": None, "report_id": None}
+               "pending_files": None, "pending_directories": None, "omission_count": None, "coverage": "incomplete", "last_error": None, "report_id": None}
         self._state["jobs"][job["id"]] = job
         return job
 
     def submit(self, source_id: str) -> dict:
         result = self._mutate(lambda: self._submit(source_id))
+        self._wake.set()
+        return result
+
+    def reconcile(self) -> dict:
+        """Queue enabled scheduled sources after wake; never resume paused jobs."""
+        def action():
+            queued = []
+            now = self._clock()
+            for source in self._state["sources"].values():
+                if not source["enabled"] or source["schedule_seconds"] is None:
+                    continue
+                job = self._submit(source["id"])
+                if job["state"] != "paused":
+                    queued.append(job["id"])
+                source["next_run_at"] = _timestamp(now + source["schedule_seconds"])
+            return {"jobs": queued}
+        result = self._mutate(action)
         self._wake.set()
         return result
 
@@ -476,7 +504,8 @@ class HostService:
                     previous_pending = (job["pending_files"], job["pending_directories"])
                     if report is not None:
                         job.update(report_id=report.run_id, files_scanned=job["files_scanned"] + report.counts.scanned + report.counts.reused,
-                                   pending_files=report.coverage.pending_files, pending_directories=report.coverage.pending_directories)
+                                   pending_files=report.coverage.pending_files, pending_directories=report.coverage.pending_directories,
+                                   omission_count=report.coverage.omission_count)
                     # A control action received during the slice takes precedence.
                     if job["state"] != "running":
                         return job
@@ -491,6 +520,10 @@ class HostService:
                     elif report.coverage.enumeration_complete and report.coverage.required_complete:
                         job.update(state="completed", coverage="complete", attempts=0, last_error=None)
                         source_now["last_success_at"] = job["updated_at"]
+                        source_now["last_omission_count"] = report.coverage.omission_count
+                        # Queue time is a conservative lower bound on when the
+                        # observations in this completed cycle were collected.
+                        source_now["last_scan_started_at"] = job["created_at"]
                     else:
                         codes = {issue.code.value for issue in report.issues if issue.required}
                         codes.update(issue.code.value for result in report.results for issue in result.issues if issue.required)
@@ -502,8 +535,13 @@ class HostService:
                             pending = (report.coverage.pending_files, report.coverage.pending_directories)
                             stalled = report.counts.results == 0 and pending == previous_pending and not slice_store.advanced
                             job["stalled_slices"] = job.get("stalled_slices", 0) + 1 if stalled else 0
-                            job.update(state="paused" if job["stalled_slices"] >= 3 else "queued",
-                                       last_error="scan-progress-stalled" if job["stalled_slices"] >= 3 else None)
+                            # A non-deterministic identity can repeatedly reset work even
+                            # when every slice scans files. Do not spin forever or claim
+                            # progress: require a smaller scope or a stable identity.
+                            unstable = job.get("policy_resets", 0) >= 3
+                            job.update(state="paused" if unstable or job["stalled_slices"] >= 3 else "queued",
+                                       last_error="scan-identity-unstable" if unstable else
+                                       "scan-progress-stalled" if job["stalled_slices"] >= 3 else None)
                     return job
                 result = self._mutate(finish)
             return {"worked": True, "status": result["state"], "job": result}
@@ -524,7 +562,61 @@ class HostService:
             except Exception:
                 store_status = {}
             available = self._storage_error is None and store_status.get("unlocked") is not False and store_status.get("healthy") is not False
+            now = self._clock()
+            monitoring = []
+            for source in self._state["sources"].values():
+                jobs = [job for job in self._state["jobs"].values() if job["source_id"] == source["id"]]
+                # Active work takes precedence over historical jobs with equal timestamps.
+                active = next((job for job in jobs if job["state"] in _ACTIVE), None)
+                latest = active or (max(jobs, key=lambda job: (job["created_at"], job["id"])) if jobs else None)
+                last = source["last_success_at"]
+                freshness_since = source.get("last_scan_started_at")
+                # Older persisted profiles lack a trustworthy cycle start.
+                stale = freshness_since is None or now - _seconds(freshness_since) >= _FRESHNESS_SECONDS or now < _seconds(freshness_since)
+                warning = freshness_since is None or now - _seconds(freshness_since) >= _FRESHNESS_WARNING_SECONDS or now < _seconds(freshness_since)
+                try:
+                    availability = self._available(source)
+                except Exception:
+                    availability = "unreadable"
+                if not source["enabled"] or source["schedule_seconds"] is None:
+                    state = "paused"
+                elif availability != "available":
+                    state = "offline" if availability in {"offline", "source-unavailable"} else "failed"
+                elif latest and latest["state"] == "paused":
+                    state = "paused"
+                elif latest and latest["state"] in {"failed", "backoff"}:
+                    state = "failed"
+                elif stale:
+                    state = "stale"
+                elif latest and latest["state"] in {"queued", "running"}:
+                    state = "pending"
+                else:
+                    state = "current"
+                monitoring.append({"source_id": source["id"], "state": state,
+                                   "last_completed_at": last, "freshness_since": freshness_since, "stale": stale, "stale_warning": warning,
+                                   "job_state": latest["state"] if latest else None,
+                                   "pending_files": latest.get("pending_files") if latest else None,
+                                   "pending_directories": latest.get("pending_directories") if latest else None,
+                                   "last_omission_count": source.get("last_omission_count"),
+                                   "error": latest.get("last_error") if latest else None})
+            # The desktop bridge may expose this aggregate without paths,
+            # labels, source identifiers, finding identifiers, or contents.
+            enabled = [item for item in monitoring if self._state["sources"][item["source_id"]]["enabled"]]
+            completed = [item["last_completed_at"] for item in enabled]
+            used, capacity = store_status.get("serialized_bytes"), store_status.get("capacity_bytes")
+            capacity_warning = (type(used) is int and type(capacity) is int and capacity > 0 and used * 4 >= capacity * 3)
+            alerts = {"finding_revision": self._durable_finding_revision,
+                      "capacity_warning": capacity_warning,
+                      "failed": bool(self._worker_error or self._storage_error) or any(item["state"] == "failed" for item in enabled),
+                      "paused": bool(enabled) and not (self._thread and self._thread.is_alive()) or any(item["state"] == "paused" for item in enabled),
+                      "offline": any(item["state"] == "offline" for item in enabled),
+                      "stale": any(item["stale"] for item in enabled),
+                      "stale_warning": any(item["stale_warning"] for item in enabled),
+                      "pending": any(item["job_state"] in {"queued", "running", "backoff"} for item in enabled),
+                      "last_completed_at": min(completed) if completed and all(completed) else None}
             return {"scheduler": "running" if self._thread and self._thread.is_alive() else "stopped",
+                    "monitoring": monitoring, "alert_snapshot": alerts, "freshness_target_seconds": _FRESHNESS_SECONDS,
+                    "freshness_warning_seconds": _FRESHNESS_WARNING_SECONDS,
                     "active_job": self._current, "observation_available": available,
                     "unattended_available": available and store_status.get("unattended_available") is True,
                     "storage_error": self._storage_error, "worker_error": self._worker_error, "sources": len(self._state["sources"]),

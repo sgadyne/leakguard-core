@@ -185,6 +185,40 @@ class HostTests(unittest.TestCase):
         self.assertEqual(state["pending_files"], 3)
         self.assertIsNone(host.sources()[0]["last_success_at"])
 
+    def test_unknown_identity_cannot_spin_after_repeated_resets(self):
+        counter = iter(range(20))
+        def factory(**kwargs):
+            scanner = StubScanner(lambda scope, kw: report(False))
+            scanner.work_identity = lambda **kw: {"policy_id": "policy", "runtime_id": str(next(counter))}
+            return scanner
+        host = HostService(config=ScanConfig.from_mapping({}), scan_store=self.store,
+                           scanner_factory=factory, clock=lambda: self.now)
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        for _ in range(4):
+            host.tick()
+        self.assertEqual(host.job(job["id"])["state"], "paused")
+        self.assertEqual(host.job(job["id"])["last_error"], "scan-identity-unstable")
+        self.assertIsNone(host.sources()[0]["last_success_at"])
+
+    def test_freshness_offline_and_wake_preserve_paused_job(self):
+        host = self.host()
+        source = host.add_source(self.root)
+        host.update_source(source["id"], schedule_seconds=60)
+        self.assertEqual(host.status()["monitoring"][0]["state"], "stale")
+        host.reconcile()
+        self.assertEqual(host.tick()["status"], "completed")
+        self.assertEqual(host.status()["monitoring"][0]["state"], "current")
+        self.now += 600
+        self.assertTrue(host.status()["monitoring"][0]["stale"])
+        with patch("leakguard_host.scheduler.navigation.path_status", return_value="offline"):
+            self.assertEqual(host.status()["monitoring"][0]["state"], "offline")
+        job = host.submit(source["id"])
+        host.pause(job["id"])
+        self.assertEqual(host.reconcile()["jobs"], [])
+        self.assertEqual(host.job(job["id"])["state"], "paused")
+        self.assertEqual(host.status()["monitoring"][0]["state"], "paused")
+
     def test_nonrequired_omission_does_not_fail_a_partial_slice(self):
         partial = report(False)
         partial = replace(partial, coverage=replace(partial.coverage, omission_count=1),
