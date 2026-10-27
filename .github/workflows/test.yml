@@ -162,7 +162,7 @@ jobs:
       - name: Check JOSE vectors and adapter regressions
         run: |
           python -m pip install pytest==8.4.2 cryptography==50.0.2
-          python -I -m pytest plugins/jose_recognizers/tests plugins/presidio_detector/tests -k "not test_required_spacy_ner_uses_configured_model_without_fallback and not test_required_ner_rejects_a_model_for_the_wrong_language and not test_required_ner_rejects_a_mismatched_model_identity" -q
+          python -I -m pytest plugins/jose_recognizers/tests plugins/presidio_detector/tests packages/leakguard_host/tests -k "not test_required_spacy_ner_uses_configured_model_without_fallback and not test_required_ner_rejects_a_model_for_the_wrong_language and not test_required_ner_rejects_a_mismatched_model_identity" -q
       - name: Check all installed composed profiles, actual Git guards and encrypted host
         shell: bash
         run: |
