@@ -19,6 +19,7 @@ MAX_FIELDS = 100_000
 MAX_SPANS = 10_000
 _KEY = r'[A-Za-z][A-Za-z0-9_.-]{0,127}'
 _FIELD = re.compile(r'(?<![\w.\-])(?:"(?P<double>' + _KEY + r')"|\'(?P<single>' + _KEY + r')\'|(?P<bare>' + _KEY + r'))[ \t]*[:=][ \t]*')
+_TOKEN = re.compile(_FIELD.pattern + r'''|(?P<quote>["'])''')
 _REFERENCE = re.compile(
     r'(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}'
     r'|os\.getenv\([ \t]*["\'][A-Za-z_][A-Za-z0-9_]*["\'][ \t]*\)'
@@ -44,7 +45,22 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
     result: list[CredentialSpan] = []
     cursor = 0
     fields = 0
-    while match := _FIELD.search(text, cursor):
+    while match := _TOKEN.search(text, cursor):
+        # Consume quoted text as a whole, including arbitrary unknown keys.
+        # The field alternative wins when the quote starts a valid alias key.
+        if match.group('quote'):
+            quote = match.group('quote')
+            pos = match.end()
+            escaped = False
+            while pos < len(text) and text[pos] not in '\r\n':
+                ch = text[pos]
+                if ch == quote and not escaped:
+                    pos += 1
+                    break
+                escaped = ch == '\\' and not escaped
+                pos += 1
+            cursor = pos
+            continue
         # Combining marks are identifier continuations but are not matched by
         # Python's Unicode \w. Never promote the suffix of a larger key.
         if match.start() and unicodedata.category(text[match.start() - 1]).startswith('M'):

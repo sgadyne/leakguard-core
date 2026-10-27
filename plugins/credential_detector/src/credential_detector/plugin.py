@@ -12,7 +12,7 @@ API_VERSION = 2
 MANIFEST = PluginManifest(
     id='credential-detector', implementation_version='0.1.0a1', kind='detector',
     rules=tuple(RuleSpec(rule, 'block') for rule in (*RULES.values(), 'credential-http-basic', 'credential-http-bearer')),
-    formats=('text',), part_kinds=('text',), options_schema=OptionSchema(),
+    formats=(), part_kinds=(), options_schema=OptionSchema(),
     dependencies=(DistributionSpec('leakguard-credential-detector'), DistributionSpec('leakguard-core')), deterministic=True, external_state='unknown', result_schema=2,
 )
 DEFAULT_RESOURCES = tuple(name + '.json' for name in (

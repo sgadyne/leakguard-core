@@ -1,10 +1,14 @@
 """Synthetic unit tests for the strict alias resource and flat-field engine."""
 import json
+import importlib
+import types
+from unittest.mock import patch
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/credential_detector/src'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from credential_detector.aliases import AliasPackError, load_pack, merge_packs, parse_pack
 from credential_detector.engine import MAX_TEXT, MAX_VALUE, scan_fields
@@ -40,6 +44,13 @@ class AliasEngineTests(unittest.TestCase):
         text = 'name\u0301password=demo\n{"description":"password=demo", "password":"x"}\npassword="abc"junk\npassword=y'
         spans = scan_fields(text, self.pack)
         self.assertEqual([text[s.start:s.end] for s in spans], ['x', 'y'])
+
+    def test_arbitrary_quoted_keys_and_standalone_scalars(self):
+        for key in ('météo', '_description', '123', 'description/name'):
+            text = '{"' + key + '":"password=demo","password":"z"}'
+            spans = scan_fields(text, self.pack)
+            self.assertEqual([text[s.start:s.end] for s in spans], ['z'])
+        self.assertEqual(scan_fields('"password=demo"', self.pack), ())
 
     def test_quoted_references_are_literals(self):
         text = '''password=$VAR
@@ -89,6 +100,26 @@ password="null"
         for path in ('../x', '/x', 'missing.json'):
             with self.assertRaises(AliasPackError):
                 load_pack('credential_detector', path)
+
+    def test_wrapper_dispatches_extracted_text_and_preserves_offsets(self):
+        from leakguard_core.plugins import detect
+        fake_http = types.ModuleType('credential_detector.http')
+        fake_http.scan_http = lambda text: ()
+        # Exercise the wrapper independently of the separately owned HTTP lane.
+        with patch.dict(sys.modules, {'credential_detector.http': fake_http}):
+            sys.modules.pop('credential_detector.plugin', None)
+            plugin = importlib.import_module('credential_detector.plugin')
+            with patch.object(plugin, 'load_packs', return_value=self.pack):
+                instance = plugin.CredentialDetector()
+            class Adapter:
+                manifest = plugin.MANIFEST
+                def detect(self, text, context, **kwargs):
+                    return instance.detect(text, context)
+            text = 'α\npassword=x'
+            findings = list(detect([Adapter()], text, 'fixture.pdf', 'page-1', format_id='pdf-text'))
+            self.assertEqual(len(findings), 1)
+            self.assertEqual((findings[0].line, findings[0].analysis.start, findings[0].analysis.end), (2, 11, 12))
+            sys.modules.pop('credential_detector.plugin', None)
 
     def test_bounds_fail_closed(self):
         with self.assertRaisesRegex(ValueError, 'limit'):

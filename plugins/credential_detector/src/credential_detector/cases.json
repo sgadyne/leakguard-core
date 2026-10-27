@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "case_id": "short-password",
+      "text": "password=x",
+      "logical_path": "fixtures/credentials.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [{"rule": "credential-password", "start_line": 1, "end_line": 1, "severity": "block"}]
+    },
+    {
+      "case_id": "unquoted-reference",
+      "text": "password=$SYNTHETIC_PASSWORD",
+      "logical_path": "fixtures/reference.txt",
+      "format_id": "text",
+      "part_id": "text"
+    },
+    {
+      "case_id": "bearer-authorization",
+      "text": "Authorization: Bearer synthetic-token",
+      "logical_path": "fixtures/request.txt",
+      "format_id": "text",
+      "part_id": "text",
+      "expected_findings": [{"rule": "credential-http-bearer", "start_line": 1, "end_line": 1, "severity": "block"}]
+    }
+  ]
+}
