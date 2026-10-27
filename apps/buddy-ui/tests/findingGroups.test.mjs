@@ -12,3 +12,10 @@ assert.equal(groups[0].severity,'block');
 assert.equal(groupFindings([row('a','a','review'),row('b','b','mystery')])[0].severity,'mystery');
 assert.equal(groupFindings([row('a','a','mystery'),row('b','b','block')])[0].severity,'block');
 assert.equal(groups.flatMap(g=>g.findings).length,inputs.length);
+// History may contain multiple observations of one stable finding ID.
+const history = [row('same','literal-password','info',{last_verified:'2026-01-01'}),
+  row('same','literal-password','info',{last_verified:'2026-02-01'})];
+const historicalGroup = groupFindings(history)[0];
+assert.equal(historicalGroup.findings.length,2);
+assert.notEqual(historicalGroup.findings[0],historicalGroup.findings[1]);
+assert.deepEqual(historicalGroup.findings.map(f=>f.last_verified),['2026-01-01','2026-02-01']);
