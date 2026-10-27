@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from .aliases import AliasPack, normalize_key
 from .types import CredentialSpan
 
@@ -44,6 +45,11 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
     cursor = 0
     fields = 0
     while match := _FIELD.search(text, cursor):
+        # Combining marks are identifier continuations but are not matched by
+        # Python's Unicode \w. Never promote the suffix of a larger key.
+        if match.start() and unicodedata.category(text[match.start() - 1]).startswith('M'):
+            cursor = match.end()
+            continue
         fields += 1
         if fields > MAX_FIELDS:
             raise ValueError('field count limit exceeded')
@@ -51,7 +57,7 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
         role = pack.aliases.get(normalize_key(key))
         start = match.end()
         cursor = start
-        if role is None or start >= len(text):
+        if start >= len(text):
             continue
         quoted = text[start] in "\"'"
         if quoted:
@@ -74,7 +80,17 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
                 cursor = end
                 continue
             cursor = end + 1
-            if _PLACEHOLDER.fullmatch(text[start:end]):
+            tail = cursor
+            while tail < len(text) and text[tail] in ' \t':
+                tail += 1
+            if tail < len(text) and text[tail] not in ',;}] )\r\n#':
+                # A closing quote immediately followed by junk is malformed.
+                # Consume the rest of this scalar to avoid rescanning it.
+                while tail < len(text) and text[tail] not in ',;}\r\n':
+                    tail += 1
+                cursor = tail
+                continue
+            if role is None or _PLACEHOLDER.fullmatch(text[start:end]):
                 continue
         else:
             prefix = _PLACEHOLDER_PREFIX.match(text, start)
@@ -87,6 +103,8 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
             # Trailing whitespace is not part of the literal location.
             while end > start and text[end - 1] in ' \t':
                 end -= 1
+            if role is None:
+                continue
             raw = text[start:end]
             if raw.lower() in {'null', 'none', '~', 'true', 'false'} or _REFERENCE.fullmatch(raw) or _PLACEHOLDER.fullmatch(raw):
                 continue

@@ -36,6 +36,11 @@ class AliasEngineTests(unittest.TestCase):
         spans = scan_fields(text, self.pack)
         self.assertEqual([text[s.start:s.end] for s in spans], ['ok'])
 
+    def test_unicode_combining_boundary_and_unrelated_quoted_scalar(self):
+        text = 'name\u0301password=demo\n{"description":"password=demo", "password":"x"}\npassword="abc"junk\npassword=y'
+        spans = scan_fields(text, self.pack)
+        self.assertEqual([text[s.start:s.end] for s in spans], ['x', 'y'])
+
     def test_quoted_references_are_literals(self):
         text = '''password=$VAR
 password=${VAR}
