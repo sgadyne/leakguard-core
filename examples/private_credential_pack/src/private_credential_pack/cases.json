@@ -1,0 +1,7 @@
+{
+  "cases": [
+    {"case_id":"private-key-positive", "text":"acme_deploy_key=\"x\"", "logical_path":"fixtures/private.txt", "format_id":"text", "part_id":"text", "expected_findings":[{"rule":"credential-api-key", "start_line":1, "end_line":1, "severity":"block"}]},
+    {"case_id":"private-key-boundary", "text":"my_acme_deploy_key_suffix=\"x\"", "logical_path":"fixtures/private.txt", "format_id":"text", "part_id":"text"},
+    {"case_id":"private-reference", "text":"acme_deploy_key=$DEPLOY_KEY", "logical_path":"fixtures/private.txt", "format_id":"text", "part_id":"text"}
+  ]
+}

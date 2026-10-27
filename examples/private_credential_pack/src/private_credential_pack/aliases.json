@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "pack_id": "private-example",
+  "aliases": [
+    {"name": "acme_deploy_key", "role": "api-key", "group": "developer-ci"}
+  ]
+}
