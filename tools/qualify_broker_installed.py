@@ -22,7 +22,7 @@ def main():
     parser.add_argument("--python", required=True, type=Path)
     parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--wheels", required=True, type=Path)
-    parser.add_argument("--uv", type=Path, default=Path("/home/dev/.local/bin/uv"))
+    parser.add_argument("--uv", type=Path, default=Path(shutil.which("uv") or "uv"))
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     artifacts = args.artifacts.resolve()

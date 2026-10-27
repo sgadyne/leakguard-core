@@ -39,7 +39,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--artifacts", required=True, type=Path)
     p.add_argument("--gitleaks", required=True, type=Path)
-    p.add_argument("--uv", type=Path, default=Path("/home/dev/.local/bin/uv"))
+    p.add_argument("--uv", type=Path, default=Path(shutil.which("uv") or "uv"))
     args = p.parse_args()
     artifacts = args.artifacts.absolute()
     if artifacts.resolve().is_relative_to(ROOT) or artifacts.exists() or artifacts.is_symlink():

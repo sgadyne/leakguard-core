@@ -345,7 +345,7 @@ def _main() -> int:
     wheel_dir = artifact_root / "wheels"
     wheel_dir.mkdir()
     venv = artifact_root / "venv"
-    uv = Path(os.environ.get("LEAKGUARD_BROKER_UV", "/home/dev/.local/bin/uv"))
+    uv = Path(os.environ.get("LEAKGUARD_BROKER_UV", shutil.which("uv") or "uv"))
     lock_path = repo / "packages" / "leakguard_broker" / "requirements-py311.lock"
     receipt_path = artifact_root / "receipt.json"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
