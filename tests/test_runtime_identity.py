@@ -20,6 +20,33 @@ from leakguard_core.sources import acquire_file
 
 
 class RuntimeIdentityTests(unittest.TestCase):
+    def test_work_verification_is_sufficient_to_derive_cache_eligibility(self):
+        """The two modes hash identical bytes; work adds plugin state fences."""
+        from leakguard_core.plugins import PluginManifest,RuleSpec
+        root=Path(scan_policy.__file__).parent
+        known=PluginManifest(id='fixture',implementation_version='1',kind='detector',
+                             rules=(RuleSpec('fixture'),),deterministic=True,external_state='none')
+        unknown=PluginManifest(id='fixture',implementation_version='1',kind='detector',
+                               rules=(RuleSpec('fixture'),),deterministic=True,external_state='unknown')
+        cases=[({},(),(),True,True),
+               ({},({'module':'fixture.plugin'},),(known,),False,True),
+               ({},({'module':'fixture.plugin'},),(unknown,),False,False),
+               ({},({'module':'fixture.plugin'},),(),False,False),
+               ({'credential_store':'synthetic-materials'},(),(),False,False),
+               ({'script_checks':[{'argv':['synthetic-command']}]},(),(),False,False)]
+        with patch.object(scan_policy,'_python_files',return_value=[root/'engine.py']), \
+             patch.object(scan_policy,'_file_identity',return_value='synthetic-artifact'), \
+             patch.object(scan_policy,'_module_artifacts',return_value=[('fixture','synthetic-artifact')]), \
+             patch.object(scan_policy,'_dependency_closure',return_value=([],True)), \
+             patch('importlib.metadata.packages_distributions',return_value={}):
+            for config,specs,manifests,cache,work in cases:
+                with self.subTest(plugins=len(specs),manifest_state=[m.external_state for m in manifests],config_keys=list(config)):
+                    normal=scan_policy.runtime_identity(config,sys.executable,specs,plugin_manifests=manifests)
+                    verified=scan_policy.runtime_identity(config,sys.executable,specs,plugin_manifests=manifests,for_work=True)
+                    self.assertEqual(normal[0],verified[0])
+                    self.assertEqual((normal[1],verified[1]),(cache,work))
+                    self.assertEqual(normal[1],verified[1] and not specs and not config.get('script_checks'))
+
     def preserve_mtime_write(self, path: Path, value: bytes) -> None:
         previous = path.stat()
         path.write_bytes(value)

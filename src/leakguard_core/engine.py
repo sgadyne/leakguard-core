@@ -508,11 +508,15 @@ class ScanService:
             self._plugins = plugins.load(self.config.get('plugins', []), worker_policy=self.config.get('worker_policy', 'strict'))
             if self.config.get('script_checks'):
                 self._plugins.extend(plugins.load_scripts(self.config['script_checks']))
-            self._runtime, self._cache_eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins))
-            _, self._work_verifiable = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins),for_work=True)
+            # Work verification and persistent-cache eligibility inspect the
+            # same artifacts. The work mode adds deterministic/external-state
+            # fences; without plugins its eligibility is identical to normal
+            # mode. Derive both flags from one bounded byte traversal here.
+            # Per-scan runtime validation before and after content is unchanged.
+            self._runtime, self._work_verifiable = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins),for_work=True)
             # Until a verifiable plugin dependency closure is available, execution is
             # supported and persistent semantic reuse is deliberately disabled.
-            self._cache_eligible = self._cache_eligible and not self._plugins
+            self._cache_eligible = self._work_verifiable and not self._plugins
         except Exception:
             from ._result_cache import OBSERVATIONS
             OBSERVATIONS.close_scope(self._observation_scope)
