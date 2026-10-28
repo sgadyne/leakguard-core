@@ -117,15 +117,29 @@ class RemoteDiscovery:
       bucket=self.store._partitions.bucket(logical,'e')
       with self.store.partition(bucket) as child:
        view=_Evidence(child,self.store);generation=view.reserve(reference);view.record_result(result,generation=generation);job['new_findings']+=view.new_findings
-      state='inspected' if result.coverage is CoverageState.COMPLETE else 'unsupported' if result.coverage is CoverageState.OMITTED else 'inspection-error'
-      if state=='inspected' and any(x.omission_id for x in result.issues):state='inspected-with-omissions'
-      self.store.inventory_set(logical,state,detail=json.dumps({'digest':snapshot['sha256'],'remote_signature':snapshot['signature'],'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({x.code.value for x in result.issues}),'transport':'ssh','checked_after_scan':bool(valid)}));scanned+=1
+      previous=next((row[9] for row in admitted if row[0]==logical),None)
+      self._record_inventory_outcome(logical,snapshot,result,valid,job,previous);scanned+=1
      if not cancel():self._retry_missing([r for r in admitted if r[0] in snapshots],observed,job)
      inputs.clear();snapshots.clear();transient.close()
   if job.get('inventory_complete') and job.get('reconcile_cursor',0)<256:
    job['reconcile_cursor']=_advance_partitions(job.get('reconcile_cursor',0),lambda index:self.store.reconcile_location(source,job['inventory_generation'],index))
   job['files_scanned']+=scanned
   return {'scanned':scanned,'inventory_complete':job.get('inventory_complete',False) and job.get('reconcile_cursor',0)>=256}
+
+ def _record_inventory_outcome(self,logical,snapshot,result,valid,job,previous):
+  try:previous=json.loads(previous) if previous else {}
+  except (ValueError,TypeError):previous={}
+  if not isinstance(previous,dict):previous={}
+  attempts=int(previous.get('attempts',0))
+  if result.coverage is CoverageState.COMPLETE:
+   state='inspected-with-omissions' if any(x.omission_id for x in result.issues) else 'inspected';attempts=0
+  elif result.coverage is CoverageState.OMITTED:state='unsupported';attempts=0
+  else:
+   # A report can contain a partial result after exhausting a shared batch
+   # deadline. Retry that version alone before retaining an explicit gap.
+   attempts+=1;job['content_batch_limit']=1
+   state='pending' if attempts<3 else 'inspection-error'
+  self.store.inventory_set(logical,state,detail=json.dumps({'digest':snapshot['sha256'],'remote_signature':snapshot['signature'],'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({x.code.value for x in result.issues}),'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==snapshot['sha256'] if previous.get('digest') else None,'transport':'ssh','checked_after_scan':bool(valid)}))
 
  def _retry_missing(self,rows,observed,job):
   missing=[row for row in rows if row[0] not in observed]

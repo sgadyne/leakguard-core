@@ -53,6 +53,37 @@ def test_missing_remote_results_have_bounded_per_file_retries():
  assert json.loads(owner.store.rows[row[0]][1])['attempts']==7
 
 
+@pytest.mark.parametrize('recovers',[True,False])
+def test_partial_remote_report_retries_alone_after_encrypted_restart(tmp_path,recovers):
+ from datetime import datetime,timezone
+ from types import SimpleNamespace
+ from leakguard_host.discovery_remote import RemoteDiscovery
+ from leakguard_core.models import CoverageState,ErrorCode
+ from leakguard_vault import EncryptedScanStore
+ path=tmp_path/'observations.lgo';phrase='synthetic-remote-partial-recovery'
+ logical='ssh://devbox/home/dev/operator.env';sibling='ssh://devbox/home/dev/ordinary.txt'
+ store=EncryptedScanStore.create(path,phrase)
+ store.inventory_put([(logical,'vm','file','sig','pending',0,1,20,None,None),(sibling,'vm','file','sig','inspected',10,1,20,None,None)])
+ job={};snapshot={'sha256':'a'*64,'signature':[1,2,3]}
+ for attempt in range(3):
+  result=SimpleNamespace(coverage=CoverageState.COMPLETE if recovers and attempt==2 else CoverageState.INCOMPLETE,issues=() if recovers and attempt==2 else (SimpleNamespace(code=ErrorCode.PLUGIN_TIMEOUT,omission_id=None),),identity=SimpleNamespace(runtime_id='runtime',policy_id='policy'),observed_at=datetime.now(timezone.utc))
+  bucket=store._partitions.bucket(logical,'i')
+  previous=store._partitions.get(bucket).conn.execute('SELECT detail FROM inventory WHERE path=?',(logical,)).fetchone()[0]
+  RemoteDiscovery(SimpleNamespace(store=store,config=None))._record_inventory_outcome(logical,snapshot,result,True,job,previous)
+  store.checkpoint();store.close();store=EncryptedScanStore.open(path,phrase)
+  state,detail=store._partitions.get(bucket).conn.execute('SELECT status,detail FROM inventory WHERE path=?',(logical,)).fetchone()
+  assert state==('pending' if attempt<2 else 'inspected' if recovers else 'inspection-error')
+  assert json.loads(detail)['attempts']==(0 if recovers and attempt==2 else attempt+1)
+  assert store.inventory_counts().get('inspected')==(2 if recovers and attempt==2 else 1)
+ assert job['content_batch_limit']==1
+ assert json.loads(detail)['previous_failure_codes']==['plugin-timeout']
+ if not recovers:
+  # A newly qualified runtime re-admits the old error; it cannot make it clean.
+  store.invalidate_location({'id':'vm','root':'ssh://devbox/home/dev'},int(bucket[1:],16))
+  assert store.inventory_counts()=={'pending':1,'inspected':1}
+ store.close()
+
+
 def test_isolated_helper_omits_link_without_losing_regular_sibling(tmp_path):
  import subprocess,sys
  from leakguard_host import ssh_location_worker

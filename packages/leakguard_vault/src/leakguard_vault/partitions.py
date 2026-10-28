@@ -252,7 +252,7 @@ class EncryptedPartitions:
         if bucket in self.catalog or bucket in self.cache:
             store=self.get(bucket)
             with store.conn:
-                store.conn.execute("UPDATE inventory SET status='pending',detail='policy-or-runtime-changed' WHERE location=? AND kind='file' AND status IN ('inspected','inspected-with-omissions','unsupported')",(source['id'],))
+                store.conn.execute("UPDATE inventory SET status='pending',detail='policy-or-runtime-changed' WHERE location=? AND kind='file' AND status IN ('inspected','inspected-with-omissions','unsupported','inspection-error')",(source['id'],))
         evidence=f'e{index:02x}'
         if evidence in self.catalog or evidence in self.cache:self.get(evidence).invalidate_scope(source['root'],reason='source-unavailable')
 

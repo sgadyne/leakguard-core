@@ -64,6 +64,13 @@ Unavailable locations back off while other locations continue. A replaced VM or
 root identity requires review. SSH scope is the selected directory, not a claim
 to cover all disks or inaccessible accounts on the VM.
 
+A partial remote detector result is retried individually, at most three attempts
+for that observed queue entry. Retry counts survive encrypted restart. Persistent
+failures remain explicit inspection errors; an upgraded policy/runtime re-admits
+them without declaring their prior evidence current. Unsupported encodings and
+formats remain coverage gaps. Raw snapshots are never persisted as a local
+plaintext copy.
+
 A private `pending-locations.json` preference file can stage validated SSH
 locations before scan storage is unlocked. It contains only location preferences,
 never file inventory or secrets. After each location is durably registered in
@@ -106,3 +113,7 @@ backup while the app is stopped:
 Rollback restores the profile as of its backup; preserve any newer encrypted
 profile separately before an intentional rollback. The original runtime and app
 must remain available. Ad-hoc local signing is not Developer ID/notarization.
+The runtime backup covers the profile directory. If encrypted stores were moved
+outside it, preserve those configured files and the observation `.parts`
+directory separately before a later runtime upgrade or intentional rollback.
+Automatic backup/rollback of external store paths is not qualified by this beta.
