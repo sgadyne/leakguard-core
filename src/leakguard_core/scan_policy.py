@@ -82,7 +82,7 @@ def _python_files(root):
                 if entry.is_dir(follow_symlinks=False):
                     if entry.name != '__pycache__':
                         pending.append(Path(entry.path))
-                elif entry.is_dir() or entry.name.endswith(('.py', '.toml')):
+                elif entry.is_dir() or entry.name.endswith(('.py', '.toml', '.json')):
                     # A linked package directory is an unknown closure. Include
                     # its unavailable file identity rather than silently omit
                     # behavior-bearing code or follow an unbounded directory.
@@ -190,6 +190,7 @@ def _module_artifacts(name):
     """Locate explicitly configured module bytes without importing parent code."""
     artifacts = []
     prefix = []
+    package_roots = []
     try:
         from ._python import extension_paths
         search = list(extension_paths())
@@ -202,11 +203,12 @@ def _module_artifacts(name):
             if spec.origin and spec.origin not in {'built-in', 'frozen'}:
                 artifacts.append(('.'.join(prefix), _file_identity(spec.origin)))
             search = list(spec.submodule_search_locations or ())
+            package_roots.extend(search)
         # Local/editable packages have no verified distribution closure. Hash
         # their own Python implementation as identity, while reuse stays disabled.
-        if search:
+        if package_roots:
             count = 0
-            for directory in search:
+            for directory in dict.fromkeys(package_roots):
                 for path in _python_files(directory):
                     count += 1
                     if count > 10_000:
@@ -260,20 +262,20 @@ def _dependency_closure(names):
     return sorted(closure, key=lambda item: item['name'].lower()), complete
 
 
-def runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manifests=(), deadline=None, cancel=None):
+def runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manifests=(), deadline=None, cancel=None, for_work=False):
     """Bound artifact inspection by both wall time and total filesystem work."""
     budget = _IdentityBudget(deadline if deadline is not None else time.monotonic() + 30, cancel)
     token = _IDENTITY_BUDGET.set(budget)
     try:
         budget.check()
-        return _runtime_identity(config, binary, plugin_specs, plugin_manifests=plugin_manifests)
+        return _runtime_identity(config, binary, plugin_specs, plugin_manifests=plugin_manifests,for_work=for_work)
     except (OSError, ValueError, TypeError):
         raise RuntimeIdentityError('source-unavailable') from None
     finally:
         _IDENTITY_BUDGET.reset(token)
 
 
-def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manifests=()):
+def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manifests=(),for_work=False):
     """Hash actual behavior-bearing bytes; unknown extension closure disables reuse."""
     config = config or {}
     root = Path(__file__).resolve().parent
@@ -343,7 +345,11 @@ def _runtime_identity(config=None, binary=None, plugin_specs=(), *, plugin_manif
              'dependencies': closure, 'plugins': specs, 'plugin_artifacts': module_artifacts,
              'manifests': manifests,
              'scripts': [{'spec': spec, 'artifacts': [(index, _file_identity(value)) for index, value in enumerate(spec['argv']) if Path(value).is_file()]} for spec in config.get('script_checks', ())]}
-    if specs or value['scripts'] or config.get('credential_store'):
+    complete=complete and all(identity!='unavailable' for _,artifacts in module_artifacts for _,identity in artifacts)
+    if for_work:
+        complete=complete and len(manifests)==len(specs) and all(item['deterministic'] and item['external_state']=='none' for item in manifests)
+        if value['scripts'] or config.get('credential_store'):complete=False
+    elif specs or value['scripts'] or config.get('credential_store'):
         complete = False
     _check_budget()
     complete = complete and navigation_id != 'unavailable' and all(identity != 'unavailable' for _, identity in core)

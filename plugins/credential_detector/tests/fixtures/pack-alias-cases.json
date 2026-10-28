@@ -222,5 +222,26 @@
     "rule": "credential-private-key",
     "positive": "signing_private_key=\"x\"",
     "negative": "prefixsigning_private_keysuffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "refresh_token",
+    "rule": "credential-access-token",
+    "positive": "refresh_token=\"x\"",
+    "negative": "refresh_token_suffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "bearer_tokens_json",
+    "rule": "credential-access-token",
+    "positive": "bearer_tokens_json=\"x\"",
+    "negative": "bearer_tokens_json_suffix=\"x\""
+  },
+  {
+    "group": "common",
+    "name": "pin",
+    "rule": "credential-password",
+    "positive": "pin=\"x\"",
+    "negative": "pin_suffix=\"x\""
   }
 ]

@@ -101,13 +101,22 @@ def test_empty_basic_username_is_permitted():
 @pytest.mark.parametrize("line", [
     "Authorization: Bearer " + "a" * 4097,
     "Authorization: Basic " + "Y" * 4100,
-    "unrelated " + "x" * 8192,
     "Authorization: Bearer " + " " * 8192 + "abc",
 ])
 def test_exceeding_scan_bound_fails_closed_without_values(line):
     with pytest.raises(ValueError, match="exceeds scan bound") as exc:
         scan_http(line)
     assert line not in str(exc.value)
+
+
+def test_long_unrelated_line_preserves_later_header_inspection():
+    prefix = "unrelated " + "x" * 8192 + "\n"
+    text = prefix + "Authorization: Bearer synthetic-control"
+    spans = scan_http(text)
+    assert len(spans) == 1
+    assert text[spans[0].start:spans[0].end] == "synthetic-control"
+    assert spans[0].start == len(prefix) + 22
+    assert scan_http(prefix.rstrip("\n")) == ()
 
 
 def test_total_text_limit_counts_unicode_codepoints_and_fails_closed():

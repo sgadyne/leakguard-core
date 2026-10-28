@@ -24,6 +24,7 @@ _HEADER = re.compile(
     r"(?P<token>[^ \t\r\n]+)[ \t]*\Z",
     re.ASCII,
 )
+_HEADER_START = re.compile(r"[ \t]*(?i:authorization):[ \t]*(?i:basic|bearer)[ \t]+", re.ASCII)
 _NEXT_HEADER = re.compile(r"[ \t]+[!#$%&'*+.^_`|~0-9A-Za-z-]+:", re.ASCII)
 _BEARER = re.compile(r"[A-Za-z0-9._~+/-]+=*\Z", re.ASCII)
 _REFERENCE = re.compile(
@@ -75,7 +76,15 @@ def scan_http(text: str) -> tuple[CredentialSpan, ...]:
         # A CR is allowed only as the line terminator in CRLF.
         content_end = end - 1 if newline >= 0 and end > offset and text[end - 1] == "\r" else end
         if content_end - offset > _MAX_LINE:
-            raise ValueError("HTTP header line exceeds scan bound")
+            if _HEADER_START.match(text, offset, content_end):
+                raise ValueError("HTTP header line exceeds scan bound")
+            # A complete header can only begin at this line's start. Ignore
+            # oversized unrelated lines without copying them; MAX_TEXT still
+            # bounds the entire scan, and oversized candidate headers fail.
+            if newline < 0:
+                break
+            offset = end + 1
+            continue
         content = text[offset:content_end]
         next_offset = end + 1
         continuation = (newline >= 0 and next_offset < len(text)

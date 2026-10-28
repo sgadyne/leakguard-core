@@ -58,5 +58,5 @@ def core_command(module, *args, executable=None, search_paths=()):
     encoded = json.dumps(paths, ensure_ascii=True, separators=(',', ':'))
     if len(encoded) > 65536:
         raise ValueError('configuration-invalid')
-    return [str(executable or sys.executable), '-I', '-X', 'utf8', '-c', _LAUNCH,
+    return [str(executable or sys.executable), '-I', '-B', '-X', 'utf8', '-c', _LAUNCH,
             str(Path(__file__).resolve().parent.parent), module, encoded, *args]

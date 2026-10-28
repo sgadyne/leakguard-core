@@ -212,6 +212,27 @@ class Scanner:
             raise RuntimeError("Scan service returned an invalid report")
         return result
 
+    def scan_within(self, root: Path, paths: Iterable[Path], *, policy: ScanPolicy,
+                    limits: ScanLimits, use_cache: bool = True,
+                    cancel: Callable[[], bool] | None = None) -> ScanReport:
+        """Inspect explicit files through a pinned directory boundary.
+
+        This does not enumerate directories. Descriptor-relative acquisition
+        rejects linked or replaced descendants before reading their bytes.
+        """
+        self._ensure_open()
+        _validate_scan_args(policy,limits,use_cache,cancel)
+        if not isinstance(root,Path):raise TypeError('root must be a pathlib.Path')
+        from .sources import FilesystemBoundary,ScopedFileInput
+        boundary=FilesystemBoundary(root)
+        def inputs():
+            for path in paths:
+                if not isinstance(path,Path):raise TypeError('path must be a pathlib.Path')
+                yield ScopedFileInput(path,boundary)
+        result=self._service.scan(inputs(),policy=policy,limits=limits,use_cache=use_cache,cancel=cancel)
+        if type(result) is not ScanReport:raise RuntimeError('Scan service returned an invalid report')
+        return result
+
     def scan_paths(
         self,
         paths: Iterable[Path],

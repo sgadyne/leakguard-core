@@ -509,6 +509,7 @@ class ScanService:
             if self.config.get('script_checks'):
                 self._plugins.extend(plugins.load_scripts(self.config['script_checks']))
             self._runtime, self._cache_eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins))
+            _, self._work_verifiable = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins),for_work=True)
             # Until a verifiable plugin dependency closure is available, execution is
             # supported and persistent semantic reuse is deliberately disabled.
             self._cache_eligible = self._cache_eligible and not self._plugins
@@ -580,7 +581,7 @@ class ScanService:
         # slice, including slices in this service. A fresh fence forces an audit
         # to finish in one bounded invocation rather than resume stale evidence.
         # Keep the report runtime identity tied to the actual inspected bytes.
-        if any(getattr(getattr(instance, 'manifest', None), 'external_state', 'unknown') == 'unknown'
+        if not self._work_verifiable or any(getattr(getattr(instance, 'manifest', None), 'external_state', 'unknown') == 'unknown'
                for instance in self._plugins):
             identity['runtime_id'] = hashlib.sha256(
                 (self._runtime + ':' + uuid.uuid4().hex).encode()).hexdigest()

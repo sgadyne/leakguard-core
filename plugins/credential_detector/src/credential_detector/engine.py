@@ -12,13 +12,14 @@ RULES = {
     'client-secret': 'credential-client-secret',
     'access-token': 'credential-access-token',
     'private-key': 'credential-private-key',
+    'recovery-phrase':'credential-recovery-phrase',
 }
 MAX_TEXT = 10_000_000
 MAX_VALUE = 4096
 MAX_FIELDS = 100_000
 MAX_SPANS = 10_000
 _KEY = r'[A-Za-z][A-Za-z0-9_.-]{0,127}'
-_FIELD = re.compile(r'(?<![\w.\-])(?:"(?P<double>' + _KEY + r')"|\'(?P<single>' + _KEY + r')\'|(?P<bare>' + _KEY + r'))[ \t]*[:=][ \t]*')
+_FIELD = re.compile(r'(?<![\w.\-])(?:"(?P<double>' + _KEY + r')"|\'(?P<single>' + _KEY + r')\'|(?P<bare>' + _KEY + r'))[ \t]*(?::=|[:=])[ \t]*')
 _TOKEN = re.compile(_FIELD.pattern + r'''|(?P<quote>["'])''')
 _REFERENCE = re.compile(
     r'(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}'
@@ -71,6 +72,13 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
             raise ValueError('field count limit exceeded')
         key = match.group('double') or match.group('single') or match.group('bare')
         role = pack.aliases.get(normalize_key(key))
+        # Operational environment prefixes retain the role of a complete suffix.
+        # Require a separator: e.g. MY_APP_CLIENT_SECRET, never 'notpassword'.
+        if role is None:
+            for suffix, candidate in (('bearer_tokens_json', 'access-token'), ('client_secret', 'client-secret'), ('refresh_token', 'access-token'), ('access_token', 'access-token'), ('api_key', 'api-key'), ('password', 'password'), ('passphrase', 'password'), ('pin', 'password')):
+                if re.search(r'(?:^|[_.-])' + suffix.replace('_', '[_.-]') + r'$', key, re.I):
+                    role = candidate
+                    break
         start = match.end()
         cursor = start
         if start >= len(text):
@@ -81,7 +89,7 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
             start += 1
             end = start
             escaped = False
-            while end < len(text) and text[end] not in '\r\n' and end - start <= MAX_VALUE:
+            while end < len(text) and text[end] not in '\r\n' and (role is None or end - start <= MAX_VALUE):
                 ch = text[end]
                 if ch == quote and not escaped:
                     break
@@ -90,7 +98,7 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
                 else:
                     escaped = False
                 end += 1
-            if end - start > MAX_VALUE:
+            if role is not None and end - start > MAX_VALUE:
                 raise ValueError('field value limit exceeded')
             if end >= len(text) or text[end] != quote:
                 cursor = end
@@ -111,9 +119,9 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
         else:
             prefix = _PLACEHOLDER_PREFIX.match(text, start)
             end = prefix.end() if prefix else start
-            while end < len(text) and text[end] not in ',;}\r\n' and end - start <= MAX_VALUE:
+            while end < len(text) and text[end] not in ',;}\r\n' and (role is None or end - start <= MAX_VALUE):
                 end += 1
-            if end - start > MAX_VALUE:
+            if role is not None and end - start > MAX_VALUE:
                 raise ValueError('field value limit exceeded')
             cursor = end
             # Trailing whitespace is not part of the literal location.
@@ -122,10 +130,28 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
             if role is None:
                 continue
             raw = text[start:end]
+            if re.match(r'(?:[A-Za-z_$][\w.$]*[ \t]*\(|(?:await|new)[ \t]+|[A-Za-z_$][\w.$]*[ \t]*\[)', raw):
+                continue
             if raw.lower() in {'null', 'none', '~', 'true', 'false'} or _REFERENCE.fullmatch(raw) or _PLACEHOLDER.fullmatch(raw):
                 continue
         if end > start:
             if len(result) >= MAX_SPANS:
                 raise ValueError('field finding limit exceeded')
             result.append(CredentialSpan(RULES[role], start, end))
+    return tuple(result)
+
+
+_PROSE = re.compile(r'(?im)\b(?:password|passphrase|pin)\s+is\s+(?P<value>[^\s\r\n]{1,4096})')
+_LIST = re.compile(r'(?im)^[^\r\n]{0,80}\b(?:password|credential|passphrase)s?\s*:?\s*\r?\n(?P<value>[^\s\r\n]{8,4096})[ \t]*$')
+_RECOVERY = re.compile(r'(?im)\b(?:wallet[ \t]+)?(?:recovery[ \t]+(?:words|phrase)|seed[ \t]+phrase)[ \t]*[:=][ \t]*(?P<value>[a-z]+(?:[ \t]+[a-z]+){11,23})[ \t]*$')
+
+def scan_contextual(text):
+    if len(text)>MAX_TEXT:raise ValueError('field input limit exceeded')
+    result=[]
+    for pattern,rule in ((_PROSE,'credential-password'),(_LIST,'credential-password'),(_RECOVERY,'credential-recovery-phrase')):
+        for match in pattern.finditer(text):
+            start,end=match.span('value')
+            if pattern is _PROSE and text[end-1:end] in {'.',',',';'}:end-=1
+            if end>start and len(result)<MAX_SPANS:result.append(CredentialSpan(rule,start,end))
+            elif len(result)>=MAX_SPANS:raise ValueError('field finding limit exceeded')
     return tuple(result)

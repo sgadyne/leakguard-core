@@ -5,7 +5,7 @@ from leakguard_core.models import AnalysisMetadata
 from leakguard_core.plugins import DetectionContext, DistributionSpec, NewFinding, OptionSchema, PluginManifest, RuleSpec
 
 from .aliases import load_packs
-from .engine import RULES, scan_fields
+from .engine import RULES, scan_fields, scan_contextual
 from .http import scan_http
 
 API_VERSION = 2
@@ -13,7 +13,7 @@ MANIFEST = PluginManifest(
     id='credential-detector', implementation_version='0.1.0a2', kind='detector',
     rules=tuple(RuleSpec(rule, 'block') for rule in (*RULES.values(), 'credential-http-basic', 'credential-http-bearer')),
     formats=(), part_kinds=(), options_schema=OptionSchema(),
-    dependencies=(DistributionSpec('leakguard-credential-detector'), DistributionSpec('leakguard-core')), deterministic=True, external_state='unknown', result_schema=2,
+    dependencies=(DistributionSpec('leakguard-credential-detector'), DistributionSpec('leakguard-core')), deterministic=True, external_state='none', result_schema=2,
 )
 DEFAULT_RESOURCES = tuple(name + '.json' for name in (
     'common', 'cloud', 'developer-ci', 'data-messaging', 'saas-ai', 'key-material'))
@@ -25,7 +25,7 @@ class CredentialDetector:
 
     def detect(self, text: str, context: DetectionContext):
         del context
-        spans = sorted((*scan_fields(text, self.pack), *scan_http(text)), key=lambda s: (s.start, s.end, s.rule))
+        spans = sorted((*scan_fields(text, self.pack), *scan_http(text), *scan_contextual(text)), key=lambda s: (s.start, s.end, s.rule))
         # Calculate line numbers in one pass instead of repeatedly scanning input.
         line, position = 1, 0
         for span in spans:

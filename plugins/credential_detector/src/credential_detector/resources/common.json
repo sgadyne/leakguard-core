@@ -41,6 +41,21 @@
       "name": "access_token",
       "role": "access-token",
       "group": "common"
+    },
+    {
+      "name": "refresh_token",
+      "role": "access-token",
+      "group": "common"
+    },
+    {
+      "name": "bearer_tokens_json",
+      "role": "access-token",
+      "group": "common"
+    },
+    {
+      "name": "pin",
+      "role": "password",
+      "group": "common"
     }
   ]
 }

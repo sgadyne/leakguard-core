@@ -125,6 +125,30 @@ password="null"
         with self.assertRaisesRegex(ValueError, 'limit'):
             scan_fields('password="' + 'x' * (MAX_VALUE + 1) + '"', self.pack)
 
+    def test_long_unrelated_fields_do_not_abort_credential_inspection(self):
+        # Source maps and CSS data URIs routinely exceed the credential-value
+        # bound. Unknown fields remain bounded by MAX_TEXT and are consumed as
+        # one scalar, including alias-looking text inside an unrelated quote.
+        for quoted in (False, True):
+            value = 'x' * (MAX_VALUE + 1) + ' password=inside-unrelated-scalar'
+            scalar = '"' + value + '"' if quoted else value
+            text = 'unrelated=' + scalar + '\npassword=visible-synthetic-control\n'
+            spans = scan_fields(text, self.pack)
+            self.assertEqual([text[s.start:s.end] for s in spans], ['visible-synthetic-control'])
+
 
 if __name__ == '__main__':
     unittest.main()
+
+class BetaQualityRegressions(unittest.TestCase):
+    def test_masked_operational_shapes_and_code_controls(self):
+        from credential_detector.plugin import CredentialDetector
+        from credential_detector.engine import scan_contextual
+        pack=CredentialDetector().pack
+        cases=[('refresh_token="synthetic_refresh_value_0123456789"','credential-access-token'),('ACME_BEARER_TOKENS_JSON="{\\"operator\\":\\"synthetic-token\\"}"','credential-access-token'),('ACME_OPERATOR_PASSWORD=synthetic_password_value','credential-password'),('ACME_FIRST_PASSWORD=synthetic_password_value','credential-password'),('OAUTH2_PROXY_CLIENT_SECRET=synthetic_secret','credential-client-secret'),('ACME_CUSTOM_PIN=482619','credential-password')]
+        for text,rule in cases:
+            with self.subTest(shape=text.split('=')[0]):self.assertIn(rule,[s.rule for s in scan_fields(text,pack)])
+        for text in ['password=getpass.getpass("Enter password: ")','password=make_password()','password := randomPassword()','password=os.environ["VALUE"]']:
+            with self.subTest(expression=text):self.assertEqual(scan_fields(text,pack),())
+        for text in ['My mailbox password is synthetic-only-value.','Mailbox credential\nsynthetic-only-value','Wallet recovery words: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about']:
+            self.assertTrue(scan_contextual(text))
