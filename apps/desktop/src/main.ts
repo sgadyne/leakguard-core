@@ -344,7 +344,7 @@ async function requestQuit(){
   }
 }
 async function main(){
-  app.setName('Password Buddy');
+  if(app.getName()!=='Password Buddy Beta')app.setName('Password Buddy');
   app.setAppUserModelId('org.leakguard.passwordbuddy');
   const index=process.argv.indexOf('--buddy-data-dir');
   const input=index>=0?process.argv[index+1]:path.join(app.getPath('appData'),'Password Buddy');

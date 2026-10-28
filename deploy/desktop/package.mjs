@@ -25,13 +25,14 @@ try {
   try { await cp(path.join(source, 'assets'), path.join(staging, 'assets'), { recursive: true }); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   // Main/preload are self-contained bundles: no dev dependencies or source tree ship.
   await writeFile(path.join(staging, 'package.json'), JSON.stringify({
-    name: 'password-buddy', productName: 'Password Buddy', version: '0.1.0-alpha.1',
+    name: 'password-buddy', productName: values['local-beta']?'Password Buddy Beta':'Password Buddy', version: '0.1.0-alpha.1',
     main: 'dist/main.cjs', author: 'LeakGuard', description: 'Password Buddy desktop workbench',
   }, null, 2) + '\n');
   const [platform, arch] = targets[values.target];
   const paths = await packager({
     dir: staging, name: 'Password Buddy', executableName: 'Password Buddy', platform, arch,
     electronVersion: '45.0.0', appVersion: '0.1.0-alpha.1', appBundleId: values['local-beta']?'org.leakguard.passwordbuddy.beta':'org.leakguard.passwordbuddy',
+    extendInfo: values['local-beta']?{CFBundleDisplayName:'Password Buddy Beta',CFBundleName:'Password Buddy Beta'}:undefined,
     out: path.resolve(values.output), asar: true, prune: true, overwrite: false,
     osxSign: false, osxNotarize: false,
     win32metadata: { CompanyName: 'LeakGuard', FileDescription: 'Password Buddy', ProductName: 'Password Buddy' },
