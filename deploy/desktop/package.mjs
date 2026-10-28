@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 
 const { values } = parseArgs({ options: {
   target: { type: 'string' }, source: { type: 'string' }, resources: { type: 'string' }, output: { type: 'string' },
+  'local-beta': {type:'boolean',default:false},
 } });
 const targets = { 'macos-arm64': ['darwin', 'arm64'], 'windows-x86_64': ['win32', 'x64'], 'linux-x86_64': ['linux', 'x64'] };
 if (!targets[values.target] || !values.source || !values.resources || !values.output) throw Error('Invalid packaging arguments');
@@ -30,7 +31,7 @@ try {
   const [platform, arch] = targets[values.target];
   const paths = await packager({
     dir: staging, name: 'Password Buddy', executableName: 'Password Buddy', platform, arch,
-    electronVersion: '45.0.0', appVersion: '0.1.0-alpha.1', appBundleId: 'org.leakguard.passwordbuddy',
+    electronVersion: '45.0.0', appVersion: '0.1.0-alpha.1', appBundleId: values['local-beta']?'org.leakguard.passwordbuddy.beta':'org.leakguard.passwordbuddy',
     out: path.resolve(values.output), asar: true, prune: true, overwrite: false,
     osxSign: false, osxNotarize: false,
     win32metadata: { CompanyName: 'LeakGuard', FileDescription: 'Password Buddy', ProductName: 'Password Buddy' },
@@ -60,7 +61,7 @@ try {
       execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', app], {stdio:'inherit'});
     }
   }
-  process.stdout.write(JSON.stringify({ appDirectories: paths, nativeAcceptance: 'not-run' }) + '\n');
+  process.stdout.write(JSON.stringify({ appDirectories: paths, appBundleId:values['local-beta']?'org.leakguard.passwordbuddy.beta':'org.leakguard.passwordbuddy', nativeAcceptance: 'not-run' }) + '\n');
 } finally {
   await rm(staging, { recursive: true, force: true });
 }

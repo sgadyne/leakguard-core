@@ -16,6 +16,12 @@ clock adjustment delays an interval run until its saved deadline. User pauses
 survive restart. Interrupted automatic work resumes after scan-storage unlock.
 Native key access and start at login remain separate explicit opt-ins.
 
+The local beta is packaged with `--local-beta`, using the distinct macOS bundle
+identity `org.leakguard.passwordbuddy.beta` so qualification can run beside the
+previous app. Disposable testing also uses `--buddy-data-dir` with a private
+profile. A distinct bundle identity does not select a different default profile;
+live cutover still requires the explicit verified upgrade and store unlock.
+
 The inventory preserves enumerated metadata, pending/changed content, inspected
 versions, inspection errors, inaccessible paths, placeholders, encrypted stores,
 unsupported formats, exclusions, aliases, and paths not seen again. Unreadable or

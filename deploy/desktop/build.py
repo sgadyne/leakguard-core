@@ -197,11 +197,11 @@ def assemble(args):
     receipt = {"schemaVersion": 1, "target": args.target, "sourceCommit": source_commit,
                "runtimeId": manifest["runtimeId"], "resources": str(resources),
                "manifestSha256": bootstrap.digest(resources / "desktop-manifest.json"),
-               "stageOnly": args.stage_only, "nativeAcceptance": "not-run", "signed": False}
+               "stageOnly": args.stage_only, "localBeta":args.local_beta, "nativeAcceptance": "not-run", "signed": False}
     if not args.stage_only:
         run(["npm", "ci", "--no-audit", "--no-fund"], HERE)
         run(["node", HERE / "package.mjs", "--target", args.target, "--source", SOURCE / "apps/desktop",
-             "--resources", resources, "--output", output / "apps"])
+             "--resources", resources, "--output", output / "apps",*( ["--local-beta"] if args.local_beta else [])])
         if args.target == "macos-arm64":
             receipt.update(signed=True, signatureKind="ad-hoc", notarized=False)
         app_paths = list((output / "apps").iterdir())
@@ -248,6 +248,7 @@ def main():
     parser.add_argument("--backend-input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stage-only", action="store_true")
+    parser.add_argument("--local-beta",action="store_true",help="Distinct macOS beta identity for safe side-by-side qualification")
     parser.add_argument("--skip-js-build", action="store_true", help="consume already built integrated shell/UI")
     parser.add_argument("--provenance", type=Path, help="JSON with original runtime/archive URL and hashes")
     args = parser.parse_args()
