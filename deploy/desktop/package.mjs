@@ -52,9 +52,11 @@ try {
       if (values['local-beta']) {
         // Packager applies name/executableName after extendInfo and overwrites
         // these keys. Keep the stable executable/helper paths, then set the
-        // distinct local-beta identity before sealing the bundle.
+        // distinct display identity before sealing the bundle. CFBundleName
+        // must still match Packager's executable/helper names: Electron uses
+        // it to locate its helpers on startup.
         const plist = path.join(app, 'Contents', 'Info.plist');
-        for (const key of ['CFBundleDisplayName', 'CFBundleName']) {
+        for (const key of ['CFBundleDisplayName']) {
           execFileSync('/usr/bin/plutil', ['-replace', key, '-string', 'Password Buddy Beta', plist]);
           const actual = execFileSync('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', plist], {encoding:'utf8'}).trim();
           if (actual !== 'Password Buddy Beta') throw Error('Local beta bundle identity was not applied');
