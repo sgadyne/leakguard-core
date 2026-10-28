@@ -7,7 +7,7 @@ from leakguard_core.api import Scanner
 from leakguard_core.models import BytesInput,SourceRef,SourceKind,ScanLimits,ScanPolicy,CoverageState,CoverageIssue,ErrorCode
 from leakguard_core.scan_store import MemoryScanStore
 from .ssh_locations import SSHLocations,uri,remote_path
-from .discovery import _Evidence,_priority
+from .discovery import _Evidence,_priority,_advance_partitions
 from .errors import HostError
 from .ssh import SSHRunner
 
@@ -32,14 +32,11 @@ class RemoteDiscovery:
    previous=job.get('inventory_identity') or source.get('inspection_identity');job['inventory_identity']=identity;source['inspection_identity']=identity
    if previous is not None and previous!=identity:job['invalidate_cursor']=0
   if job.get('invalidate_cursor',256)<256:
-   for index in range(job['invalidate_cursor'],min(256,job['invalidate_cursor']+8)):self.store.invalidate_location(source,index)
-   job['invalidate_cursor']+=8;return {'scanned':0,'inventory_complete':False}
+   job['invalidate_cursor']=_advance_partitions(job['invalidate_cursor'],lambda index:self.store.invalidate_location(source,index));return {'scanned':0,'inventory_complete':False}
   if job.get('refresh_requested') and job.get('inventory_complete') and job.get('refresh_cursor',256)>=256:
    job.update(inventory_generation=int(self.owner.clock()*1_000_000),inventory_complete=False,refresh_requested=False,refresh_cursor=0,reconcile_cursor=0,unknown_descendants=0,reconciliation_started_at=self.owner.clock())
   if job.get('refresh_cursor',256)<256:
-   start=job['refresh_cursor']
-   for index in range(start,min(256,start+8)):self.store.queue_reconciliation(source,job['inventory_generation'],index)
-   job['refresh_cursor']=start+8
+   job['refresh_cursor']=_advance_partitions(job['refresh_cursor'],lambda index:self.store.queue_reconciliation(source,job['inventory_generation'],index))
   if not job.get('inventory_complete') and not cancel():
    rows,cursor=self.store.inventory_page(source['id'],'directory','enumerating',cursor=job['inventory_cursor'],limit=1,prefer_priority=job['slices']%10!=0);job['inventory_cursor']=cursor
    if not rows:
@@ -124,9 +121,7 @@ class RemoteDiscovery:
      if not cancel():self._retry_missing([r for r in admitted if r[0] in snapshots],observed,job)
      inputs.clear();snapshots.clear();transient.close()
   if job.get('inventory_complete') and job.get('reconcile_cursor',0)<256:
-   start=job.get('reconcile_cursor',0)
-   for index in range(start,min(256,start+8)):self.store.reconcile_location(source,job['inventory_generation'],index)
-   job['reconcile_cursor']=start+8
+   job['reconcile_cursor']=_advance_partitions(job.get('reconcile_cursor',0),lambda index:self.store.reconcile_location(source,job['inventory_generation'],index))
   job['files_scanned']+=scanned
   return {'scanned':scanned,'inventory_complete':job.get('inventory_complete',False) and job.get('reconcile_cursor',0)>=256}
 

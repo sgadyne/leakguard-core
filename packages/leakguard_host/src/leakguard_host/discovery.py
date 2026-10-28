@@ -24,6 +24,19 @@ def _bucket(path,kind='i'):
     return kind+hashlib.sha256(str(path).encode('utf-8','surrogatepass')).hexdigest()[:2]
 
 
+def _advance_partitions(cursor,apply):
+    """Do at least the previous eight-partition slice, then use idle budget.
+
+    Empty/small partitions need no extra scheduler/SSH round trip. Large
+    partitions retain the previous minimum slice and bounded resident cache.
+    """
+    deadline=time.monotonic()+1
+    for index in range(cursor,256):
+        apply(index)
+        if index-cursor>=7 and time.monotonic()>=deadline:return index+1
+    return 256
+
+
 def _priority(path):
     name=str(path).lower()
     if any(x in name for x in ('.env','.ssh','.aws','.config','credentials','password','token','history','secrets','keychain')):return 0
@@ -214,16 +227,12 @@ class DiscoveryCoordinator:
             source['inspection_identity']=identity
             if previous is not None and previous!=identity:job['invalidate_cursor']=0
         if job.get('invalidate_cursor',256)<256:
-            for index in range(job['invalidate_cursor'],min(256,job['invalidate_cursor']+8)):
-                self.store.invalidate_location(source,index)
-            job['invalidate_cursor']+=8
+            job['invalidate_cursor']=_advance_partitions(job['invalidate_cursor'],lambda index:self.store.invalidate_location(source,index))
             return {'scanned':0,'inventory_complete':False} 
         if job.get('refresh_requested') and job.get('inventory_complete') and job.get('refresh_cursor',256)>=256:
             job.update(inventory_generation=int(self.clock()*1_000_000),inventory_complete=False,refresh_requested=False,refresh_cursor=0,reconcile_cursor=0,empty_directory_pages=0,unknown_descendants=0,reconciliation_started_at=self.clock())
         if job.get('refresh_cursor',256)<256:
-            start=job['refresh_cursor']
-            for index in range(start,min(256,start+8)):self.store.queue_reconciliation(source,job['inventory_generation'],index)
-            job['refresh_cursor']=start+8
+            job['refresh_cursor']=_advance_partitions(job['refresh_cursor'],lambda index:self.store.queue_reconciliation(source,job['inventory_generation'],index))
         deadline=time.monotonic()+10
         if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2))
         scanned=0
@@ -294,8 +303,6 @@ class DiscoveryCoordinator:
                             self.store.inventory_set(path,state,detail=detail);scanned+=1
                         job['new_findings']+=view.new_findings
         if job.get('inventory_complete') and job.get('reconcile_cursor',0)<256:
-            start=job.get('reconcile_cursor',0)
-            for index in range(start,min(256,start+8)):self.store.reconcile_location(source,job['inventory_generation'],index)
-            job['reconcile_cursor']=start+8
+            job['reconcile_cursor']=_advance_partitions(job.get('reconcile_cursor',0),lambda index:self.store.reconcile_location(source,job['inventory_generation'],index))
         job['files_scanned']+=scanned
         return {'scanned':scanned,'inventory_complete':job.get('inventory_complete',False) and job.get('reconcile_cursor',0)>=256}
