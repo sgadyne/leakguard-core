@@ -8,6 +8,7 @@ export default function ProtectionSettings({status,onRefresh,onError}:any){
  const [model,setModel]=useState<any>(null),[storage,setStorage]=useState<any>({}),[locations,setLocations]=useState<any[]>([]),[busy,setBusy]=useState(false),[destination,setDestination]=useState(''),[kind,setKind]=useState('credentials'),[message,setMessage]=useState('');
  async function load(){const s=await request<any>('/settings');setModel(s.protection);setPending(s.pending_locations||[]);setStorage(s.storage||{});if(status?.observations?.unlocked)setLocations(await request('/sources'));}
  useEffect(()=>{void load().catch((e:any)=>onError(e.message))},[status?.observations?.unlocked]);
+ useEffect(()=>{let active=true;if(status?.observations?.unlocked)void request<any[]>('/sources').then(rows=>{if(active)setLocations(rows)}).catch((e:any)=>{if(active)onError(e.message)});return()=>{active=false}},[status]);
  async function run(fn:()=>Promise<void>){setBusy(true);setMessage('');try{await fn();onRefresh()}catch(e){onError((e as Error).message)}finally{setBusy(false)}}
  async function save(){await request('/settings','POST',{protection:model});await load();setMessage('Protection preferences saved.');}
  async function pick(){if(!window.buddyDesktop)throw new Error('Enter an absolute destination file path.');const p=await window.buddyDesktop.chooseDirectory();if(!p.canceled&&p.path)setDestination(p.path+'/'+(kind==='credentials'?'credentials.lgv':'observations.lgo'));}
