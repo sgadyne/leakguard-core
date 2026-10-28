@@ -50,3 +50,15 @@ def test_explicit_user_pause_survives_restart_even_after_system_pause(tmp_path):
  restored=HostService(config=ScanConfig.from_mapping({}),scan_store=store)
  assert restored.job(j['id'])['state']=='paused'
  assert restored.job(j['id'])['pause_reason']=='user'
+
+
+def test_disabled_automatic_scope_is_visible_as_paused_and_never_dispatched(tmp_path):
+ from leakguard_host import HostService
+ from leakguard_core.api import ScanConfig
+ from test_host import SessionStore
+ store=SessionStore();h=HostService(config=ScanConfig.from_mapping({}),scan_store=store)
+ h.configure_automatic([tmp_path]);source=h.sources()[0];h.submit(source['id'])
+ settings=defaults();settings['automatic_this_mac']=False
+ restored=HostService(config=ScanConfig.from_mapping({}),scan_store=store,protection=settings)
+ assert restored.sources()[0]['availability']=='paused'
+ assert restored.tick()['status']=='idle'

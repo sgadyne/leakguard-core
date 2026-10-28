@@ -258,7 +258,7 @@ class HostService:
                 jobs=[j for j in self._state['jobs'].values() if j['source_id']==source['id']]
                 latest=max(jobs,key=lambda j:j['created_at']) if jobs else {}
                 error=latest.get('last_error')
-                source['availability']='permission-needed' if error=='permission-denied' else 'offline' if error in {'offline','source-unavailable','unreadable'} else 'paused' if not source['enabled'] or self._protection['paused'] or latest.get('state')=='paused' else 'scanning' if latest.get('state') in {'queued','running'} else 'current-with-gaps' if latest.get('state')=='completed' else 'unverified'
+                source['availability']='permission-needed' if error=='permission-denied' else 'offline' if error in {'offline','source-unavailable','unreadable'} else 'paused' if not source['enabled'] or self._protection['paused'] or source.get('automatic') and not self._protection['automatic_this_mac'] or latest.get('state')=='paused' else 'scanning' if latest.get('state') in {'queued','running'} else 'current-with-gaps' if latest.get('state')=='completed' else 'unverified'
             return rows
 
     def add_source(self, root, *, label: str | None = None, kind: str = "local", exclusions=(), target: str | None = None, ssh_port: int | None = None) -> dict:
