@@ -66,3 +66,27 @@ def test_isolated_helper_omits_link_without_losing_regular_sibling(tmp_path):
  entries={Path(x['path']).name:x for x in result['entries']}
  assert entries['ordinary.txt']['status']=='available'
  assert entries['link.txt']['status']!='available'
+
+
+def test_remote_acquisition_rechecks_device_before_reading(tmp_path):
+ import subprocess,sys
+ from leakguard_host import ssh_location_worker
+ root=tmp_path/'scope';root.mkdir()
+ for name in ('foreign.txt','ordinary.txt'):(root/name).write_text('synthetic fixture')
+ # Simulate a file mount that appears after metadata admission. No mounts or
+ # system services are changed by this acquisition-boundary regression.
+ script="""import os,runpy,sys
+original=os.stat
+def observed(path,*args,**kwargs):
+ info=original(path,*args,**kwargs)
+ if str(path)=='foreign.txt':
+  values=list(info);values[2]+=1;return os.stat_result(values)
+ return info
+os.stat=observed
+runpy.run_path(sys.argv[1],run_name='__main__')
+"""
+ request={'op':'read','root':str(root),'paths':[str(root/'foreign.txt'),str(root/'ordinary.txt')],'max_file_bytes':1000}
+ result=subprocess.run([sys.executable,'-I','-S','-B','-c',script,ssh_location_worker.__file__],input=json.dumps(request).encode(),stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True,timeout=10)
+ entries={Path(x['path']).name:x for x in json.loads(result.stdout)['entries']}
+ assert entries['foreign.txt']['status']=='unsupported' and 'data' not in entries['foreign.txt']
+ assert entries['ordinary.txt']['status']=='available'

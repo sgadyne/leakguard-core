@@ -173,6 +173,9 @@ class DiscoveryCoordinator:
                                 resume=0;position=0;prefix=hashlib.sha256();exhausted=False;break
                             continue
                         seen+=1;child=path/entry.name
+                        if len(str(child))>4096:
+                            marker=str(Path(source['root'])/('[path-limit-'+hashlib.sha256(str(child).encode('utf-8','surrogatepass')).hexdigest()[:20]+']'))
+                            entries.append((marker,source['id'],'unknown',None,'unsupported',100,generation,0,None,'path-length-limit; unknown-descendants'));continue
                         try:
                             value=entry.stat(follow_symlinks=False);kind='directory' if stat.S_ISDIR(value.st_mode) else 'file' if stat.S_ISREG(value.st_mode) else 'symlink' if stat.S_ISLNK(value.st_mode) else 'special'
                             state='enumerating' if kind=='directory' else 'pending' if kind=='file' else 'excluded';detail=None

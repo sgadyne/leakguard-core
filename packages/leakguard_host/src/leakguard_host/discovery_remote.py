@@ -64,6 +64,7 @@ class RemoteDiscovery:
          actual=PurePosixPath(remote_path(source,child));lower=str(actual).lower()
          if self._excluded(child,source,settings):state='excluded';detail='operator-exclusion; unknown-descendants' if kind=='directory' else 'operator-exclusion'
          elif kind=='directory' and value['st_dev']!=source['remote_identity']['device']:state='excluded';detail='mount-boundary; unknown-descendants'
+         elif kind=='file' and value['st_dev']!=source['remote_identity']['device']:state='unsupported';detail='mount-boundary'
          elif kind=='file' and (value['st_flags']&0x40000000 or actual.name.endswith('.icloud')):state='remote-only';detail='placeholder-not-hydrated'
          elif kind=='file' and (actual.suffix.lower() in {'.lgv','.lgo','.lgbak','.keychain','.keychain-db','.kdbx','.kdb','.gpg','.pgp'} or actual.name in {'Login Data','Cookies','key4.db','cert9.db'} or '/.ssh/' in lower and actual.name.startswith('id_')):state='protected';detail='protected-store-inventory-only'
         entries.append((child,source['id'],kind,json.dumps(sig(value)) if value else None,state,_priority(PurePosixPath(child)),job['inventory_generation'],value['st_size'] if value else 0,None,detail))

@@ -37,6 +37,7 @@ def main():
    try:
     for part in relative.parts:
      child=os.open(part,flags,dir_fd=fd);os.close(fd);fd=child
+     if os.fstat(fd).st_dev!=root_info.st_dev:raise OSError('mount-boundary')
     return fd
    except BaseException:os.close(fd);raise
   def file_info(path,read=False,maximum=0):
@@ -44,6 +45,7 @@ def main():
    try:
     preliminary=os.stat(path.name,dir_fd=parent,follow_symlinks=False)
     if not stat.S_ISREG(preliminary.st_mode):raise ValueError()
+    if preliminary.st_dev!=root_info.st_dev:return {'path':str(path),'status':'unsupported','reason':'mount-boundary'}
     if getattr(preliminary,'st_flags',0)&0x40000000 or path.name.endswith('.icloud'):return {'path':str(path),'status':'remote-only','signature':signature(preliminary)}
     if read and preliminary.st_size>maximum:return {'path':str(path),'status':'unsupported','signature':signature(preliminary)}
     fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|getattr(os,'O_NONBLOCK',0),dir_fd=parent);before=os.fstat(fd)
