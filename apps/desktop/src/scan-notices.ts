@@ -1,4 +1,11 @@
 export class ScanNotices {
+  private counts=new Map<string,number>();
+  findings(events:{id:string;count:number}[]):boolean {
+    let added=false;
+    for(const e of events){const previous=this.counts.get(e.id)||0;this.counts.set(e.id,e.count);if(e.count>previous)added=true;}
+    if(this.counts.size>512){const keep=new Set(events.map(e=>e.id));for(const id of this.counts.keys())if(!keep.has(id))this.counts.delete(id);}
+    return added;
+  }
   private states=new Map<string,string>();
   update(events:{id:string;state:string}[]):'attention'|'completed'|undefined {
     let attention=false, completed=false;

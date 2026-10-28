@@ -142,7 +142,7 @@ class LocalServerTests(unittest.TestCase):
             app.close()
 
     def test_extension_registration_errors_have_plain_language_ui_messages(self):
-        source = Path(__file__).parents[1] / "src" / "leakguard_buddy" / "static" / "app.js"
+        source = Path(__file__).parents[2] / "buddy-ui" / "src" / "api.ts"
         client = source.read_text(encoding="utf-8")
         messages = {
             "extension-conflict": "Use a unique package name.",
@@ -202,7 +202,7 @@ class LocalServerTests(unittest.TestCase):
             app.close()
 
     def test_navigation_statuses_use_plain_language_labels(self):
-        source = Path(__file__).parents[1] / "src" / "leakguard_buddy" / "static" / "app.js"
+        source = Path(__file__).parents[2] / "buddy-ui" / "src" / "api.ts"
         client = source.read_text(encoding="utf-8")
         for code, label in {
             "permission-denied": "Permission denied",

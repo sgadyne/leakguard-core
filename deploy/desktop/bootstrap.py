@@ -246,7 +246,54 @@ def check_runtime(receipt, manifest, root, state, environment, deadline):
         fail("private-runtime-check-failed")
 
 
-def prepare(resources, data):
+def clone_copy(source,destination):
+    if sys.platform=='darwin':
+        try:
+            import ctypes
+            library=ctypes.CDLL('/usr/lib/libSystem.B.dylib',use_errno=True)
+            clone=library.clonefile;clone.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_int];clone.restype=ctypes.c_int
+            if clone(os.fsencode(source),os.fsencode(destination),0)==0:
+                shutil.copystat(source,destination,follow_symlinks=False)
+                return str(destination)
+        except (OSError,AttributeError):pass
+    return shutil.copy2(source,destination)
+
+
+def migration_backup(data,profile,previous,manifest):
+    records(profile)  # Validate links and special files before copying anything.
+    backup=data/'migration-backups'/(time.strftime('%Y%m%dT%H%M%S')+'-'+os.urandom(6).hex())
+    private_directory(backup,data)
+    shutil.copytree(profile,backup/'profile',symlinks=True,copy_function=clone_copy)
+    receipt={'version':1,'phase':'backed-up','old_runtime':previous['runtimeId'],'new_runtime':manifest['runtimeId'],'backup':str(backup),'profile_files':records(backup/'profile')}
+    atomic_json(backup/'migration.json',receipt)
+    atomic_json(data/'profile-migration.json',receipt)
+    if records(profile)!=receipt['profile_files']:fail('migration-backup-verification-failed')
+    return backup
+
+
+def restore_migration(data,profile,backup):
+    saved=backup/'profile'
+    expected=json.loads((backup/'migration.json').read_text())['profile_files']
+    if records(saved)!=expected:fail('migration-backup-verification-failed')
+    # Preserve the ownership lock inode while replacing all other profile bytes.
+    expected_names={item['path'] for item in expected}
+    for item in records(profile):
+        relative=item['path']
+        if relative not in expected_names and relative!='state/.buddy-owner.lock':(profile/relative).unlink()
+    for current,dirs,files in os.walk(saved,followlinks=False):
+        target=profile/Path(current).relative_to(saved);target.mkdir(parents=True,exist_ok=True,mode=0o700)
+        for name in files:
+            src=Path(current)/name;dst=target/name
+            if dst==profile/'state/.buddy-owner.lock':continue
+            if src.is_symlink():
+                dst.unlink(missing_ok=True);dst.symlink_to(os.readlink(src))
+            else:
+                temporary=dst.with_name(dst.name+'.rollback-'+os.urandom(6).hex());clone_copy(src,temporary);os.replace(temporary,dst)
+    if records(profile)!=expected:fail('migration-rollback-verification-failed')
+    atomic_json(data/'profile-migration.json',{'phase':'rolled-back','backup':str(backup)})
+
+
+def prepare(resources, data, *, migrate=False):
     manifest = verify_resources(resources)
     if not data.is_absolute() or data.is_symlink() or data.resolve() != data:
         fail("profile-path-invalid")
@@ -255,6 +302,8 @@ def prepare(resources, data):
         data.chmod(0o700)
     lock = PreparationLock(data / ".desktop-prepare.lock")
     ownership = None
+    backup = None
+    committed = False
     try:
         profile = data / "profile"
         private_directory(profile, data)
@@ -262,8 +311,14 @@ def prepare(resources, data):
         if marker.is_symlink():
             fail("profile-symlink-refused")
         previous = json.loads(marker.read_text()) if marker.exists() else None
-        if previous is not None and previous.get("runtimeId") != manifest["runtimeId"]:
-            fail("runtime-migration-required")
+        pending_path=data/'profile-migration.json'
+        pending=json.loads(pending_path.read_text()) if pending_path.exists() else {}
+        if pending.get('phase')=='backed-up':
+            candidate=Path(pending.get('backup',''))
+            if not candidate.is_absolute() or not candidate.resolve(strict=True).is_relative_to(data/'migration-backups'):fail('migration-backup-invalid')
+            if pending.get('new_runtime')!=manifest['runtimeId']:fail('migration-recovery-required')
+            backup=candidate
+        changed_runtime = previous is not None and previous.get("runtimeId") != manifest["runtimeId"]
         if (profile / "state").is_symlink():
             fail("profile-symlink-refused")
         if previous is None and (profile / "state").exists() and any((profile / "state").iterdir()):
@@ -272,10 +327,15 @@ def prepare(resources, data):
         private_directory(state, data)
         # Same flock/msvcrt byte-zero lock as BuddyBackend, even with both stores locked.
         ownership = PreparationLock(state / ".buddy-owner.lock", "profile-in-use")
+        if changed_runtime:
+            if not migrate:fail('runtime-migration-required')
+            emit('progress',stage='backing-up-profile')
+            if backup is None:backup=migration_backup(data,profile,previous,manifest)
         identity = {"schemaVersion": 1, "runtimeId": manifest["runtimeId"], "target": manifest["target"],
                     "sourceCommit": manifest["sourceCommit"], "status": "preparing"}
-        if previous is None:
+        if previous is None or changed_runtime:
             atomic_json(marker, identity)
+            previous=identity
         runtime = data / "runtimes" / manifest["runtimeId"]
         private_directory(runtime, data)
         base = runtime / "python"
@@ -294,7 +354,7 @@ def prepare(resources, data):
                 fail("profile-symlink-refused")
             if staging.exists():
                 shutil.rmtree(staging)
-            shutil.copytree(resources / "python", staging, symlinks=True)
+            shutil.copytree(resources / "python", staging, symlinks=True,copy_function=clone_copy)
             os.replace(staging, base)
             atomic_json(copied_marker, {"runtimeId": manifest["runtimeId"]})
         base_python = base / Path(*PurePosixPath(manifest["pythonExecutable"]).parts[1:])
@@ -324,7 +384,12 @@ def prepare(resources, data):
         emit("progress", stage="checking-runtime")
         check_runtime(receipt, manifest, data, state, environment, deadline)
         atomic_json(marker, {**identity, "status": "ready"})
+        committed=True
+        if backup is not None:atomic_json(data/'profile-migration.json',{'phase':'committed','backup':str(backup),'old_runtime':json.loads((backup/'migration.json').read_text())['old_runtime'],'new_runtime':manifest['runtimeId']})
         emit("runtime-ready", **{key: receipt[key] for key in ("protocol", "runtimeId", "python", "stateDir", "config")})
+    except BaseException:
+        if backup is not None and not committed:restore_migration(data,profile,backup)
+        raise
     finally:
         if ownership is not None:
             ownership.close()
@@ -335,9 +400,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resources", type=Path, required=True)
     parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--rollback-migration",action="store_true",help="Restore the verified profile backup while retaining its ownership lock")
+    parser.add_argument("--migrate",action="store_true",help="Explicitly back up and migrate an existing private profile")
     args = parser.parse_args()
     try:
-        prepare(args.resources.resolve(strict=True), args.data_dir)
+        if args.rollback_migration:
+            data=args.data_dir
+            if not data.is_absolute() or data.resolve(strict=True)!=data:fail('profile-path-invalid')
+            preparation=PreparationLock(data/'.desktop-prepare.lock');ownership=None
+            try:
+                ownership=PreparationLock(data/'profile/state/.buddy-owner.lock','profile-in-use')
+                receipt=json.loads((data/'profile-migration.json').read_text());backup=Path(receipt['backup'])
+                if not backup.resolve(strict=True).is_relative_to(data/'migration-backups'):fail('migration-backup-invalid')
+                restore_migration(data,data/'profile',backup)
+                emit('migration-rolled-back')
+            finally:
+                if ownership is not None:ownership.close()
+                preparation.close()
+            return 0
+        prepare(args.resources.resolve(strict=True), args.data_dir,migrate=args.migrate)
         return 0
     except PreparationError as error:
         emit("error", code=str(error))

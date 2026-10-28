@@ -48,6 +48,7 @@ class ObservationStatusTests(unittest.TestCase):
             backend.observation_path = Path(name) / "absent-observations.lgo"
             backend._observation_store = Store()
             backend._startup_observation_error = None
+            backend._storage_expected={"observations":False,"credentials":False}
             status = backend.observation_status()
         self.assertTrue(status["healthy"])
         self.assertEqual(status["serialized_bytes"], 1024)
@@ -128,6 +129,7 @@ class ScanConfigRefreshTests(unittest.TestCase):
         backend._config_values = {"detection_profile": "credentials"}
         backend._config = "old-config"
         backend._startup_observation_error = None
+        backend._storage_expected={"observations":False,"credentials":False}
         writes = []
         starts = 0
 

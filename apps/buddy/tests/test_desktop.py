@@ -143,7 +143,7 @@ class DesktopBoundaryTests(unittest.TestCase):
             owner = ProfileOwnership(state / ".buddy-owner.lock")
             try:
                 with self.assertRaises(ProfileInUse):
-                    BuddyBackend(state_dir=state, config_path=config)
+                    BuddyBackend(discovery_roots=(), state_dir=state, config_path=config)
                 self.assertEqual(overlay.read_bytes(), b"untouched-invalid-overlay")
                 self.assertFalse((state / "extensions").exists())
                 self.assertFalse((state / "buddy-active-config.json").exists())

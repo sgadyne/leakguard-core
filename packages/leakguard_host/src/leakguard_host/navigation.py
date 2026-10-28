@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import plistlib
 import re
 import shutil
 import stat
@@ -139,7 +140,15 @@ def mount_marker(path: str | Path) -> str | None:
     matches = [item for item in _mounts() if target.is_relative_to(Path(item["path"]))]
     if not matches:
         return None
-    return max(enumerate(matches), key=lambda value: (len(value[1]["path"]), value[0]))[1]["marker"]
+    selected=max(enumerate(matches),key=lambda value:(len(value[1]['path']),value[0]))[1]
+    if platform.system()=='Darwin' and selected['path'].startswith('/Volumes/') and selected['filesystem'] in {'apfs','hfs'}:
+        try:
+            result=subprocess.run(['/usr/sbin/diskutil','info','-plist',selected['path']],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=2,check=False)
+            if result.returncode==0 and len(result.stdout)<=100000:
+                value=plistlib.loads(result.stdout);identity=value.get('VolumeUUID') or value.get('DiskUUID')
+                if isinstance(identity,str):return hashlib.sha256((identity+'|'+selected['path']+'|'+selected['filesystem']).encode()).hexdigest()
+        except (OSError,ValueError,subprocess.SubprocessError):pass
+    return selected['marker']
 
 
 def capabilities() -> dict:

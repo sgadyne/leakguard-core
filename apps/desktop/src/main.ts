@@ -88,11 +88,12 @@ async function refreshStatus(){
        !Number.isSafeInteger(result.pending_jobs)||result.pending_jobs<0)throw failure('backend-protocol-invalid');
     const wasUnlocked=status?.vault.unlocked;
     status=result;stage='Ready';updateMenus();
-    const notice=scanNotices.update(Array.isArray(result.scan_events)?result.scan_events:[]);
+    const newFindings=scanNotices.findings(Array.isArray(result.finding_events)?result.finding_events:[]);
+    const notice=newFindings?'findings':scanNotices.update(Array.isArray(result.scan_events)?result.scan_events:[]);
     if(notice && Notification.isSupported()){
       // OS delivery failures must not masquerade as a disconnected backend.
       try{
-        const notification=new Notification({title:'Password Buddy',body:notice==='attention'
+        const notification=new Notification({title:'Password Buddy',body:notice==='findings'?'New potential sensitive material needs review. Open Findings.':notice==='attention'
           ?'A scan needs attention. Open Sources to review its status.'
           :'Scan finished. Open Findings to review detected material.',silent:true});
         notification.on('click',()=>show(notice==='attention'?'sources':'findings'));
@@ -255,16 +256,16 @@ function createWindow(){
     void lockCredentials('disconnect');void recover('backend-page-unavailable');
   });
 }
-async function startBackend(){
+async function startBackend(migrate=false){
   const resources=app.isPackaged?path.join(process.resourcesPath,'buddy'):process.env.BUDDY_DESKTOP_RESOURCES;
   if(!resources)throw failure('desktop-resources-required');
   stage='Preparing local runtime…';updateMenus();
   const runtime=await prepareRuntime(resources,dataDir,progress=>{
-    stage=progress==='copying-runtime'?'Preparing private Python runtime…':
+    stage=progress==='backing-up-profile'?'Backing up the encrypted profile…':progress==='copying-runtime'?'Preparing private Python runtime…':
       progress==='installing-backend'?'Installing offline scanner…':
       progress==='checking-runtime'?'Checking private runtime…':'Runtime preparation is taking longer than expected';
     updateMenus();
-  });
+  },migrate);
   control=new Control(runtime.python,['-I','-B','-X','utf8','-m','leakguard_buddy.desktop','--state-dir',runtime.stateDir,'--config',runtime.config],
     {cwd:path.join(dataDir,'profile'),env:cleanEnvironment(runtime.stateDir,runtime.config)});
   const current=control;
@@ -300,6 +301,11 @@ async function recover(initialCode:string){
   let code=initialCode;
   try{
     while(!quitting){
+      if(code==='runtime-migration-required'){
+        const choice=await messageBox({type:'info',title:'Upgrade Password Buddy',message:'Back up and upgrade this Mac’s private profile?',detail:'The old encrypted profile and runtime will be retained for rollback. Credential vault and scan storage remain locked until you unlock them. Native key access and login preferences are preserved.',buttons:['Back up and upgrade','Quit'],defaultId:0,cancelId:1});
+        if(choice.response!==0){await requestQuit();return;}
+        try{await stopOwnedBackend();startup=startBackend(true);await startup;return;}catch(error){code=errorCode(error);continue;}
+      }
       const blocked=['worker-still-running','requests-still-running','backend-control-timeout'].includes(code);
       const result=await messageBox({type:blocked?'warning':'error',title:'Password Buddy backend unavailable',
         message:blocked?'Waiting for the current scan to stop.':'The local backend is unavailable.',

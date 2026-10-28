@@ -28,7 +28,8 @@ _SESSION_SECONDS = 8 * 60 * 60
 _SESSION_LIMIT = 8
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,128}\Z")
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
-_SAFE_BACKEND_ERRORS = {
+_STORAGE_ERRORS={'storage-unavailable','storage-path-invalid','storage-ownership-invalid','storage-filesystem-unsupported','storage-destination-exists','storage-path-unchanged','storage-space-unavailable','storage-verification-failed','storage-relocation-complete-restart-required','settings-invalid','state-storage-unavailable','state-partition-unavailable','ssh-target-invalid','ssh-port-invalid','remote-path-invalid','ssh-timeout','ssh-execution-failed','remote-report-invalid','source-changed'}
+_SAFE_BACKEND_ERRORS = _STORAGE_ERRORS | {
     "vault-locked", "vault-authentication-failed", "vault-already-created",
     "vault-not-created", "vault-already-unlocked", "vault-busy",
     "vault-passphrase-invalid", "vault-capacity-limit", "vault-entry-invalid",
@@ -221,7 +222,7 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 "observation-keyring-not-enabled", "observation-keyring-invalid",
                 "state-checkpoint-failed", "state-capacity-limit",
             }
-            status = 409 if safe_code in conflict else 401 if safe_code == "vault-authentication-failed" else 400 if safe_code in client else 503 if safe_code in unavailable else 500
+            status = 503 if safe_code in _STORAGE_ERRORS else 409 if safe_code in conflict else 401 if safe_code == "vault-authentication-failed" else 400 if safe_code in client else 503 if safe_code in unavailable else 500
             self._send_json(status, {"error": safe_code})
 
     def _require_session(self, *, mutating: bool, origin: str | None) -> Session:
@@ -327,10 +328,14 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 _keys(body, {"state"}); _text(body, "state", 16)
                 if body["state"] not in {"unreviewed", "reviewed", "dismissed"}: raise ApiError(400, "request-invalid")
                 return app.annotate_finding(match.group(1), body["state"]), 200
+            if path == '/api/remote/browse':
+                _keys(body,{'target','path','root','cursor'},{'target'});_text(body,'target',320)
+                _optional_text(body,'path',4096);_optional_text(body,'root',4096)
+                return app.remote_browse(body),200
             if path == "/api/sources":
-                _keys(body, {"root", "label", "kind", "exclusions", "schedule_seconds"}, {"root"})
-                _text(body, "root", 4096); _optional_text(body, "label", 200)
-                if body.get("kind", "local") not in {"local", "mounted", "unc"}: raise ApiError(400, "request-invalid")
+                _keys(body, {"root", "label", "kind", "target", "ssh_port", "exclusions", "schedule_seconds"}, {"root"})
+                _text(body, "root", 4096); _optional_text(body, "label", 200); _optional_text(body,"target",320)
+                if body.get("kind", "local") not in {"local", "mounted", "unc", "ssh"}: raise ApiError(400, "request-invalid")
                 if "exclusions" in body: _text_list(body, "exclusions", 256, 4096)
                 if body.get("schedule_seconds") is not None: _positive_int(body, "schedule_seconds", maximum=31_536_000)
                 return app.add_source(body), 201
@@ -392,7 +397,8 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 return app.credential_update(match.group(1), body), 200
             match = re.fullmatch(r"/api/sources/([A-Za-z0-9_-]{1,160})", path)
             if match:
-                _keys(body, {"enabled", "schedule_seconds"})
+                _keys(body, {"enabled", "schedule_seconds", "schedule","ssh_port"})
+                if body.get("ssh_port") is not None:_positive_int(body,"ssh_port",maximum=65535)
                 if "enabled" in body and type(body["enabled"]) is not bool: raise ApiError(400, "request-invalid")
                 if body.get("schedule_seconds") is not None: _positive_int(body, "schedule_seconds", maximum=31_536_000)
                 return app.update_source(match.group(1), body), 200
@@ -418,8 +424,11 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
         if method == "POST" and match:
             _keys(body, {"id", "profile"}); _text(body, "id", 80); _text(body, "profile", 80)
             return app.plugin_set_enabled(body, match.group(1) == "enable"), 200
+        if method == 'POST' and path == '/api/storage/relocate':
+            _keys(body,{'kind','path'});_text(body,'kind',32);_text(body,'path',4096)
+            return app.relocate_storage(body),200
         if method == "POST" and path == "/api/settings":
-            _keys(body, {"active_profile", "scan_workers"})
+            _keys(body, {"active_profile", "scan_workers", "protection"})
             return app.save_settings(body), 200
         raise ApiError(404, "not-found")
 

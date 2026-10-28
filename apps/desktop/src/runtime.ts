@@ -69,11 +69,11 @@ let activePreparation:{key:string;completion:Promise<Runtime>}|undefined;
 export async function waitForPreparation():Promise<void>{
   if(activePreparation)await activePreparation.completion.then(()=>{},()=>{});
 }
-export async function prepareRuntime(resourcesInput:string,dataDir:string,onProgress:(stage:string)=>void):Promise<Runtime> {
-  const key=path.resolve(resourcesInput)+'\0'+dataDir;
+export async function prepareRuntime(resourcesInput:string,dataDir:string,onProgress:(stage:string)=>void,migrate=false):Promise<Runtime> {
+  const key=path.resolve(resourcesInput)+'\0'+dataDir+'\0'+String(migrate);
   if(activePreparation && activePreparation.key!==key)throw failure('preparation-already-running');
   if(!activePreparation){
-    const completion=performPreparation(resourcesInput,dataDir,onProgress);
+    const completion=performPreparation(resourcesInput,dataDir,onProgress,migrate);
     activePreparation={key,completion};
     const clear=()=>{if(activePreparation?.completion===completion)activePreparation=undefined;};
     void completion.then(clear,clear);
@@ -84,7 +84,7 @@ export async function prepareRuntime(resourcesInput:string,dataDir:string,onProg
     void completion.then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});
   });
 }
-async function performPreparation(resourcesInput:string,dataDir:string,onProgress:(stage:string)=>void):Promise<Runtime> {
+async function performPreparation(resourcesInput:string,dataDir:string,onProgress:(stage:string)=>void,migrate=false):Promise<Runtime> {
   const resources=await fs.realpath(resourcesInput);
   const raw=await fs.readFile(path.join(resources,'desktop-manifest.json'));
   if(raw.length>16*1024*1024)throw failure('resource-manifest-invalid');
@@ -97,7 +97,7 @@ async function performPreparation(resourcesInput:string,dataDir:string,onProgres
   const python=await verifiedResource(resources,manifest.pythonExecutable,manifest);
   const bootstrap=await verifiedResource(resources,'bootstrap.py',manifest);
   return new Promise((resolve,reject)=>{
-    const child=spawn(python,['-I','-B','-X','utf8',bootstrap,'--resources',resources,'--data-dir',dataDir],
+    const child=spawn(python,['-I','-B','-X','utf8',bootstrap,'--resources',resources,'--data-dir',dataDir,...(migrate?['--migrate']:[])],
       {cwd:dataDir,env:cleanEnvironment(),stdio:['ignore','pipe','pipe'],windowsHide:true,shell:false});
     let buffer=Buffer.alloc(0);let receipt:Runtime|undefined;let code:string|undefined;let invalid=false;
     // The coalescing caller reports a deadline without abandoning this writer.
@@ -111,7 +111,7 @@ async function performPreparation(resourcesInput:string,dataDir:string,onProgres
         try{
           if(line.length>16*1024)throw failure('preparation-protocol-invalid');
           const message=JSON.parse(line.toString('utf8'));
-          if(message.type==='progress' && ['copying-runtime','installing-backend','checking-runtime'].includes(message.stage)) onProgress(message.stage);
+          if(message.type==='progress' && ['copying-runtime','installing-backend','checking-runtime','backing-up-profile'].includes(message.stage)) onProgress(message.stage);
           else if(message.type==='error' && typeof message.code==='string' && /^[a-z][a-z0-9-]{0,79}$/.test(message.code))code=message.code;
           else if(message.type==='runtime-ready' && message.protocol===1 && !receipt){
             if(message.runtimeId!==manifest.runtimeId || message.stateDir!==path.join(dataDir,'profile','state') ||

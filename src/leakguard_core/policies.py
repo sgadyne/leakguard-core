@@ -10,6 +10,7 @@ def windows(path):
 
 
 def normalize(path):
+    if str(path).startswith('ssh://'):return str(path)
     return ntpath.normpath(str(path)) if windows(path) else os.path.normpath(str(path))
 
 

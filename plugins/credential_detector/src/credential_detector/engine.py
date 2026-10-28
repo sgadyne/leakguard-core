@@ -74,9 +74,9 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
         role = pack.aliases.get(normalize_key(key))
         # Operational environment prefixes retain the role of a complete suffix.
         # Require a separator: e.g. MY_APP_CLIENT_SECRET, never 'notpassword'.
-        if role is None:
+        if role is None and re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}',key):
             for suffix, candidate in (('bearer_tokens_json', 'access-token'), ('client_secret', 'client-secret'), ('refresh_token', 'access-token'), ('access_token', 'access-token'), ('api_key', 'api-key'), ('password', 'password'), ('passphrase', 'password'), ('pin', 'password')):
-                if re.search(r'(?:^|[_.-])' + suffix.replace('_', '[_.-]') + r'$', key, re.I):
+                if re.search(r'(?:^|_)' + suffix + r'$', key, re.I):
                     role = candidate
                     break
         start = match.end()

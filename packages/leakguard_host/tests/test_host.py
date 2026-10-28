@@ -195,6 +195,19 @@ class HostTests(unittest.TestCase):
         self.assertEqual(host.tick()["status"], "queued")
         self.assertIsNone(host.job(job["id"])["last_error"])
 
+    def test_omissions_remain_visible_after_a_later_complete_slice(self):
+        partial = report(False)
+        partial = replace(partial, coverage=replace(partial.coverage, omission_count=1),
+            issues=partial.issues + (CoverageIssue(ErrorCode.POLICY_OMISSION, required=False, omission_id="unsupported-binary"),))
+        reports = iter((partial, report(True)))
+        host = self.host(lambda scope, kw: next(reports))
+        source = host.add_source(self.root)
+        job = host.submit(source["id"])
+        self.assertEqual(host.tick()["status"], "queued")
+        self.assertEqual(host.tick()["status"], "completed")
+        self.assertEqual(host.job(job["id"])["coverage"], "incomplete")
+        self.assertEqual(host.job(job["id"])["omission_count"], 1)
+
     def test_repeated_budget_without_progress_pauses_incomplete(self):
         host = self.host(lambda scope, kw: report(False))
         source = host.add_source(self.root)
@@ -242,12 +255,13 @@ class HostTests(unittest.TestCase):
         self.assertEqual(scanned, [])
 
     def test_offline_backoff_then_reconnect(self):
+        mounts=patch('leakguard_host.scheduler.navigation._mounts',return_value=[{'path':str(self.root),'filesystem':'synthetic-mounted-test','marker':'synthetic-share'}]);mounts.start();self.addCleanup(mounts.stop)
         remote = self.root / "share"
         remote.mkdir()
         host = self.host()
         source = host.add_source(remote, kind="mounted")
         job = host.submit(source["id"])
-        with patch("leakguard_host.scheduler.navigation.path_status", return_value="offline"):
+        with patch("leakguard_host.mounted_worker.call", side_effect=HostError("offline")):
             self.assertEqual(host.tick()["status"], "backoff")
         self.assertEqual(host.job(job["id"])["coverage"], "incomplete")
         self.assertEqual(host.tick()["status"], "idle")
@@ -302,6 +316,7 @@ class HostTests(unittest.TestCase):
         self.assertEqual(host.tick()["status"], "idle")
 
     def test_mount_fallback_is_offline_but_same_endpoint_reconnects(self):
+        mounts=patch('leakguard_host.scheduler.navigation._mounts',return_value=[{'path':str(self.root),'filesystem':'synthetic-mounted-test','marker':'same-share'}]);mounts.start();self.addCleanup(mounts.stop)
         host = self.host()
         with patch("leakguard_host.scheduler.navigation.mount_marker", return_value="same-share"):
             source = host.add_source(self.root, kind="mounted")

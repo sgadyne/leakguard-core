@@ -43,7 +43,7 @@ class BuddyBackend:
     which perform a deliberate vault operation.
     """
 
-    def __init__(self, *, state_dir: Path | None = None, config_path: Path | None = None):
+    def __init__(self, *, state_dir: Path | None = None, config_path: Path | None = None, discovery_roots: tuple[str, ...] | None = None):
         from leakguard_core import settings
         from leakguard_core.api import ScanConfig
         from leakguard_vault import CredentialVault, EncryptedScanStore
@@ -54,6 +54,7 @@ class BuddyBackend:
         else:
             defaults, self.base_config_path = settings.load()
         self.state_dir = Path(state_dir).expanduser().absolute() if state_dir else settings.state_directory().absolute()
+        self._discovery_roots = discovery_roots if discovery_roots is not None else (("/",) if os.name=="posix" else (str(Path.home()),))
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         from .ownership import ProfileOwnership
         self._ownership = ProfileOwnership(self.state_dir / ".buddy-owner.lock")
@@ -70,6 +71,36 @@ class BuddyBackend:
             pass
         self.observation_path = self.state_dir / "observations.lgo"
         self.credential_path = self.state_dir / "credentials.lgv"
+        self.storage_config_path=self.state_dir/'storage-paths.json'
+        self._storage_expected={'observations':self.observation_path.is_file(),'credentials':self.credential_path.is_file()}
+        if self.storage_config_path.is_file():
+            from .storage import validate_path
+            try:
+                paths=json.loads(self.storage_config_path.read_text())
+                if set(paths)!={'observations','credentials','expected'}:raise ValueError()
+                self.observation_path=Path(paths['observations']);self.credential_path=Path(paths['credentials'])
+                if any(not p.is_absolute() or len(str(p))>4096 or p.is_symlink() for p in (self.observation_path,self.credential_path)):raise ValueError()
+                if type(paths['expected']) is not dict or set(paths['expected'])!={'observations','credentials'} or not all(type(x) is bool for x in paths['expected'].values()):raise ValueError()
+                self._storage_expected=paths['expected']
+            except (ValueError,TypeError,OSError):raise RuntimeError('storage-config-invalid') from None
+        self.protection_config_path=self.state_dir/'protection-settings.json'
+        from leakguard_host.protection import validate,defaults as protection_defaults
+        try:self._protection=validate(json.loads(self.protection_config_path.read_text()) if self.protection_config_path.is_file() else protection_defaults())
+        except (OSError,ValueError):raise RuntimeError('settings-invalid') from None
+        self.pending_locations_path=self.state_dir/'pending-locations.json'
+        self._pending_locations=[]
+        if self.pending_locations_path.exists():
+            if self.pending_locations_path.is_symlink() or self.pending_locations_path.stat().st_size>65536:raise RuntimeError('settings-invalid')
+            from leakguard_host.ssh import _target,_remote_path
+            try:
+                choices=json.loads(self.pending_locations_path.read_text())
+                if type(choices) is not list or len(choices)>20:raise ValueError()
+                for item in choices:
+                    if type(item) is not dict or set(item)-{'kind','target','root','label'} or item.get('kind')!='ssh':raise ValueError()
+                    _target(item['target']);_remote_path(item['root'],allow_root=True)
+                    if item.get('label') is not None and (type(item['label']) is not str or not 1<=len(item['label'])<=200):raise ValueError()
+                self._pending_locations=choices
+            except (ValueError,TypeError,KeyError):raise RuntimeError('settings-invalid') from None
         self.extension_registry_path = self.state_dir / "extensions"
         self._config_values = dict(defaults)
         # Buddy's selected profile and worker count must not rewrite the shared
@@ -131,7 +162,20 @@ class BuddyBackend:
     def _start_host(self, store: object) -> None:
         from leakguard_host import HostService
 
-        host = HostService(config=self._config, scan_store=store)
+        host = HostService(config=self._config, scan_store=store,protection=self._protection)
+        if self._protection['automatic_this_mac']:host.configure_automatic(self._discovery_roots)
+        for choice in self._pending_locations:
+            from leakguard_host.ssh_locations import uri
+            logical=uri(choice['target'],choice['root'])
+            if not any(s['root']==logical for s in host.sources()):host.add_source(choice['root'],kind='ssh',target=choice['target'],label=choice.get('label'))
+        if self._pending_locations:
+            self.pending_locations_path.unlink(missing_ok=True);self._pending_locations=[]
+        for source in host.sources():
+            if not source.get('managed_inventory'):host.manage_source(source['id'])
+        for job in host.jobs():
+            if job['state']=='paused' and job.get('pause_reason')!='user' and job.get('last_error') in {'service-stopped','interrupted-restart'}:
+                source=next(s for s in host.sources() if s['id']==job['source_id'])
+                if source['enabled']:host.resume(job['id'])
         host.start()
         self._observation_store = store
         self._host = host
@@ -197,14 +241,17 @@ class BuddyBackend:
 
     @_backend_locked
     def observation_status(self) -> dict[str, Any]:
-        created = self.observation_path.is_file()
+        present=self.observation_path.is_file()
+        created = present or self._storage_expected["observations"]
         store_status = self._observation_store.status() if self._observation_store is not None else {}
-        keyring = self._observation_keyring_status() if created else {
+        keyring = self._observation_keyring_status() if present else {
             "unattended_available": False, "keyring_enabled": False,
             "native_backend": None, "error_code": "observation-keyring-not-enabled",
         }
         return {
             "created": created,
+            "available":present or not self._storage_expected["observations"],"path":str(self.observation_path),
+            "storage_error":"storage-unavailable" if created and not present else None,
             "unlocked": self._observation_store is not None,
             "keyring_enabled": bool(keyring.get("keyring_enabled")),
             "unattended_available": bool(keyring.get("unattended_available")),
@@ -213,7 +260,7 @@ class BuddyBackend:
             "startup_error": self._startup_observation_error,
             "healthy": store_status.get("healthy"),
             "serialized_bytes": store_status.get("serialized_bytes"),
-            "capacity_bytes": store_status.get("capacity_bytes"),
+            "capacity_bytes": store_status.get("capacity_bytes"),"encrypted_disk_bytes":store_status.get("encrypted_disk_bytes"),"partition_count":store_status.get("partition_count"),
         }
 
     def _observation_keyring_status(self) -> dict[str, Any]:
@@ -266,6 +313,7 @@ class BuddyBackend:
 
     @_backend_locked
     def observation_create(self, passphrase: str) -> dict[str, Any]:
+        self._storage_available("observations")
         with self._lock:
             if self.observation_path.exists():
                 raise RuntimeError("observation-store-exists")
@@ -281,10 +329,13 @@ class BuddyBackend:
                 "unattended_available": False, "keyring_enabled": False,
                 "native_backend": None, "error_code": "observation-keyring-not-enabled",
             }
+            self._storage_expected["observations"]=True
+            self._save_storage_paths()
             return self.observation_status()
 
     @_backend_locked
     def observation_unlock(self, passphrase: str) -> dict[str, Any]:
+        self._storage_available("observations")
         with self._lock:
             if self._observation_store is not None:
                 return self.observation_status()
@@ -327,9 +378,14 @@ class BuddyBackend:
         return self._require_host().jobs()
 
     @_backend_locked
+    def remote_browse(self,payload):
+        return self._require_host().remote_browse(payload['target'],payload.get('path'),root=payload.get('root'),cursor=payload.get('cursor'))
+
+    @_backend_locked
     def add_source(self, payload: dict[str, Any]):
         host = self._require_host()
-        result = host.add_source(root=payload["root"], label=payload.get("label"), kind=payload.get("kind", "local"), exclusions=tuple(payload.get("exclusions", ())))
+        result = host.add_source(root=payload["root"], label=payload.get("label"), kind=payload.get("kind", "local"), target=payload.get("target"), ssh_port=payload.get("ssh_port"), exclusions=tuple(payload.get("exclusions", ())))
+        host.manage_source(result["id"])
         seconds = payload.get("schedule_seconds")
         if seconds:
             source_id = _extract_id(result)
@@ -524,16 +580,20 @@ class BuddyBackend:
     @_backend_locked
     def credential_status(self):
         status = self._vault.status()
-        return {"created": bool(status.get("created")), "unlocked": self._credential_session is not None}
+        return {"created": bool(status.get("created")) or self._storage_expected["credentials"], "unlocked": self._credential_session is not None,"path":str(self.credential_path),"available":self.credential_path.is_file() or not self._storage_expected["credentials"],"storage_error":"storage-unavailable" if self._storage_expected["credentials"] and not self.credential_path.is_file() else None}
 
     @_backend_locked
     def credential_create(self, passphrase: str):
+        self._storage_available("credentials")
         with self._lock:
             self._credential_session = self._vault.create(passphrase)
+            self._storage_expected["credentials"]=True
+            self._save_storage_paths()
             return self.credential_status()
 
     @_backend_locked
     def credential_unlock(self, passphrase: str):
+        self._storage_available("credentials")
         with self._lock:
             self._credential_session = self._vault.unlock(passphrase)
             return self.credential_status()
@@ -637,6 +697,8 @@ class BuddyBackend:
     @_backend_locked
     def settings(self):
         return {
+            "protection":self._protection,"pending_locations":getattr(self,"_pending_locations",[]),
+            "storage":{"observations":str(self.observation_path),"credentials":str(self.credential_path),"supported":"Owned directories on tested local filesystems; mounted network storage is unavailable in this beta."},
             "active_profile": self._config_values.get("detection_profile", "credentials"),
             "detection_profile": self._config_values.get("detection_profile", "credentials"),
             "profiles": self._config_values.get("profiles", {}),
@@ -648,6 +710,8 @@ class BuddyBackend:
 
     @_backend_locked
     def save_settings(self, payload: dict[str, Any]):
+        from leakguard_host.protection import validate
+        protection=validate(payload.get('protection',self._protection))
         profile = payload.get("active_profile", self._config_values.get("detection_profile", "credentials"))
         if profile not in {"credentials", "sensitive", "firm"}:
             raise ValueError("profile-invalid")
@@ -658,7 +722,15 @@ class BuddyBackend:
             raise ValueError("settings-invalid")
         values["scan_workers"] = scan_workers
         checked = self._ScanConfig.from_mapping(values)
-        host_restarted = self._replace_scan_config(values, checked)
+        previous=self._protection
+        self._protection=protection
+        try:
+            _atomic_private_write(self.protection_config_path,json.dumps(protection,sort_keys=True,indent=2).encode())
+            host_restarted = self._replace_scan_config(values, checked)
+        except BaseException:
+            self._protection=previous
+            _atomic_private_write(self.protection_config_path,json.dumps(previous,sort_keys=True,indent=2).encode())
+            raise
         return {"settings": self.settings(), "observations_locked": False, "host_restarted": host_restarted}
 
     def _replace_scan_config(self, values: dict[str, Any], checked: object) -> bool:
@@ -692,6 +764,56 @@ class BuddyBackend:
                     self._startup_observation_error = None
                 except Exception as error:
                     self._startup_observation_error = _safe_code(error) or "scheduler-failed"
+            raise
+
+    def _storage_available(self,kind):
+        from .storage import StorageError
+        path=self.observation_path if kind=='observations' else self.credential_path
+        if self._storage_expected[kind] and not path.is_file():raise StorageError()
+
+    def _save_storage_paths(self):
+        _atomic_private_write(self.storage_config_path,json.dumps({'observations':str(self.observation_path),'credentials':str(self.credential_path),'expected':self._storage_expected},sort_keys=True,indent=2).encode())
+
+    @_backend_locked
+    def relocate_storage(self,payload):
+        from .storage import PreparedRelocation,StorageError
+        from leakguard_vault import CredentialVault
+        kind=payload['kind'];destination=Path(payload['path'])
+        if kind not in {'observations','credentials'}:raise StorageError('storage-path-invalid')
+        self._storage_available(kind)
+        source=self.observation_path if kind=='observations' else self.credential_path
+        host=self._host;store=self._observation_store;prepared=None;committed=False
+        old_values=dict(self._config_values);old_config=self._config
+        if host is not None:host.stop();self._host=None
+        try:
+            if kind=='observations' and store is not None:store.checkpoint()
+            if kind=='credentials':self._vault.lock();self._credential_session=None
+            intent=self.state_dir/'storage-relocation.json'
+            _atomic_private_write(intent,json.dumps({'kind':kind,'source':str(source),'destination':str(destination),'phase':'copying'}).encode())
+            prepared=PreparedRelocation(source,destination,source_owned=kind=='observations' and store is not None)
+            if kind=='observations':
+                self.observation_path=destination
+                self._config_values['observation_path']=str(destination)
+                self._config=self._ScanConfig.from_mapping(self._config_values)
+            else:self.credential_path=destination
+            self._save_storage_paths()
+            self._write_config(self._config_values)
+            if kind=='observations' and store is not None:
+                store.rebind_path(destination,prepared.take_lock())
+            if kind=='credentials':self._vault=CredentialVault(destination)
+            committed=True
+            prepared.close_locks()
+            _atomic_private_write(intent,json.dumps({'kind':kind,'source':str(source),'destination':str(destination),'phase':'committed','rollback_copy':str(source)}).encode())
+            if store is not None:self._start_host(store)
+            return {'relocated':True,'verified_encrypted_copy':prepared.verified,'kind':kind,'path':str(destination),'rollback_copy':str(source),'credential_vault_locked':self._credential_session is None}
+        except BaseException:
+            if committed:raise StorageError('storage-relocation-complete-restart-required') from None
+            if kind=='observations':self.observation_path=source
+            else:self.credential_path=source
+            self._config_values,self._config=old_values,old_config
+            self._save_storage_paths();self._write_config(old_values)
+            if prepared is not None:prepared.abort()
+            if store is not None and self._host is None:self._start_host(store)
             raise
 
     def _write_config(self, values: dict[str, Any] | None = None):
@@ -837,16 +959,17 @@ def _source_for_path(sources: list[dict[str, Any]], path: str) -> str | None:
     if not path:
         return None
     best: tuple[int, str] | None = None
-    candidate = os.path.normcase(os.path.abspath(path))
+    candidate = path if path.startswith('ssh://') else os.path.normcase(os.path.abspath(path))
     for source in sources:
         root = source.get("root")
         source_id = source.get("id")
         if type(root) is not str or type(source_id) is not str:
             continue
-        normalized = os.path.normcase(os.path.abspath(root))
+        normalized = root.rstrip('/') if root.startswith('ssh://') else os.path.normcase(os.path.abspath(root))
         try:
-            if os.path.commonpath((candidate, normalized)) != normalized:
-                continue
+            if root.startswith('ssh://'):
+                if candidate!=normalized and not candidate.startswith(normalized+'/'):continue
+            elif candidate.startswith('ssh://') or os.path.commonpath((candidate,normalized))!=normalized:continue
         except ValueError:
             continue
         if best is None or len(normalized) > best[0]:

@@ -1158,7 +1158,7 @@ class SQLiteScanStore:
         if type(identity) is not str or not __import__('re').fullmatch('[0-9a-f]{64}', identity):
             raise StateError()
         from pathlib import Path
-        root = str(Path(root).absolute())
+        root = str(root).rstrip('/') if str(root).startswith('ssh://') else str(Path(root).absolute())
         prefix = root.rstrip('/\\') + __import__('os').sep
         with self.conn:
             if not self._lease_valid(lease):
@@ -1344,7 +1344,7 @@ class SQLiteScanStore:
     @_bounded_sql
     def reconcile_cycle(self, lease, root):
         from pathlib import Path
-        root = str(Path(root).absolute())
+        root = str(root).rstrip('/') if str(root).startswith('ssh://') else str(Path(root).absolute())
         prefix = root.rstrip('/\\') + __import__('os').sep
         with self.conn:
             if not self._lease_valid(lease):
@@ -1362,7 +1362,7 @@ class SQLiteScanStore:
         if reason not in {'source-unavailable', 'source-event', 'incomplete-scan'}:
             raise StateError()
         from pathlib import Path
-        root = str(Path(root).absolute())
+        root = str(root).rstrip('/') if str(root).startswith('ssh://') else str(Path(root).absolute())
         prefix = root.rstrip('/\\') + __import__('os').sep
         with self.conn:
             self.conn.execute("UPDATE finding_state SET state='unknown',payload=json_set(payload,'$.state','unknown','$.state_reason',?,'$.resolved_at',NULL) WHERE state IN ('active','unknown') AND (path=? OR substr(path,1,?)=?)", (reason, root, len(prefix), prefix))

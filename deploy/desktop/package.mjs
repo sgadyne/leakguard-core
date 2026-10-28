@@ -1,4 +1,5 @@
 import { packager } from '@electron/packager';
+import { constants as fsConstants } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { mkdtemp, mkdir, readFile, cp, rm, writeFile, access } from 'node:fs/promises';
 import path from 'node:path';
@@ -42,7 +43,7 @@ try {
       : path.join(packaged, 'resources');
     await access(path.join(resourceRoot, 'app.asar'));
     await cp(path.resolve(values.resources), path.join(resourceRoot, 'buddy'), {
-      recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true,
+      recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true, mode:fsConstants.COPYFILE_FICLONE,
     });
     if (platform === 'darwin') {
       const app = path.join(packaged, 'Password Buddy.app');

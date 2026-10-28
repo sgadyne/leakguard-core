@@ -55,11 +55,12 @@ def _status(backend) -> dict[str, Any]:
               {"queued", "running", "completed", "failed", "paused", "backoff", "cancelled"}]
     return {
         "scan_events": events,
+        "finding_events":[{'id':row['id'],'count':row.get('new_findings',0)} for row in jobs[:20]] if (backend.settings() if hasattr(backend,'settings') else {}).get('protection',{}).get('notify_new_findings') else [],
         "observations": {key: bool(observations.get(key)) for key in ("created", "unlocked")},
         "vault": {key: bool(value["vault"].get(key)) for key in ("created", "unlocked")},
         "scheduler": host.get("scheduler", "stopped"),
         "pending_jobs": host.get("pending_jobs", 0),
-        "background": background,
+        "background": "paused" if host.get("protection_paused") else "offline" if observations.get("available") is False else background,
         "error_codes": [code for code in (observations.get("startup_error"), host.get("error"))
                         if type(code) is str and code in _SAFE_ERRORS],
     }

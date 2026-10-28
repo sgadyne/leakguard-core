@@ -83,7 +83,7 @@ class HostService:
     def __init__(self, *, config: ScanConfig, scan_store: object,
                  state_store: HostStateStore | None = None, limits: ScanLimits | None = None,
                  clock: Callable[[], float] = time.time,
-                 scanner_factory: Callable = Scanner.open):
+                 scanner_factory: Callable = Scanner.open, protection: dict | None = None):
         if type(config) is not ScanConfig:
             raise TypeError("config must be ScanConfig")
         self._config = config
@@ -93,6 +93,10 @@ class HostService:
             raise HostError("encrypted-state-required")
         self._clock = clock
         self._scanner_factory = scanner_factory
+        from .protection import validate, defaults
+        self._protection = validate(protection or defaults())
+        from .discovery import DiscoveryCoordinator
+        self._discovery = DiscoveryCoordinator(scan_store, config, scanner_factory=scanner_factory,clock=clock) if callable(getattr(scan_store,'partition',None)) else None
         configured = config.to_mapping()
         self._limits = limits or ScanLimits(deadline_seconds=10, max_files=100,
             max_file_bytes=configured["max_file_bytes"], max_directory_entries=2000,
@@ -116,9 +120,18 @@ class HostService:
             raise HostError("host-state-unavailable") from None
         changed = False
         for job in self._state["jobs"].values():
-            if job["state"] in {"queued", "running", "backoff"}:
-                job.update(state="paused", last_error="interrupted-restart", updated_at=_timestamp(self._clock()))
+            selected_source=self._state['sources'][job['source_id']]
+            automatic = selected_source.get('managed_inventory',False) and selected_source['enabled'] and job.get('pause_reason')!='user'
+            interrupted = job['state'] in {'queued','running','backoff'} or job['state']=='paused' and job.get('last_error') in {'service-stopped','interrupted-restart'}
+            if interrupted:
+                job.update(state='queued' if automatic else 'paused', last_error=None if automatic else 'interrupted-restart', updated_at=_timestamp(self._clock()))
                 changed = True
+        from .protection import next_run
+        for source in self._state['sources'].values():
+            if source.get('managed_inventory') and source['schedule_seconds'] is None and source.get('schedule') is None and source.get('global_schedule')!=self._protection['schedule']:
+                source['global_schedule']=deepcopy(self._protection['schedule'])
+                source['next_run_at']=_timestamp(next_run(self._protection['schedule'],self._clock()))
+                changed=True
         if changed:
             self._save()
 
@@ -134,14 +147,26 @@ class HostService:
             for key, source in value["sources"].items():
                 if type(source) is not dict or source["id"] != key or not isinstance(key, str) or len(key) != 32:
                     raise ValueError()
-                navigation._path(source["root"])
-                if source["kind"] not in {"local", "mounted", "unc"} or type(source["enabled"]) is not bool:
+                if source['kind']=='ssh':
+                    from .ssh_locations import uri
+                    from .ssh import _remote_path,_target
+                    if uri(_target(source['ssh_target']),_remote_path(source['remote_root'],allow_root=True))!=source['root']:raise ValueError()
+                    if source.get('ssh_port') is not None and (type(source['ssh_port']) is not int or not 1<=source['ssh_port']<=65535):raise ValueError()
+                    if source.get('ssh_python','python3') not in {'python3','/usr/bin/python3'}:raise ValueError()
+                else:navigation._path(source["root"])
+                if source["kind"] not in {"local", "mounted", "unc", "ssh"} or type(source["enabled"]) is not bool:
                     raise ValueError()
                 if type(source["exclusions"]) is not list or len(source["exclusions"]) > 100:
                     raise ValueError()
                 for excluded in source["exclusions"]:
-                    navigation.bounded_path(excluded, source["root"])
+                    if source['kind']=='ssh':
+                        from .ssh_locations import remote_path
+                        remote_path(source,excluded)
+                    else:navigation.bounded_path(excluded, source["root"])
                 _interval(source["schedule_seconds"])
+                if source.get("schedule") is not None:
+                    from .protection import validate_schedule
+                    validate_schedule(source["schedule"])
                 _seconds(source["next_run_at"])
                 _seconds(source["last_success_at"])
             for key, job in value["jobs"].items():
@@ -182,6 +207,32 @@ class HostService:
                 self._state = prior
                 raise
 
+    def configure_automatic(self, roots):
+        """One source per location, never one source/job per file."""
+        import os
+        from .protection import next_run
+        for root in roots:
+            root=str(navigation.bounded_path(root))
+            existing=next((s for s in self.sources() if s['root']==root),None)
+            if existing is None:
+                existing=self.add_source(root,label='This Mac' if root=='/' else 'This Mac — '+Path(root).name)
+            source_id=existing['id']
+            def configure():
+                source=self._source(source_id)
+                source['global_schedule']=deepcopy(self._protection['schedule'])
+                source.update(automatic=True,managed_inventory=True,local_devices=list({Path(root).stat().st_dev,Path.home().stat().st_dev}))
+                if source.get('next_run_at') is None:source['next_run_at']=_timestamp(self._clock())
+            self._mutate(configure)
+
+    def manage_source(self, source_id):
+        def configure():
+            source=self._source(source_id)
+            source['managed_inventory']=True
+            source['global_schedule']=deepcopy(self._protection['schedule'])
+            if source.get('next_run_at') is None:source['next_run_at']=_timestamp(self._clock())
+            return source
+        return self._mutate(configure)
+
     def capabilities(self) -> dict:
         return navigation.capabilities()
 
@@ -195,16 +246,45 @@ class HostService:
         with self._lock:
             source = self._source(source_id)
             root = source["root"]
+        if source['kind']=='ssh':
+            from .ssh_locations import remote_path
+            return {'supported':False,'status':'remote-location','path':remote_path(source,path),'target':source['ssh_target']}
         return navigation.reveal(path, root=root)
 
     def sources(self) -> list[dict]:
         with self._lock:
-            return deepcopy(list(self._state["sources"].values()))
+            rows=deepcopy(list(self._state['sources'].values()))
+            for source in rows:
+                jobs=[j for j in self._state['jobs'].values() if j['source_id']==source['id']]
+                latest=max(jobs,key=lambda j:j['created_at']) if jobs else {}
+                error=latest.get('last_error')
+                source['availability']='permission-needed' if error=='permission-denied' else 'offline' if error in {'offline','source-unavailable','unreadable'} else 'paused' if not source['enabled'] or self._protection['paused'] or latest.get('state')=='paused' else 'scanning' if latest.get('state') in {'queued','running'} else 'current-with-gaps' if latest.get('state')=='completed' else 'unverified'
+            return rows
 
-    def add_source(self, root, *, label: str | None = None, kind: str = "local", exclusions=()) -> dict:
-        if kind not in {"local", "mounted", "unc"}:
+    def add_source(self, root, *, label: str | None = None, kind: str = "local", exclusions=(), target: str | None = None, ssh_port: int | None = None) -> dict:
+        if kind not in {"local", "mounted", "unc", "ssh"}:
             raise HostError("source-kind-invalid")
-        path = navigation.bounded_path(root)
+        if kind=='ssh':
+            from .ssh_locations import uri
+            from .ssh import _target,_remote_path
+            if ssh_port is not None and (type(ssh_port) is not int or not 1<=ssh_port<=65535):raise HostError('ssh-port-invalid')
+            target=_target(target);remote_root=_remote_path(str(root),allow_root=True);logical=uri(target,remote_root)
+            if len(logical)>3500:raise HostError('remote-path-invalid')
+            if label is not None and (type(label) is not str or not 1<=len(label)<=200):raise HostError('source-label-invalid')
+            if not isinstance(exclusions,(list,tuple)) or len(exclusions)>100:raise HostError('exclusions-invalid')
+            excluded=[]
+            from pathlib import PurePosixPath
+            for item in exclusions:
+                path=_remote_path(str(PurePosixPath(remote_root)/item) if not str(item).startswith('/') else str(item),allow_root=True)
+                if not PurePosixPath(path).is_relative_to(remote_root):raise HostError('outside-root')
+                excluded.append(uri(target,path))
+            def add_remote():
+                if len(self._state['sources'])>=100:raise HostError('source-limit')
+                if any(s['root']==logical for s in self._state['sources'].values()):raise HostError('source-exists')
+                source={'id':uuid.uuid4().hex,'label':label or target+':'+remote_root,'root':logical,'kind':'ssh','ssh_target':target,'remote_root':remote_root,'ssh_python':'/usr/bin/python3','ssh_port':ssh_port,'remote_identity':None,'exclusions':excluded,'schedule_seconds':None,'enabled':True,'last_success_at':None,'next_run_at':None,'root_identity':None,'mount_marker':None}
+                self._state['sources'][source['id']]=source;return source
+            return self._mutate(add_remote)
+        path = navigation._path(root) if kind=='mounted' else navigation.bounded_path(root)
         if kind == "unc" and not navigation.capabilities()["unc"]:
             raise HostError("platform-unavailable")
         if label is not None and (type(label) is not str or not 1 <= len(label) <= 200):
@@ -212,12 +292,21 @@ class HostService:
         if not isinstance(exclusions, (list, tuple)) or len(exclusions) > 100:
             raise HostError("exclusions-invalid")
         excluded = [str(navigation.bounded_path(item if Path(item).is_absolute() else path / item, path)) for item in exclusions]
-        status = navigation.path_status(path)
+        mounted_info=None
+        if kind=='mounted':
+            from .mounted_worker import call
+            try:
+                probe=call({'op':'probe','root':str(path)})
+                status=probe['status'];mounted_info=probe['info']
+            except HostError:status='offline'
+        else:status = navigation.path_status(path)
         if status != "available" and kind == "local":
             raise HostError(status)
         try:
-            info = path.stat()
-            identity = [info.st_dev, info.st_ino] if status == "available" else None
+            if kind=='mounted':identity=[mounted_info['st_dev'],mounted_info['st_ino']] if mounted_info else None
+            else:
+                info = path.stat()
+                identity = [info.st_dev, info.st_ino] if status == 'available' else None
         except OSError:
             identity = None
         def action():
@@ -233,16 +322,35 @@ class HostService:
             return source
         return self._mutate(action)
 
-    def update_source(self, source_id: str, *, schedule_seconds=_UNSET, enabled: bool | None = None) -> dict:
+    def update_source(self, source_id: str, *, schedule_seconds=_UNSET, enabled: bool | None = None, schedule=_UNSET,ssh_port=_UNSET) -> dict:
+        if ssh_port is not _UNSET and ssh_port is not None and (type(ssh_port) is not int or not 1<=ssh_port<=65535):raise HostError('ssh-port-invalid')
+        if schedule is not _UNSET and schedule is not None:
+            from .protection import validate_schedule
+            schedule=validate_schedule(schedule)
         if schedule_seconds is not _UNSET:
             _interval(schedule_seconds)
         if enabled is not None and type(enabled) is not bool:
             raise HostError("source-invalid")
         def action():
             source = self._source(source_id)
+            if ssh_port is not _UNSET:
+                if source['kind']!='ssh':raise HostError('source-kind-invalid')
+                source['ssh_port']=ssh_port
+                for job in self._state['jobs'].values():
+                    if job['source_id']==source_id and job['state']=='backoff':job.update(state='queued',next_retry_at=None)
             if schedule_seconds is not _UNSET:
+                source["global_schedule"]=deepcopy(self._protection["schedule"])
                 source["schedule_seconds"] = schedule_seconds
+                source["schedule"]=None
                 source["next_run_at"] = _timestamp(self._clock() + schedule_seconds) if schedule_seconds is not None else None
+                if schedule_seconds is None and source.get('managed_inventory'):
+                    from .protection import next_run
+                    source['next_run_at']=_timestamp(next_run(self._protection['schedule'],self._clock()))
+            if schedule is not _UNSET:
+                from .protection import next_run
+                source['schedule']=schedule
+                source['schedule_seconds']=None
+                source['next_run_at']=_timestamp(next_run(schedule or self._protection['schedule'],self._clock()))
             if enabled is not None:
                 source["enabled"] = enabled
                 if not enabled:
@@ -321,7 +429,7 @@ class HostService:
         now = _timestamp(self._clock())
         job = {"id": uuid.uuid4().hex, "source_id": source_id, "state": "queued", "created_at": now,
                "updated_at": now, "next_retry_at": None, "attempts": 0, "slices": 0, "files_scanned": 0,
-               "stalled_slices": 0,
+               "stalled_slices": 0, "omission_count": 0,
                "work_identity": None, "policy_resets": 0,
                "pending_files": None, "pending_directories": None, "coverage": "incomplete", "last_error": None, "report_id": None}
         self._state["jobs"][job["id"]] = job
@@ -341,7 +449,7 @@ class HostService:
                 raise HostError("job-finished")
             if state == "queued" and not self._source(job["source_id"])["enabled"]:
                 raise HostError("source-disabled")
-            job.update(state=state, updated_at=_timestamp(self._clock()), next_retry_at=None)
+            job.update(state=state, updated_at=_timestamp(self._clock()), next_retry_at=None,pause_reason="user" if state=="paused" else None,last_error=None)
             if state == "queued":
                 job["stalled_slices"] = 0
             return job
@@ -360,10 +468,34 @@ class HostService:
 
     def _cancelled(self, job_id: str) -> bool:
         with self._lock:
-            return self._stop.is_set() or self._job(job_id)["state"] != "running"
+            return self._stop.is_set() or self._protection["paused"] or self._job(job_id)["state"] != "running" or self._source(self._job(job_id)["source_id"]).get("automatic",False) and not self._protection["automatic_this_mac"]
+
+    def remote_browse(self,target,path=None,*,root=None,cursor=None):
+        from .ssh_locations import SSHLocations
+        return SSHLocations().browse(target,path,root=root,cursor=cursor)
 
     def _available(self, source: dict) -> str:
+        if source['kind']=='ssh':
+            from .ssh_locations import SSHLocations
+            from .ssh import SSHRunner
+            try:
+                probe=SSHLocations(runner=SSHRunner(port=source.get('ssh_port'))).probe(source['ssh_target'],source['remote_root'],python=source.get('ssh_python','/usr/bin/python3'),expected=source.get('remote_identity'),cancel=lambda:self._stop.is_set())
+                with self._lock:self._source(source['id']).update(remote_identity=probe['identity'],remote_python_version=probe['python_version'])
+                return 'available'
+            except HostError as error:return error.code if error.code in {'source-changed','permission-denied'} else 'offline'
         path = Path(source["root"])
+        if source['kind']=='mounted':
+            marker=navigation.mount_marker(path)
+            actual=[m for m in navigation._mounts() if m['path']!='/' and path.is_relative_to(m['path'])]
+            if not actual or source['mount_marker'] is not None and marker!=source['mount_marker']:return 'offline'
+            from .mounted_worker import call
+            try:
+                probe=call({'op':'probe','root':str(path)});status=probe['status']
+                with self._lock:self._source(source['id'])['active_root_identity']=[probe['info']['st_dev'],probe['info']['st_ino']]
+            except HostError:return 'offline'
+            if source['mount_marker'] is None:
+                with self._lock:self._source(source['id'])['mount_marker']=marker
+            return status
         try:
             if path.resolve() != path:
                 return "source-changed"
@@ -405,7 +537,7 @@ class HostService:
                 except Exception as error:
                     raise HostError("state-cycle-busy" if getattr(error, "code", None) == "state-cycle-busy" else "state-reset-failed") from None
                 job.update(work_identity=dict(identity), files_scanned=0, pending_files=None,
-                           pending_directories=None, stalled_slices=0, coverage="incomplete", report_id=None)
+                           pending_directories=None, stalled_slices=0, omission_count=0, coverage="incomplete", report_id=None)
             return True
 
     def tick(self) -> dict:
@@ -419,18 +551,26 @@ class HostService:
                 if self._stop.is_set():
                     return {"worked": False, "status": "stopped"}
                 now = self._clock()
+                if self._protection['paused']:
+                    return {'worked':False,'status':'paused'}
                 scheduled = []
                 for source in self._state["sources"].values():
-                    if source["enabled"] and source["schedule_seconds"] is not None and _seconds(source["next_run_at"]) <= now:
+                    automatic=source.get('automatic',False)
+                    if automatic and not self._protection['automatic_this_mac']:continue
+                    scheduled_source=source['schedule_seconds'] is not None or source.get('managed_inventory',False)
+                    if source["enabled"] and scheduled_source and _seconds(source["next_run_at"]) <= now:
                         scheduled.append(source["id"])
                 if scheduled:
                     def enqueue():
                         for source_id in scheduled:
-                            self._submit(source_id)
+                            scheduled_job=self._submit(source_id)
+                            if self._source(source_id).get('managed_inventory') and scheduled_job['slices']:scheduled_job['refresh_requested']=True
                             source = self._source(source_id)
-                            source["next_run_at"] = _timestamp(now + source["schedule_seconds"])
+                            from .protection import next_run
+                            schedule={'mode':'interval','interval_seconds':source['schedule_seconds']} if source['schedule_seconds'] is not None else source.get('schedule') or self._protection['schedule']
+                            source["next_run_at"] = _timestamp(next_run(schedule,now))
                     self._mutate(enqueue)
-                ready = [job for job in self._state["jobs"].values() if job["state"] == "queued" or job["state"] == "backoff" and _seconds(job["next_retry_at"]) <= now]
+                ready = [job for job in self._state['jobs'].values() if (job['state']=='queued' or job['state']=='backoff' and _seconds(job['next_retry_at'])<=now) and self._source(job['source_id'])['enabled'] and (not self._source(job['source_id']).get('automatic') or self._protection['automatic_this_mac'])]
                 if not ready:
                     return {"worked": False, "status": "idle"}
                 # Rotate unfinished slices so a large scope cannot starve others.
@@ -439,10 +579,14 @@ class HostService:
                 job_id = job["id"]
                 def running():
                     job.update(state="running", updated_at=_timestamp(now), next_retry_at=None)
+                    if not job["slices"]:self._source(job["source_id"])["last_run_at"]=_timestamp(now)
                 self._mutate(running)
                 self._current = job_id
             status = self._available(source)
             report = None
+            managed_result = None
+            managed_job = None
+            managed_source = None
             slice_store = _SliceStore(self._store)
             failure = None
             if status != "available":
@@ -451,6 +595,15 @@ class HostService:
                     self._store.invalidate_scope(source["root"], reason="source-unavailable")
                 except Exception:
                     failure = "state-failed"
+            elif source.get('managed_inventory') and self._discovery is not None:
+                try:
+                    with self._lock:
+                        managed_job=deepcopy(self._job(job_id));managed_source=deepcopy(self._source(source['id']))
+                    with self._store.transaction():
+                        managed_result=self._discovery.tick(managed_source,managed_job,self._protection,cancel=lambda:self._cancelled(job_id))
+                except Exception as error:
+                    failure=getattr(error,'code','scan-failed')
+                    if source['kind']=='ssh' and failure in {'ssh-timeout','ssh-execution-failed','ssh-output-limit','remote-report-invalid'}:failure='source-unavailable'
             else:
                 values = self._config.to_mapping()
                 scope = "host-" + source["id"]
@@ -471,25 +624,43 @@ class HostService:
                 def finish():
                     job = self._job(job_id)
                     source_now = self._source(job["source_id"])
+                    if managed_result is not None:
+                        protected={'id','source_id','state','created_at','updated_at','next_retry_at','attempts','slices','last_error'}
+                        job.update({k:v for k,v in managed_job.items() if k not in protected})
+                        if job.get('invalidate_cursor',0)>=256:job['offline_invalidated']=False
+                        if 'inspection_identity' in managed_source:source_now['inspection_identity']=managed_source['inspection_identity']
+                        if managed_job.get('reconciliation_started_at'):source_now['last_run_at']=_timestamp(managed_job['reconciliation_started_at'])
                     job["updated_at"] = _timestamp(self._clock())
                     job["slices"] += 1
                     previous_pending = (job["pending_files"], job["pending_directories"])
                     if report is not None:
                         job.update(report_id=report.run_id, files_scanned=job["files_scanned"] + report.counts.scanned + report.counts.reused,
-                                   pending_files=report.coverage.pending_files, pending_directories=report.coverage.pending_directories)
+                                   pending_files=report.coverage.pending_files, pending_directories=report.coverage.pending_directories,
+                                   omission_count=max(job.get("omission_count",0),1) if any(issue.omission_id=="audit-cycle-omissions" for issue in report.issues) else job.get("omission_count", 0) + report.coverage.omission_count)
                     # A control action received during the slice takes precedence.
                     if job["state"] != "running":
                         return job
                     if self._stop.is_set():
-                        job.update(state="paused", last_error="service-stopped")
+                        job.update(state="paused", last_error="service-stopped",pause_reason="system")
                         return job
                     if failure is not None:
+                        if source.get('managed_inventory') and failure in {'offline','source-unavailable','source-changed','unreadable','permission-denied'} and not job.get('offline_invalidated'):
+                            job.update(invalidate_cursor=0,offline_invalidated=True,refresh_requested=True)
                         if failure in {"work-identity-unavailable", "work-identity-invalid", "state-reset-unavailable"}:
                             job.update(state="failed", last_error=failure, coverage="incomplete")
                         else:
                             self._backoff(job, failure)
+                    elif managed_result is not None:
+                        counts=self._store.inventory_counts(source['id'])
+                        job.update(inventory_counts=counts,pending_files=counts.get('pending',0)+counts.get('changed',0),pending_directories=counts.get('enumerating',0),coverage='incomplete')
+                        current=managed_result['inventory_complete'] and not counts.get('enumerating') and (not (counts.get('pending',0)+counts.get('changed',0)) or self._protection['new_content']=='inventory')
+                        job.update(state='completed' if current else 'queued',attempts=0,last_error=None)
+                        if current:source_now['last_success_at']=job['updated_at']
                     elif report.coverage.enumeration_complete and report.coverage.required_complete:
-                        job.update(state="completed", coverage="complete", attempts=0, last_error=None)
+                        # Completing the selected policy may still omit binary,
+                        # encrypted or operator-excluded material. Preserve that
+                        # gap in the source coverage shown by all host clients.
+                        job.update(state="completed", coverage="incomplete" if job["omission_count"] else "complete", attempts=0, last_error=None)
                         source_now["last_success_at"] = job["updated_at"]
                     else:
                         codes = {issue.code.value for issue in report.issues if issue.required}
@@ -529,6 +700,9 @@ class HostService:
                     "unattended_available": available and store_status.get("unattended_available") is True,
                     "storage_error": self._storage_error, "worker_error": self._worker_error, "sources": len(self._state["sources"]),
                     "pending_jobs": sum(job["state"] in _ACTIVE for job in self._state["jobs"].values()),
+                    "protection_paused":self._protection['paused'],
+                    "machine_inventory":self._store.inventory_counts() if callable(getattr(self._store,'inventory_counts',None)) else {},
+                    "coverage_statement":"Inventory and inspected content are separate; pending work and gaps are never a clean-machine claim.",
                     "slice_seconds": self._limits.deadline_seconds, "slice_max_files": self._limits.max_files}
 
     def start(self) -> dict:
@@ -565,7 +739,7 @@ class HostService:
             self._wake.clear()
 
     def stop(self, *, timeout: float | None = None) -> dict:
-        wait_seconds = self._limits.deadline_seconds + 5 if timeout is None else timeout
+        wait_seconds = max(self._limits.deadline_seconds+5,35 if any(s['kind']=='ssh' for s in self._state['sources'].values()) else 15) if timeout is None else timeout
         if isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float)) or wait_seconds < 0:
             raise HostError("stop-timeout-invalid")
         deadline = time.monotonic() + wait_seconds
@@ -581,4 +755,5 @@ class HostService:
         if not self._slice_lock.acquire(timeout=max(0, deadline - time.monotonic())):
             raise HostError("worker-still-running")
         self._slice_lock.release()
+        if self._discovery is not None:self._discovery.close()
         return self.status()

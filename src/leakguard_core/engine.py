@@ -1282,11 +1282,16 @@ class ScanService:
         if cycle_evidence is not None and (cycle_evidence['files'] > len({result.source.path for result in results})
                                            or cycle_evidence['has_omissions']):
             run_issues.append(m.CoverageIssue(m.ErrorCode.AUDIT_CYCLE_EVIDENCE))
+        if cycle_evidence is not None and cycle_evidence['has_omissions'] and not any(issue.omission_id for issue in (*run_issues, *(issue for result in results for issue in result.issues))):
+            # Durable earlier slices may be absent from this immutable report.
+            # Publish an explicit typed gap marker so hosts and report decoders
+            # cannot infer complete coverage from a zero slice omission count.
+            run_issues.append(m.CoverageIssue(m.ErrorCode.POLICY_OMISSION,omission_id='audit-cycle-omissions'))
         enumeration_complete = enumeration_complete and not run_issues.truncated
         coverage, decision = scan_policy.evaluate(tuple(results), policy=policy, policy_id=policy_id, enumeration_complete=enumeration_complete, issues=tuple(run_issues), pending_files=metadata.get('pending_files'), pending_directories=metadata.get('pending_directories'), cycle_id=metadata.get('cycle_id'))
         if coverage.required_complete and cycle_evidence is not None:
             # Coverage/decision span the completed audit cycle; immutable results,
-            # counts and typed omission_count remain scoped to this report slice.
+            # counts remain scoped to this slice; prior omissions have a typed cycle marker.
             blocking = {severity.value for severity in policy.block_severities}
             verdict = (m.DecisionVerdict.BLOCK if blocking.intersection(cycle_evidence['severities'])
                        else m.DecisionVerdict.ALLOW_WITH_OMISSIONS if cycle_evidence['has_omissions'] or decision.verdict is m.DecisionVerdict.ALLOW_WITH_OMISSIONS

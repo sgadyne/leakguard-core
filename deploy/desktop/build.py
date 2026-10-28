@@ -49,7 +49,7 @@ def run(command, cwd=SOURCE):
 def clean_copy(source, destination):
     # Enumeration validates links before copytree follows no symlink at all.
     bootstrap.records(source)
-    shutil.copytree(source, destination, symlinks=True)
+    shutil.copytree(source, destination, symlinks=True,copy_function=bootstrap.clone_copy)
 
 
 def make_buddy_wheel(source, destination):

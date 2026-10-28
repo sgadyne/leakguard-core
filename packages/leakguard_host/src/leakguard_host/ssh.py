@@ -251,10 +251,10 @@ except subprocess.TimeoutExpired:
 
 
 class SSHRunner:
-    def __init__(self, *, executable: str | None = None, port: int = 22,
+    def __init__(self, *, executable: str | None = None, port: int | None = 22,
                  identity_file: Path | None = None, known_hosts_file: Path | None = None):
         self.executable = executable or shutil.which("ssh") or "ssh"
-        if type(port) is not int or not 1 <= port <= 65535:
+        if port is not None and (type(port) is not int or not 1 <= port <= 65535):
             raise HostError("ssh-port-invalid")
         self.port = port
         for path in (identity_file, known_hosts_file):
@@ -263,15 +263,15 @@ class SSHRunner:
         self.identity_file = identity_file
         self.known_hosts_file = known_hosts_file
 
-    def _command(self, target: str, python: str, script: str, args=()) -> list[str]:
+    def _command(self, target: str, python: str, script: str, args=(), *, isolated=False) -> list[str]:
         target = _target(target)
         if python != "python3":
             python = _remote_path(python)
         # OpenSSH's remote command uses a POSIX shell; quote each fixed argument.
-        command = shlex.join([python, "-c", script, *args])
-        argv = [self.executable, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+        command = shlex.join([python, *( ["-I","-S","-B"] if isolated else ["-B"] ), "-c", script, *args])
+        argv = [self.executable, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
                 "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
-                "-p", str(self.port)]
+                *(["-p",str(self.port)] if self.port is not None else [])]
         if self.identity_file is not None:
             argv += ["-i", str(self.identity_file), "-o", "IdentitiesOnly=yes"]
         if self.known_hosts_file is not None:

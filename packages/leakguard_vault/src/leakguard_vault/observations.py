@@ -43,6 +43,8 @@ class EncryptedScanStore:
                 self._persist_material_key()
                 self._dirty = True
             self._store.conn.commit()
+            from .partitions import EncryptedPartitions
+            self._partitions = EncryptedPartitions(self)
         except Exception:
             self._store.close()
             raise StateError() from None
@@ -168,11 +170,13 @@ class EncryptedScanStore:
         self._ensure_open()
         self._store.set_deadline(None)
         try:
+            parts_committed=self._partitions.prepare()
             plain = self._store.serialize(max_bytes=self._max_bytes)
             header, value = envelope.encode(self._header, bytes(self._key), plain)
             atomic_write(self._path, value, replace=replace)
             self._header = header
-            self._dirty = False
+            self._dirty = not parts_committed
+            if parts_committed:self._partitions.committed()
         except VaultError as error:
             self._poisoned = True
             raise StateError("state-capacity-limit" if error.code == "vault-capacity-limit" else "state-checkpoint-failed") from None
@@ -253,7 +257,9 @@ class EncryptedScanStore:
             self._store.set_deadline(None)
             return {"unlocked": True, "healthy": not self._poisoned, "unattended_available": self._unattended_verified and not self._poisoned,
                     "keyring_enabled": "keyring" in self._header,
-                    "serialized_bytes": self._size(), "capacity_bytes": self._max_bytes}
+                    "serialized_bytes": self._size(), "capacity_bytes": self._max_bytes,
+                    "partition_count":len(self._partitions.catalog),"partition_capacity_bytes":envelope.MAX_STATE,"inventory_counts":self._partitions.counts(),
+                    "encrypted_disk_bytes":self._path.stat().st_size+sum(p.stat().st_size for p in self._partitions.directory.glob("*.lgo"))}
 
     def enable_keyring(self, *, keyring=None):
         from .keyring import NativeKeyring
@@ -293,6 +299,8 @@ class EncryptedScanStore:
         with self._mutex:
             self._ensure_open()
             self._store.set_deadline(None)
+            if self._partitions.catalog or self._partitions.cache:
+                raise StateError("state-partition-backup-required")
             plain = self._store.serialize(max_bytes=self._max_bytes)
             header, key = envelope.new_header("observations-backup", passphrase)
             _, value = envelope.encode(header, key, plain)
@@ -317,6 +325,156 @@ class EncryptedScanStore:
                 lock.close()
             raise
 
+    def implementation_identity(self):
+        artifacts=[]
+        for path in sorted(Path(__file__).parent.glob('*.py')):
+            data=path.read_bytes()
+            if len(data)>1_000_000:raise StateError('state-data-invalid')
+            artifacts.append([path.name,hashlib.sha256(data).hexdigest()])
+        return hashlib.sha256(envelope.canonical(artifacts)).hexdigest()
+
+    def rebind_path(self,path,file_lock):
+        """Called only after verified ciphertext copy and durable config switch."""
+        with self._mutex:
+            self._ensure_open()
+            old=self._file_lock
+            self._path=path;self._file_lock=file_lock
+            self._partitions.directory=path.with_name(path.name+'.parts')
+            old.close()
+
+    def transaction(self):
+        """Defer partition publication while UI control state may checkpoint.
+
+        The host applies copied progress only when this transaction ends. A
+        durable user pause can therefore publish without committing half a scan.
+        """
+        from contextlib import contextmanager
+        @contextmanager
+        def transaction():
+            with self._mutex:
+                self._ensure_open()
+                if self._partitions.active_transaction:raise StateError('state-cycle-busy')
+                self._partitions.active_transaction=True
+            try:yield
+            finally:
+                with self._mutex:self._partitions.active_transaction=False;self._dirty=True
+        return transaction()
+
+    def partition(self, bucket):
+        """Pin a writer partition; individual operations use the owner mutex."""
+        from contextlib import contextmanager
+        @contextmanager
+        def borrow():
+            with self._mutex:
+                self._ensure_open();self._dirty=True
+                self._partitions.pinned.add(bucket)
+                try:child=self._partitions.get(bucket)
+                except BaseException:
+                    self._partitions.pinned.discard(bucket);raise
+            try:yield child
+            finally:
+                with self._mutex:self._partitions.pinned.discard(bucket)
+        return borrow()
+
+    def inventory_put(self, rows):
+        with self._mutex:
+            self._ensure_open()
+            self._dirty = True
+            return self._partitions.inventory_put(rows)
+
+    def inventory_page(self, *args, **kwargs):
+        with self._mutex:
+            self._ensure_open()
+            return self._partitions.inventory_page(*args, **kwargs)
+
+    def queue_reconciliation(self, *args):
+        with self._mutex:
+            self._ensure_open();self._dirty=True
+            return self._partitions.queue_reconciliation(*args)
+
+    def invalidate_location(self, *args):
+        with self._mutex:
+            self._ensure_open();self._dirty=True
+            return self._partitions.invalidate_location(*args)
+
+    def reconcile_location(self, *args):
+        with self._mutex:
+            self._ensure_open();self._dirty=True
+            return self._partitions.reconcile_location(*args)
+
+    def inventory_set(self, *args, **kwargs):
+        with self._mutex:
+            self._ensure_open()
+            self._dirty = True
+            return self._partitions.inventory_set(*args, **kwargs)
+
+    def physical_visit(self, *args):
+        with self._mutex:
+            self._ensure_open()
+            self._dirty = True
+            return self._partitions.physical_visit(*args)
+
+    def inventory_counts(self, location=None):
+        with self._mutex:
+            self._ensure_open()
+            return self._partitions.counts(location)
+
+    def _source_freshness(self,rows,state):
+        if state!='current':return rows
+        host=self.load_host_state();sources=host.get('sources',{});jobs=host.get('jobs',{})
+        stale=[]
+        for key,source in sources.items():
+            selected=[j for j in jobs.values() if j['source_id']==key]
+            latest=max(selected,key=lambda j:(j['created_at'],j['id'])) if selected else {}
+            if latest.get('last_error') in {'offline','source-unavailable','source-changed','permission-denied','unreadable'} or latest.get('invalidate_cursor',256)<256:
+                stale.append((source['root'],'policy-obsolete' if latest.get('invalidate_cursor',256)<256 else 'source-unavailable'))
+        output=[]
+        for row in rows:
+            row=dict(row);path_text=(row.get('source') or {}).get('path','');path=Path(path_text)
+            for root,reason in stale:
+                if (path_text==root or path_text.startswith(root.rstrip('/')+'/') if root.startswith('ssh://') else path.is_absolute() and path.is_relative_to(Path(root))) and row.get('state') in {'active','unknown'}:
+                    row.update(state='unknown',state_reason=reason,resolved_at=None);break
+            output.append(row)
+        return tuple(output)
+
+    def query_findings_page(self, *, state='current', profile=None, limit=1000, cursor=None):
+        from leakguard_core.scan_store import FindingPage
+        with self._mutex:
+            self._ensure_open()
+            bucket, inner = -1, None
+            if cursor is not None:
+                try:
+                    value = envelope.load_json(__import__('base64').urlsafe_b64decode(cursor + '=' * (-len(cursor) % 4)))
+                    bucket, inner, saved_state, saved_profile = value
+                    if saved_state != state or saved_profile != profile or type(bucket) is not int or not -1 <= bucket <= 255:
+                        raise ValueError()
+                except Exception:
+                    raise StateError('state-query-invalid') from None
+            def token(b, c):
+                return __import__('base64').urlsafe_b64encode(envelope.canonical([b,c,state,profile])).decode().rstrip('=')
+            for _ in range(8):
+                if bucket == -1:
+                    store = self._store
+                else:
+                    name = f'e{bucket:02x}'
+                    if name not in self._partitions.catalog and name not in self._partitions.cache:
+                        bucket += 1
+                        if bucket > 255: return FindingPage((), None)
+                        continue
+                    store = self._partitions.get(name)
+                store.set_deadline(None)
+                page = store.query_findings_page(state=state, profile=profile, limit=limit, cursor=inner)
+                if page.next_cursor is not None:
+                    return FindingPage(self._source_freshness(page.rows,state), token(bucket, page.next_cursor))
+                bucket += 1
+                inner = None
+                if page.rows or bucket > 255:
+                    return FindingPage(self._source_freshness(page.rows,state), token(bucket, None) if bucket <= 255 else None)
+            return FindingPage((), token(bucket,inner))
+
+    def query_findings(self, **kwargs):
+        return self.query_findings_page(**kwargs).rows
+
     def _persist_material_key(self):
         with self._store.conn:
             self._store.conn.execute("INSERT INTO app_state VALUES('material-key',?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload", (envelope._b64(self._store._memory_material_key),))
@@ -326,6 +484,7 @@ class EncryptedScanStore:
             self._closed = True
             self._key[:] = b"\x00" * len(self._key)
             try:
+                self._partitions.close()
                 self._store.close()
                 self._store._memory_material_key = b""
             finally:
@@ -355,6 +514,6 @@ def _forward(name):
 
 # Real class attributes satisfy Python3.12+ runtime Protocol checks, which use
 # static lookup rather than __getattr__. Keep one synchronized implementation.
-for _name in _METHODS:
+for _name in _METHODS - {'query_findings_page', 'query_findings'}:
     setattr(EncryptedScanStore, _name, _forward(_name))
 del _name

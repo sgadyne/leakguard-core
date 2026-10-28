@@ -9,6 +9,7 @@ export type DesktopEvent =
 export type BackendStatus = {
   observations:{created:boolean; unlocked:boolean}; vault:{created:boolean; unlocked:boolean};
   scan_events?: {id:string;state:string}[];
+  finding_events?: {id:string;count:number}[];
   scheduler:string; pending_jobs:number; background:string; error_codes:string[];
 };
 export const CHANNELS = {

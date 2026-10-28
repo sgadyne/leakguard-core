@@ -1,4 +1,4 @@
-"""Completed audit decisions include accepted earlier slices; counts stay local."""
+"""Completed audits preserve earlier decisions and a durable omission marker."""
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
@@ -70,7 +70,8 @@ class CycleDecisionTests(unittest.TestCase):
                     service.audit('synthetic', limits=m.ScanLimits(5, 1))
                     final = service.audit('synthetic', limits=m.ScanLimits(5, 1))
                 self.assertTrue(final.coverage.required_complete)
-                self.assertEqual(final.coverage.omission_count, 0)
+                self.assertEqual(final.coverage.omission_count, 1)
+                self.assertTrue(any(i.omission_id=='audit-cycle-omissions' for i in final.issues))
                 self.assertEqual(final.decision.verdict, m.DecisionVerdict.ALLOW_WITH_OMISSIONS)
                 service.close(); store.close()
 
@@ -148,7 +149,8 @@ class CycleDecisionTests(unittest.TestCase):
                         if report.coverage.required_complete:
                             break
                 self.assertTrue(report.coverage.required_complete)
-                self.assertEqual(report.coverage.omission_count, 0)
+                self.assertEqual(report.coverage.omission_count, 1)
+                self.assertTrue(any(i.omission_id=='audit-cycle-omissions' for i in report.issues))
                 self.assertEqual(report.decision.verdict, m.DecisionVerdict.ALLOW_WITH_OMISSIONS)
                 self.assertNotIn(str(excluded), seen)
                 self.assertTrue(any(i.code is m.ErrorCode.AUDIT_CYCLE_EVIDENCE for i in report.issues))
