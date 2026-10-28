@@ -30,9 +30,11 @@ class RemoteDiscovery:
   identity['policy_id']=hashlib.sha256(json.dumps([identity['policy_id'],source.get('remote_identity'),source.get('remote_python_version')],sort_keys=True).encode()).hexdigest()
   if job.get('inventory_identity')!=identity:
    previous=job.get('inventory_identity') or source.get('inspection_identity');job['inventory_identity']=identity;source['inspection_identity']=identity
-   if previous is not None and previous!=identity:job['invalidate_cursor']=0
+   if previous is not None and previous!=identity:job.update(invalidate_cursor=0,priority_cursor=0,policy_resets=job.get('policy_resets',0)+1)
   if job.get('invalidate_cursor',256)<256:
    job['invalidate_cursor']=_advance_partitions(job['invalidate_cursor'],lambda index:self.store.invalidate_location(source,index));return {'scanned':0,'inventory_complete':False}
+  if job.get('priority_cursor',256)<256:
+   job['priority_cursor']=_advance_partitions(job['priority_cursor'],lambda index:self.store.reprioritize_location(source,index,_priority));return {'scanned':0,'inventory_complete':False}
   if job.get('refresh_requested') and job.get('inventory_complete') and job.get('refresh_cursor',256)>=256:
    job.update(inventory_generation=int(self.owner.clock()*1_000_000),inventory_complete=False,refresh_requested=False,refresh_cursor=0,reconcile_cursor=0,unknown_descendants=0,reconciliation_started_at=self.owner.clock())
   if job.get('refresh_cursor',256)<256:

@@ -419,6 +419,11 @@ class EncryptedScanStore:
             self._ensure_open()
             return self._partitions.counts(location)
 
+    def reprioritize_location(self, source, index, rank):
+        with self._mutex:
+            self._ensure_open()
+            self._partitions.reprioritize_location(source,index,rank)
+
     def _source_freshness(self,rows,state):
         if state!='current':return rows
         host=self.load_host_state();sources=host.get('sources',{});jobs=host.get('jobs',{})

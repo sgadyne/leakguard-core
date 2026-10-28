@@ -39,9 +39,14 @@ def _advance_partitions(cursor,apply):
 
 def _priority(path):
     name=str(path).lower()
-    if any(x in name for x in ('.env','.ssh','.aws','.config','credentials','password','token','history','secrets','keychain')):return 0
-    if path.name.lower() in {'.codex','.claude','.kube','.docker','.azure','.gcloud'}:return 0
-    if any(part.lower() in {'.cache','caches','.tmp','node_modules','site-packages','__pycache__'} for part in path.parts):return 200
+    leaf=path.name.lower();parts={part.lower() for part in path.parts}
+    # Filename evidence outranks directory branding. In particular, the name
+    # Password Buddy must not promote every bundled Python dependency.
+    if leaf=='.env' or leaf.startswith('.env.') or leaf.endswith('.env') or 'history' in leaf or leaf in {'auth.json','credentials.json','credentials','tokens.json','token.json','.netrc','.npmrc','.pypirc'}:return 0
+    if leaf in {'.ssh','.aws','.config','.codex','.claude','.kube','.docker','.azure','.gcloud'}:return 0
+    if parts & {'.cache','caches','.tmp','node_modules','site-packages','__pycache__'}:return 200
+    if any(x in leaf for x in ('credential','password','token','secret','keychain')):return 5
+    if parts & {'credentials','secrets','passwords','keychains','.ssh','.aws','.azure','.gcloud','.kube','.config'}:return 5
     if path.suffix.lower() in {'.json','.yaml','.yml','.toml','.conf','.ini','.txt','.log','.md','.csv','.xml','.plist'}:return 10
     if path.name.lower() in {'users','projects','work','src','code','opt','documents','desktop','downloads','.local'}:return 20
     if '/library/' in name or '/documents/' in name or '/desktop/' in name:return 20
@@ -225,10 +230,13 @@ class DiscoveryCoordinator:
             previous=job.get('inventory_identity') or source.get('inspection_identity')
             job['inventory_identity']=identity
             source['inspection_identity']=identity
-            if previous is not None and previous!=identity:job['invalidate_cursor']=0
+            if previous is not None and previous!=identity:job.update(invalidate_cursor=0,priority_cursor=0,policy_resets=job.get('policy_resets',0)+1)
         if job.get('invalidate_cursor',256)<256:
             job['invalidate_cursor']=_advance_partitions(job['invalidate_cursor'],lambda index:self.store.invalidate_location(source,index))
             return {'scanned':0,'inventory_complete':False} 
+        if job.get('priority_cursor',256)<256:
+            job['priority_cursor']=_advance_partitions(job['priority_cursor'],lambda index:self.store.reprioritize_location(source,index,_priority))
+            return {'scanned':0,'inventory_complete':False}
         if job.get('refresh_requested') and job.get('inventory_complete') and job.get('refresh_cursor',256)>=256:
             job.update(inventory_generation=int(self.clock()*1_000_000),inventory_complete=False,refresh_requested=False,refresh_cursor=0,reconcile_cursor=0,empty_directory_pages=0,unknown_descendants=0,reconciliation_started_at=self.clock())
         if job.get('refresh_cursor',256)<256:

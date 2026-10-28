@@ -256,6 +256,18 @@ class EncryptedPartitions:
         evidence=f'e{index:02x}'
         if evidence in self.catalog or evidence in self.cache:self.get(evidence).invalidate_scope(source['root'],reason='source-unavailable')
 
+    def reprioritize_location(self, source, index, rank):
+        bucket=f'i{index:02x}'
+        if bucket not in self.catalog and bucket not in self.cache:return
+        store=self.get(bucket)
+        rows=store.conn.execute('SELECT path,priority FROM inventory WHERE location=?',(source['id'],)).fetchall()
+        changes=[]
+        for path,previous in rows:
+            value=rank(Path(path))
+            if type(value) is not int or not 0<=value<=1000:raise StateError('state-data-invalid')
+            if value!=previous:changes.append((value,path))
+        with store.conn:store.conn.executemany('UPDATE inventory SET priority=? WHERE path=?',changes)
+
     def reconcile_location(self, source, generation, index):
         bucket=f'i{index:02x}'
         if bucket not in self.catalog and bucket not in self.cache:return
