@@ -16,6 +16,13 @@ clock adjustment delays an interval run until its saved deadline. User pauses
 survive restart. Interrupted automatic work resumes after scan-storage unlock.
 Native key access and start at login remain separate explicit opt-ins.
 
+A scheduled deadline admits or coalesces work; it is not a per-file inspection
+deadline. Initial metadata and content backlogs can delay a particular file.
+Risk admission follows credential filenames and known configuration folders.
+Dependency caches remain queued at lower priority; an application name containing
+"password" does not promote its entire runtime. Policy changes durably reweight
+existing queues in bounded encrypted partitions before content admission resumes.
+
 The local beta is packaged with `--local-beta`, using the distinct macOS bundle
 identity `org.leakguard.passwordbuddy.beta` so qualification can run beside the
 previous app. Disposable testing also uses `--buddy-data-dir` with a private
