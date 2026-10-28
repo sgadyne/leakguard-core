@@ -7,3 +7,4 @@ class CredentialSpan:
     rule: str
     start: int
     end: int
+    severity: str = 'block'

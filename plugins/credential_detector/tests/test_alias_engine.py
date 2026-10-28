@@ -141,6 +141,37 @@ if __name__ == '__main__':
     unittest.main()
 
 class BetaQualityRegressions(unittest.TestCase):
+    def test_bare_code_references_require_enclosing_expression_syntax(self):
+        from credential_detector.plugin import CredentialDetector
+        pack=CredentialDetector().pack
+        for prefix in ['await persist(session, {\n','const options = {\n']:
+            text=prefix+'  accessToken: response.data.access_token,\n  refreshToken: refresh_token,\n});'
+            self.assertEqual(scan_fields(text,pack),())
+            text=prefix+'  accessToken: "response.data.access_token",\n  refreshToken: "refresh_token",\n});'
+            self.assertEqual(len(scan_fields(text,pack)),2)
+        for text in ['accessToken:response.data.access_token', 'refreshToken:refresh_token',
+                     'access_token=response.data.access_token',
+                     'password=(lookup.value("synthetic") as? String)?.text']:
+            spans=scan_fields(text,pack)
+            self.assertEqual(bool(spans),not text.startswith('password='))
+
+    def test_prose_predicates_and_explicit_literal_controls(self):
+        from credential_detector.engine import scan_contextual
+        from credential_detector.plugin import CredentialDetector
+        for text in ['Password is required.', 'The password is incorrect.',
+                     'Your password is expired.', 'The password is not configured.',
+                     'A passphrase is mandatory!', 'The PIN is invalid.',
+                     'The password is still encrypted.', 'The password is a secret.']:
+            with self.subTest(text=text):self.assertEqual(scan_contextual(text),())
+        for value in ['required','incorrect','expired','not','unusual-synthetic-value']:
+            for quote in ['"', "'"]:
+                text='The password is '+quote+value+quote+'.'
+                self.assertEqual([text[s.start:s.end] for s in scan_contextual(text)],[value])
+            for text in ['password='+value, 'password="'+value+'"']:
+                self.assertTrue(scan_fields(text,CredentialDetector().pack))
+        for text in ['My password is unusual-synthetic-value.', 'The password is "synthetic phrase with spaces".']:
+            self.assertTrue(scan_contextual(text))
+
     def test_masked_operational_shapes_and_code_controls(self):
         from credential_detector.plugin import CredentialDetector
         from credential_detector.engine import scan_contextual

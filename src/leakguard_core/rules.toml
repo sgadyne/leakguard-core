@@ -63,6 +63,11 @@ keywords = ["password", "passwd", "passphrase", "pwd"]
   regexTarget = "secret"
   regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*(?::=|[:=])\s*(?:[a-z_$][a-z0-9_.$]*\s*\(|(?:await|new)\s+|[a-z_$][a-z0-9_.$]*\s*\[).*''']
 
+[[rules.allowlists]]
+  description = "Unquoted environment symbols and parenthesized calls are references"
+  regexTarget = "secret"
+  regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*(?::=|[:=])\s*(?:\$[a-z_][a-z0-9_]*$|\([ \t]*[a-z_$][a-z0-9_.$]*[ \t]*\().*''']
+
 [[rules]]
 id = "xml-password"
 description = "Literal password in XML application settings"

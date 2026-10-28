@@ -10,6 +10,7 @@ from .ssh_locations import SSHLocations,uri,remote_path
 from .discovery import _Evidence,_priority,_advance_partitions
 from .errors import HostError
 from .ssh import SSHRunner
+from .protected_paths import protected_store
 
 
 def sig(info):return [info[k] for k in ('st_dev','st_ino','st_mode','st_size','st_mtime_ns','st_ctime_ns','st_flags')]
@@ -65,7 +66,7 @@ class RemoteDiscovery:
          elif kind=='directory' and value['st_dev']!=source['remote_identity']['device']:state='excluded';detail='mount-boundary; unknown-descendants'
          elif kind=='file' and value['st_dev']!=source['remote_identity']['device']:state='unsupported';detail='mount-boundary'
          elif kind=='file' and (value['st_flags']&0x40000000 or actual.name.endswith('.icloud')):state='remote-only';detail='placeholder-not-hydrated'
-         elif kind=='file' and (actual.suffix.lower() in {'.lgv','.lgo','.lgbak','.keychain','.keychain-db','.kdbx','.kdb','.gpg','.pgp'} or actual.name in {'Login Data','Cookies','key4.db','cert9.db'} or '/.ssh/' in lower and actual.name.startswith('id_')):state='protected';detail='protected-store-inventory-only'
+         elif kind=='file' and protected_store(actual,remote=True):state='protected';detail='protected-store-inventory-only'
         entries.append((child,source['id'],kind,json.dumps(sig(value)) if value else None,state,_priority(PurePosixPath(child)),job['inventory_generation'],value['st_size'] if value else 0,None,detail))
        self.store.inventory_put(entries);job['metadata_enumerated']+=len(entries)
        if not result['stable']:self.store.inventory_set(path,'enumerating',detail='changed-during-enumeration')
@@ -80,6 +81,7 @@ class RemoteDiscovery:
    admitted=[];total=0
    for row in rows:
     if self._excluded(row[0],source,settings):self.store.inventory_set(row[0],'excluded',detail='operator-exclusion');continue
+    if protected_store(PurePosixPath(remote_path(source,row[0])),remote=True):self.store.inventory_set(row[0],'protected',detail='protected-store-inventory-only');continue
     if row[7]>self.config.to_mapping()['max_file_bytes']:self.store.inventory_set(row[0],'unsupported',detail='file-size-limit');continue
     if total+row[7]>32*1024*1024:break
     admitted.append(row);total+=row[7]

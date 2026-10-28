@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from leakguard_core.api import Scanner, ScanConfig
 from leakguard_core.models import ScanLimits,ScanPolicy
 from . import navigation
+from .protected_paths import protected_store
 
 
 def _sig(info):
@@ -200,7 +201,7 @@ class DiscoveryCoordinator:
                             if self._excluded(child,source,settings):state='excluded';detail='unknown-descendants' if kind=='directory' else 'operator-exclusion'
                             elif source.get('automatic') and kind=='directory' and value.st_dev not in source.get('local_devices',[info.st_dev]):state='excluded';detail='mount-boundary-unknown-descendants'
                             elif kind=='file' and (getattr(value,'st_flags',0)&0x40000000 or entry.name.endswith('.icloud')):state='remote-only';detail='cloud-placeholder-not-hydrated'
-                            elif kind=='file' and (child.suffix.lower() in {'.lgv','.lgo','.lgbak','.keychain','.keychain-db','.kdbx','.gpg','.pgp'} or child.name in {'Login Data','Cookies','Trust Tokens','key4.db','cert9.db'} or any(p.endswith('.lgo.parts') for p in child.parts)):state='protected';detail='encrypted-store-inventory-only'
+                            elif kind=='file' and protected_store(child):state='protected';detail='encrypted-store-inventory-only'
                             entries.append((str(child),source['id'],kind,_sig(value),state,_priority(child),generation,value.st_size,None,detail))
                         except OSError:
                             entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
@@ -251,6 +252,8 @@ class DiscoveryCoordinator:
             for row in rows:
                 if self._excluded(Path(row[0]),source,settings):
                     self.store.inventory_set(row[0],'excluded',detail='operator-exclusion');continue
+                if protected_store(Path(row[0])):
+                    self.store.inventory_set(row[0],'protected',detail='encrypted-store-inventory-only');continue
                 if row[7]>self.config.to_mapping()['max_file_bytes']:
                     self.store.inventory_set(row[0],'unsupported',detail='file-size-limit');continue
                 if admitted+row[7]>32*1024*1024:break

@@ -107,6 +107,10 @@ def scan_http(text: str) -> tuple[CredentialSpan, ...]:
                         rule=f"credential-http-{scheme}",
                         start=offset + match.start("token"),
                         end=offset + match.end("token"),
+                        # An ellipsis commonly represents a shortened token.
+                        # Retain the observation for review: an opaque Bearer
+                        # value can legally end in dots, so do not erase it.
+                        severity='review' if scheme == 'bearer' and token.endswith('...') else 'block',
                     ))
         if newline < 0:
             break

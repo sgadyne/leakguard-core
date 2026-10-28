@@ -28,6 +28,15 @@ def test_span_repr_does_not_include_token():
     assert "synthetic-secret-123" not in repr(scan_http("Authorization: Bearer synthetic-secret-123"))
 
 
+def test_shortened_bearer_remains_visible_for_review_without_erasing_opaque_tokens():
+    for token,severity in [('synthetic-prefix-...', 'review'), ('synthetic...suffix', 'block'),
+                           ('synthetic-prefix-abc', 'block'), ('eyJsynthetic.payload.signature', 'block')]:
+        text='Authorization: Bearer '+token
+        spans=scan_http(text)
+        assert len(spans)==1 and spans[0].severity==severity
+        assert text[spans[0].start:spans[0].end]==token
+
+
 def test_multiple_lines_and_end_of_input():
     text = "GET / HTTP/1.1\nAuthorization: Bearer abc\nAuthorization: Basic dTpw"
     spans = scan_http(text)

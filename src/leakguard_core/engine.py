@@ -1250,7 +1250,7 @@ class ScanService:
                 anchors[index] = None
                 results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, required=True),))
         # Publication is after validation; no slow detector runs under a write lock.
-        for result, (generation, cache_key), observations, anchor in zip(results, reservations, material_results, anchors):
+        for index, (result, (generation, cache_key), observations, anchor) in enumerate(zip(results, reservations, material_results, anchors)):
             try:
                 kwargs = {'work': work_claims.get(result.source.path)} if work_claims is not None else {}
                 if anchor is not None and hasattr(self.store, 'source_anchor') and hasattr(self.store, 'confirm_absent'):
@@ -1259,7 +1259,14 @@ class ScanService:
                     kwargs.update(material_observations=observations, materials_checked=True, materials_complete=result.coverage is m.CoverageState.COMPLETE)
                 self.store.record_result(result, generation=generation, cache_key=cache_key if result.coverage is m.CoverageState.COMPLETE else None, **kwargs)
             except Exception:
-                run_issues.append(m.CoverageIssue(m.ErrorCode.STATE_FAILED, result.source, required=True))
+                issue = m.CoverageIssue(m.ErrorCode.STATE_FAILED, result.source, required=True)
+                run_issues.append(issue)
+                # Hosts use per-file coverage to advance durable inventory.
+                # An observation that was not published cannot certify that
+                # version, even when acquisition and detection succeeded.
+                results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome,
+                                         coverage=m.CoverageState.INCOMPLETE,
+                                         last_verified_at=None, issues=result.issues + (issue,))
                 enumeration_complete = False
         try:
             metadata = enumeration() if enumeration else {}

@@ -22,6 +22,17 @@ def _synthetic_alnum(size):
 
 
 class CredentialTaxonomyTests(unittest.TestCase):
+    def test_environment_and_parenthesized_calls_preserve_close_literals(self):
+        cases=[('password:$ENV_SYMBOL',False),
+               ('urlc.password=(lookup.value("synthetic") as? String)?.text',False),
+               ('password="$ENV_SYMBOL"',True),
+               ('password="(lookup.value(123))"',True),
+               ('password=required',True),('password="incorrect"',True),
+               ('password=prefix-$ENV_SYMBOL',True)]
+        for text,expected in cases:
+            with self.subTest(shape=text.split('=')[0]):
+                self.assertEqual('literal-password' in {f.rule for f in self.detect(text)},expected)
+
     @classmethod
     def setUpClass(cls):
         cls.binary = os.environ.get('LEAKGUARD_GITLEAKS') or shutil.which('gitleaks')

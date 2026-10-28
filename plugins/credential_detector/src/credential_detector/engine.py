@@ -30,6 +30,10 @@ _REFERENCE = re.compile(
 _PLACEHOLDER_PATTERN = r'(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\{\{[A-Za-z_][A-Za-z0-9_]*\}\}|<[A-Za-z_][A-Za-z0-9_]*>)'
 _PLACEHOLDER = re.compile(_PLACEHOLDER_PATTERN + r'\Z', re.ASCII)
 _PLACEHOLDER_PREFIX = re.compile(_PLACEHOLDER_PATTERN, re.ASCII)
+_IDENTIFIER_VALUE = re.compile(r'[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\Z', re.ASCII)
+_CODE_OBJECT_CONTEXT = re.compile(
+    r'(?:^|[\r\n;])[ \t]*(?:(?:await[ \t]+)?[A-Za-z_$][\w.$]*[ \t]*\([^{}\r\n]*'
+    r'|(?:const|let|var)[ \t]+[A-Za-z_$][\w$]*[ \t]*=[ \t]*)\{[^{}]{0,2048}\Z', re.ASCII)
 
 
 def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
@@ -130,7 +134,13 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
             if role is None:
                 continue
             raw = text[start:end]
-            if re.match(r'(?:[A-Za-z_$][\w.$]*[ \t]*\(|(?:await|new)[ \t]+|[A-Za-z_$][\w.$]*[ \t]*\[)', raw):
+            if re.match(r'(?:\([ \t]*)?(?:[A-Za-z_$][\w.$]*[ \t]*\(|(?:await|new)[ \t]+|[A-Za-z_$][\w.$]*[ \t]*\[)', raw):
+                continue
+            # Bare identifiers in an explicit JS object expression are code
+            # references. Without that enclosing syntax, identical env/config
+            # scalars and dotted opaque tokens remain literal candidates.
+            if (match.group('bare') and _IDENTIFIER_VALUE.fullmatch(raw)
+                    and _CODE_OBJECT_CONTEXT.search(text[max(0, match.start()-2048):match.start()])):
                 continue
             if raw.lower() in {'null', 'none', '~', 'true', 'false'} or _REFERENCE.fullmatch(raw) or _PLACEHOLDER.fullmatch(raw):
                 continue
@@ -141,7 +151,16 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
     return tuple(result)
 
 
-_PROSE = re.compile(r'(?im)\b(?:password|passphrase|pin)\s+is\s+(?P<value>[^\s\r\n]{1,4096})')
+_PROSE = re.compile(r'''(?im)\b(?:password|passphrase|pin)[ \t]+is[ \t]+(?P<value>"[^"\r\n]{1,4096}"|'[^'\r\n]{1,4096}'|[^\s\r\n]{1,4096})''')
+# In an unquoted copular sentence these are grammatical predicates, rather
+# than disclosed values. This is deliberately scoped to prose: assignments
+# and explicitly quoted disclosures may use any of these words as literals.
+_PROSE_PREDICATES = frozenset('''a an the not never still also now already
+required optional incorrect invalid wrong expired missing empty unset unknown
+unchanged encrypted hashed secure insecure weak strong reset unavailable
+disabled enabled protected configured stored set needed accepted rejected
+case-sensitive confidential mandatory necessary correct valid compromised
+being too very only always usually often sometimes longer shorter'''.split())
 _LIST = re.compile(r'(?im)^[^\r\n]{0,80}\b(?:password|credential|passphrase)s?\s*:?\s*\r?\n(?P<value>[^\s\r\n]{8,4096})[ \t]*$')
 _RECOVERY = re.compile(r'(?im)\b(?:wallet[ \t]+)?(?:recovery[ \t]+(?:words|phrase)|seed[ \t]+phrase)[ \t]*[:=][ \t]*(?P<value>[a-z]+(?:[ \t]+[a-z]+){11,23})[ \t]*$')
 
@@ -151,7 +170,15 @@ def scan_contextual(text):
     for pattern,rule in ((_PROSE,'credential-password'),(_LIST,'credential-password'),(_RECOVERY,'credential-recovery-phrase')):
         for match in pattern.finditer(text):
             start,end=match.span('value')
-            if pattern is _PROSE and text[end-1:end] in {'.',',',';'}:end-=1
+            if pattern is _PROSE:
+                quoted = text[start:start+1] in {'"', "'"} and text[end-1:end] == text[start:start+1]
+                if quoted:
+                    start += 1
+                    end -= 1
+                else:
+                    if text[end-1:end] in {'.',',',';',':','!','?'}:end-=1
+                    if text[start:end].casefold() in _PROSE_PREDICATES:
+                        continue
             if end>start and len(result)<MAX_SPANS:result.append(CredentialSpan(rule,start,end))
             elif len(result)>=MAX_SPANS:raise ValueError('field finding limit exceeded')
     return tuple(result)
