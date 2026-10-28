@@ -49,6 +49,17 @@ try {
     });
     if (platform === 'darwin') {
       const app = path.join(packaged, 'Password Buddy.app');
+      if (values['local-beta']) {
+        // Packager applies name/executableName after extendInfo and overwrites
+        // these keys. Keep the stable executable/helper paths, then set the
+        // distinct local-beta identity before sealing the bundle.
+        const plist = path.join(app, 'Contents', 'Info.plist');
+        for (const key of ['CFBundleDisplayName', 'CFBundleName']) {
+          execFileSync('/usr/bin/plutil', ['-replace', key, '-string', 'Password Buddy Beta', plist]);
+          const actual = execFileSync('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', plist], {encoding:'utf8'}).trim();
+          if (actual !== 'Password Buddy Beta') throw Error('Local beta bundle identity was not applied');
+        }
+      }
       // Renamed Electron bundles and the new payload need fresh resource seals.
       // Local ad-hoc signing is not Developer ID signing or notarization.
       const nested = ['Mantle.framework', 'ReactiveObjC.framework', 'Squirrel.framework',
