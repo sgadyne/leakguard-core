@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import pathlib
-import platform
 import select
 import signal
 import stat
@@ -61,8 +60,6 @@ def _remote_main():
     started = time.monotonic()
     deadline = started + 900
     machine_path = pathlib.Path('/etc/machine-id')
-    machine = hashlib.sha256(machine_path.read_bytes() if machine_path.is_file()
-                             else platform.node().encode()).hexdigest()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0)
     iterator = None
     retained_fd = None
@@ -74,6 +71,18 @@ def _remote_main():
     resume_prefix = None
     directory_signature = None
     root_identity = None
+
+    def machine_identity():
+        if machine_path.is_file():
+            with machine_path.open('rb') as stream:
+                value = stream.read(4097)
+            if len(value) > 4096:
+                raise RuntimeError('source-changed')
+        else:
+            # Linux platform.node() uses uname, but caches its first result.
+            node = os.uname().nodename
+            value = ('' if node == 'unknown' else node).encode()
+        return hashlib.sha256(value).hexdigest()
 
     def opened(req):
         root = pathlib.Path(req.get('root') or str(pathlib.Path.home()))
@@ -87,7 +96,7 @@ def _remote_main():
         root_info = root.lstat()
         if not stat.S_ISDIR(root_info.st_mode):
             raise ValueError()
-        identity = {'machine': machine, 'device': root_info.st_dev, 'inode': root_info.st_ino}
+        identity = {'machine': machine_identity(), 'device': root_info.st_dev, 'inode': root_info.st_ino}
         if req.get('expected') is not None and req['expected'] != identity:
             raise RuntimeError('source-changed')
         fd = os.open(root, flags)

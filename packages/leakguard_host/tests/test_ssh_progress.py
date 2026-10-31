@@ -428,3 +428,124 @@ def test_posix_client_without_nonblocking_pipe_api_uses_stateless_transport(tmp_
         assert page['entries'] and not sessions._sessions
     finally:
         sessions.close()
+
+
+@pytest.mark.parametrize('replacement', [b'synthetic-id-after!', b'x' * 4097])
+@pytest.mark.parametrize('expect_identity', [True, False])
+def test_machine_identity_is_rechecked_across_retained_pages(tmp_path, replacement, expect_identity):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    machine_id = tmp_path / 'synthetic-machine-id'
+    machine_id.write_bytes(b'synthetic-id-before')
+    info = root.stat()
+    identity = {'machine': hashlib.sha256(machine_id.read_bytes()).hexdigest(),
+                'device': info.st_dev, 'inode': info.st_ino}
+
+    class SyntheticMachineRunner(LocalRunner):
+        def _command(self, target, python, script, *, isolated):
+            prelude = f'''import pathlib
+_original_is_file = pathlib.Path.is_file
+_original_open = pathlib.Path.open
+_synthetic_machine_id = pathlib.Path({str(machine_id)!r})
+def _observed_is_file(path):
+    return _original_is_file(_synthetic_machine_id) if str(path) == '/etc/machine-id' else _original_is_file(path)
+def _observed_open(path, *args, **kwargs):
+    return _original_open(_synthetic_machine_id, *args, **kwargs) if str(path) == '/etc/machine-id' else _original_open(path, *args, **kwargs)
+pathlib.Path.is_file = _observed_is_file
+pathlib.Path.open = _observed_open
+'''
+            return super()._command(target, python, prelude + script, isolated=isolated)
+
+    sessions = DirectorySessions()
+    runner = SyntheticMachineRunner()
+    try:
+        expected = identity if expect_identity else None
+        first = call(sessions, root, expected=expected, runner=runner, limit=2)
+        assert first['identity'] == identity and first['entries'] and not first['complete']
+        # The root's device, inode, and directory metadata remain unchanged.
+        # The first replacement also preserves the machine-id file size.
+        machine_id.write_bytes(replacement)
+        if expect_identity or len(replacement) > 4096:
+            with pytest.raises(HostError) as error:
+                call(sessions, root, cursor_for(first), expected=expected, runner=runner, limit=2)
+            assert error.value.code == 'source-changed'
+        else:
+            changed = call(sessions, root, cursor_for(first), expected=None, runner=runner, limit=2)
+            assert changed['stable'] is False and not changed['entries'] and not changed['complete']
+        assert not sessions._sessions
+    finally:
+        sessions.close()
+
+
+def test_absent_machine_id_uses_existing_hostname_identity(tmp_path):
+    import platform
+    from leakguard_host.ssh_directory_session import DirectorySessions
+
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    info = root.stat()
+    identity = {'machine': hashlib.sha256(platform.node().encode()).hexdigest(),
+                'device': info.st_dev, 'inode': info.st_ino}
+
+    class NoMachineIDRunner(LocalRunner):
+        def _command(self, target, python, script, *, isolated):
+            prelude = '''import pathlib
+_original_is_file = pathlib.Path.is_file
+def _observed_is_file(path):
+    return False if str(path) == '/etc/machine-id' else _original_is_file(path)
+pathlib.Path.is_file = _observed_is_file
+'''
+            return super()._command(target, python, prelude + script, isolated=isolated)
+
+    sessions = DirectorySessions()
+    try:
+        first = call(sessions, root, expected=identity, runner=NoMachineIDRunner(), limit=2)
+        assert first['identity'] == identity and first['entries']
+        second = call(sessions, root, cursor_for(first), expected=identity, runner=NoMachineIDRunner(), limit=2)
+        assert second['identity'] == identity and second['entries']
+    finally:
+        sessions.close()
+
+
+def test_absent_machine_id_rechecks_hostname_across_pages(tmp_path):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    hostname = tmp_path / 'synthetic-hostname'
+    hostname.write_text('synthetic-node-before')
+    info = root.stat()
+    identity = {'machine': hashlib.sha256(hostname.read_bytes()).hexdigest(),
+                'device': info.st_dev, 'inode': info.st_ino}
+
+    class SyntheticHostnameRunner(LocalRunner):
+        def _command(self, target, python, script, *, isolated):
+            prelude = f'''import collections,os,pathlib
+_original_is_file = pathlib.Path.is_file
+def _observed_is_file(path):
+    return False if str(path) == '/etc/machine-id' else _original_is_file(path)
+pathlib.Path.is_file = _observed_is_file
+_original_uname = os.uname
+_Uname = collections.namedtuple('_Uname', 'sysname nodename release version machine')
+def _observed_uname():
+    value = _original_uname()
+    return _Uname(value.sysname, pathlib.Path({str(hostname)!r}).read_text(), value.release, value.version, value.machine)
+os.uname = _observed_uname
+'''
+            return super()._command(target, python, prelude + script, isolated=isolated)
+
+    sessions = DirectorySessions()
+    runner = SyntheticHostnameRunner()
+    try:
+        first = call(sessions, root, expected=identity, runner=runner, limit=2)
+        assert first['identity'] == identity and first['entries']
+        hostname.write_text('synthetic-node-after!')
+        with pytest.raises(HostError) as error:
+            call(sessions, root, cursor_for(first), expected=identity, runner=runner, limit=2)
+        assert error.value.code == 'source-changed' and not sessions._sessions
+    finally:
+        sessions.close()
