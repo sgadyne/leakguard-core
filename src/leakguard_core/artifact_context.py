@@ -6,6 +6,7 @@ malformed data, size limits and ambiguous locations grant no exemption.
 from __future__ import annotations
 
 import base64
+from bisect import bisect_left, bisect_right
 import binascii
 from dataclasses import dataclass, field
 import json
@@ -15,6 +16,11 @@ import xml.etree.ElementTree as ET
 MAX_TEXT = 12_000_000
 MAX_DATA = 262_144
 MAX_DECODED_TOTAL = 1_048_576
+# Identical to the explicitly pinned bundled AWS rule (Gitleaks8.30.1).
+# All lexical candidates on a source line must have the approved schema role;
+# otherwise line-only native provenance grants no severity reduction.
+AWS_ACCESS_PATTERN = r'\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\b'
+_AWS_ACCESS = re.compile(AWS_ACCESS_PATTERN, re.ASCII)
 
 @dataclass(frozen=True, slots=True)
 class ArtifactContext:
@@ -22,6 +28,7 @@ class ArtifactContext:
     binary_lines: tuple[tuple[int, int], ...] = ()
     # Raw XML scalar offsets preserve source coordinates; values stay private.
     plist_fields: tuple[tuple[str, int, int], ...] = field(default=(), repr=False)
+    aws_review_lines: frozenset[int] = frozenset()
 
 
 def _unique(pairs):
@@ -129,15 +136,32 @@ def _plist(text):
 
 def inspect_artifact(text):
     if len(text) > MAX_TEXT:return ArtifactContext()
-    masks = [];binary_lines = [];fields = []
+    masks = [];binary_lines = [];fields = [];aws_review_lines = set()
+    newline_positions = None
+    def line_at(position):
+        nonlocal newline_positions
+        if newline_positions is None:
+            newline_positions = [index for index, char in enumerate(text) if char == '\n']
+        return bisect_left(newline_positions, position) + 1
     stripped = text.lstrip()
-    if stripped.startswith(('{', '[')) and ('"localizationKey"' in text or '"manifest_version"' in text):
+    if stripped.startswith(('{', '[')) and ('"localizationKey"' in text or '"manifest_version"' in text or stripped.startswith('[') and '"regex"' in text):
         try:
             doc, scalars = _json_scalars(text)
             manifest = (type(doc) is dict and type(doc.get('manifest_version')) is int
                         and doc['manifest_version'] in {2, 3}
                         and type(doc.get('name')) is str and type(doc.get('version')) is str)
+            signature_schema = (type(doc) is list and 0 < len(doc) <= 50_000 and all(
+                type(item) is dict and set(item) == {'hash', 'regex'} and
+                type(item['regex']) is str and len(item['regex']) <= 4096 and
+                (type(item['hash']) is int and 0 <= item['hash'] < 2**64 or
+                 type(item['hash']) is str and re.fullmatch(r'[A-Fa-f0-9]{8,128}', item['hash']))
+                for item in doc))
+            signature_ranges = []
             for path, start, end, value in scalars:
+                if (signature_schema and len(path) == 2 and path[-1] == 'regex' and
+                        type(value) is str and 1000 <= len(value) <= 4096 and
+                        value.startswith('(?i)^') and '(' in value[5:] and '\\' in value):
+                    signature_ranges.append((start, end))
                 if path and path[-1] == 'localizationKey':
                     # Exact metadata role, not a generic exemption for "key".
                     prefix = text[max(0, start - 200):start]
@@ -148,6 +172,20 @@ def inspect_artifact(text):
                 if (manifest and path == ('key',) and type(value) is str
                         and text[start + 1:end - 1] == value and is_rsa_public_spki(value)):
                     masks.append((start + 1, end - 1))
+            if signature_ranges:
+                signature_ranges.sort()
+                starts = [start for start, _ in signature_ranges]
+                eligible = set();untrusted = set()
+                for match in _AWS_ACCESS.finditer(text):
+                    start, end = match.span(1);line = line_at(start)
+                    index = bisect_right(starts, start) - 1
+                    if index >= 0 and end <= signature_ranges[index][1]:
+                        eligible.add(line)
+                    else:
+                        untrusted.add(line)
+                # A real/unknown AWS-shaped sibling on the same minified line
+                # prevents downgrading *any* native observation on that line.
+                aws_review_lines = eligible - untrusted
         except (ValueError, TypeError, IndexError, RecursionError):pass
     if '<plist' in text[:2048] and _plist(text):
         # XML <key> is a dictionary tag. Leave its contents and every other
@@ -156,7 +194,7 @@ def inspect_artifact(text):
         pattern = re.compile(r'<key>(?P<key>[^<&]{1,128})</key>[ \t\r\n]*<(?P<kind>string|data)>(?P<value>[^<]*)</(?P=kind)>')
         for match in pattern.finditer(text):
             start, end = match.span('value')
-            if end - start <= 4096 and match.group('value').strip():
+            if end - start <= MAX_DATA * 2 and match.group('value').strip():
                 fields.append((match.group('key'), start, end))
         decoded_total = 0
         for match in re.finditer(r'<data>(?P<value>[^<]*)</data>', text):
@@ -171,15 +209,12 @@ def inspect_artifact(text):
             if not decoded.startswith((b'bplist00', b'\x89PNG\r\n\x1a\n', b'GIF87a', b'GIF89a', b'\xff\xd8\xff', b'PK\x03\x04')):continue
             # Only wholly contained source lines can receive a lower severity.
             # A minified/mixed line cannot identify which native object matched.
-            first = text.count('\n', 0, start) + 1
-            last = text.count('\n', 0, end) + 1
-            left = text[text.rfind('\n', 0, start) + 1:start]
-            next_break = text.find('\n', end)
-            right = text[end:next_break if next_break >= 0 else len(text)]
-            if left.strip():first += 1
-            if right.strip():last -= 1
+            # The opening/closing tag lines cannot be wholly data. A lazy
+            # newline index avoids quadratic prefix scans on large plists.
+            first = line_at(start) + 1
+            last = line_at(end) - 1
             if first <= last:binary_lines.append((first, last))
-    return ArtifactContext(tuple(masks), tuple(binary_lines), tuple(fields))
+    return ArtifactContext(tuple(masks), tuple(binary_lines), tuple(fields), frozenset(aws_review_lines))
 
 
 def mask_artifact_labels(text, context):
@@ -192,6 +227,8 @@ def mask_artifact_labels(text, context):
 
 
 def native_severity(rule, first, last, context):
+    if rule == 'aws-access-token' and first == last and first in context.aws_review_lines:
+        return 'review'
     if rule in {'square-access-token', 'generic-api-key'} and any(
             start <= first <= last <= end for start, end in context.binary_lines):
         return 'review'

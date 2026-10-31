@@ -131,6 +131,7 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
                           cache_identity=cache_identity, cache_domain=cache_domain, logical_path=logical_path)
     if type(prepared) is not PreparedBackend:
         raise BackendError('configuration-invalid')
+    original_text = text
     artifact = None
     if prepared.bundled_policy:
         from .artifact_context import inspect_artifact, mask_artifact_labels
@@ -152,9 +153,9 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
     if not eligible:
         return compute()
     from ._result_cache import OBSERVATIONS
-    key = hashlib.sha256(json.dumps(['native-observations-1', cache_identity,
-            prepared.cache_identity, worker_policy, max_findings, logical_path, len(payload),
-            hashlib.sha256(payload).hexdigest()], separators=(',', ':')).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps(['native-observations-2', cache_identity,
+            prepared.cache_identity, worker_policy, max_findings, len(payload),
+            hashlib.sha256(payload).hexdigest(), hashlib.sha256(original_text.encode('utf-8')).hexdigest()], separators=(',', ':')).encode()).hexdigest()
     def rows():
         return tuple((item.rule, item.start_line, item.end_line, item.severity) for item in compute())
     cached = OBSERVATIONS.get_or_compute(cache_scope, key, domain=cache_domain,

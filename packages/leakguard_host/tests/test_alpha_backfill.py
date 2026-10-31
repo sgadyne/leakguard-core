@@ -149,3 +149,60 @@ def test_manual_scan_now_requests_refresh_for_active_managed_backfill(tmp_path):
     assert second['refresh_requested'] is True
     assert second['refresh_revision']>=2
     host.stop();store.close()
+
+
+@pytest.mark.skipif(not os.environ.get('LEAKGUARD_GITLEAKS'),reason='pinned native backend required')
+def test_scheduled_refresh_publishes_new_and_changed_findings_before_backfill_finishes(tmp_path):
+    root=tmp_path/'source';root.mkdir();backlog=root/'backlog';backlog.mkdir()
+    changed=root/'changed.env';changed.write_text('password="synthetic-before"')
+    previous_signature=_sig(changed.stat());root_signature=_sig(root.stat())
+    config=ScanConfig.from_mapping({'gitleaks_executable':os.environ['LEAKGUARD_GITLEAKS']})
+    phrase='synthetic-integrated-backfill-passphrase';path=tmp_path/'observations.lgo'
+    store=EncryptedScanStore.create(path,phrase,config=config.to_mapping())
+    wall=[10000.]
+    host=HostService(config=config,scan_store=store,clock=lambda:wall[0])
+    source=host.add_source(root);host.manage_source(source['id']);submitted=host.submit(source['id'])
+    selected=host._source(source['id']);job=host._job(submitted['id'])
+    host._discovery.begin(selected,job);generation=job['inventory_generation'];job['slices']=1
+    selected['next_run_at']='1970-01-01T00:00:00+00:00'
+    active_cursor=json.dumps({'signature':_sig(backlog.stat()),'entries':0,'prefix':hashlib.sha256().hexdigest()})
+    store.inventory_put([(str(root),source['id'],'directory',root_signature,'enumerated',0,generation,0,None,None),
+        (str(backlog),source['id'],'directory',_sig(backlog.stat()),'enumerating',200,generation,0,active_cursor,None),
+        (str(changed),source['id'],'file',previous_signature,'inspected',0,generation,changed.stat().st_size,None,None)])
+    new=root/'new.env';new.write_text('password="synthetic-new"');changed.write_text('password="synthetic-changed-value"')
+    job['content_batch']=1
+    import leakguard_host.navigation as navigation
+    original=navigation._scoped_scandir;file_info=changed.stat()
+    @contextmanager
+    def wide(path,scope,expected):
+        with original(path,scope,expected) as actual:
+            if path==backlog:
+                def entries():
+                    for i in range(100000):
+                        yield SimpleNamespace(name=f'pending-{i:06}.txt',stat=lambda **kw:file_info)
+                yield entries()
+            else:yield actual
+    try:
+        with patch('leakguard_host.discovery.navigation._scoped_scandir',wide):
+            for tick in range(6):
+                host.tick()
+                if row(store,new) and row(store,new)[4]=='inspected' and row(store,changed)[4]=='inspected':break
+        assert row(store,new)[4]=='inspected'
+        assert row(store,changed)[4]=='inspected'
+        current=host.job(submitted['id'])
+        assert current['inventory_generation']==generation
+        assert current['inventory_complete'] is False
+        assert current['state']=='queued'
+        assert current['pending_directories']>0 and current['pending_files']>0
+        findings=[];cursor=None
+        while True:
+            page=store.query_findings_page(limit=100,cursor=cursor)
+            findings.extend(page.rows);cursor=page.next_cursor
+            if cursor is None:break
+        for target in (new,changed):
+            assert any(f['source']['path']==str(target) and f['state']=='active' and f['rule']=='literal-password' for f in findings)
+        assert current.get('refresh_requested') is False,'a consumed request requeued itself'
+    finally:host.stop();store.close()
+    reopened=EncryptedScanStore.open(path,phrase,config=config.to_mapping())
+    assert row(reopened,new)[4]=='inspected' and row(reopened,changed)[4]=='inspected'
+    reopened.close()

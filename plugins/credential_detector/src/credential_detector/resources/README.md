@@ -11,8 +11,8 @@ synthetic positive and a full-key negative for every entry; tests also check
 short literals and reference forms. These names are examples of field labels,
 not a provider token-format catalog or claims of complete provider coverage.
 
-There are 32 aliases across six groups: common (8), cloud (4), developer-ci
-(5), data-messaging (6), saas-ai (5), and key-material (4). The five roles
+There are 36 aliases across six groups: common (11), cloud (4), developer-ci
+(5), data-messaging (6), saas-ai (5), and key-material (5). The five roles
 map to five rule families; alias counts are not counts of distinct credential
 types. See the JSON files for the exact names and role of each. ASCII letter
 case is ignored and `_`, `-`, `.` separators are removed for lookup. Each
@@ -26,3 +26,9 @@ does not parse JWK, WireGuard, PEM containers, nested semantic records, or
 binary key stores. Unlabelled arbitrary strings are outside this pack's scope.
 An unmatched standalone quote or apostrophe suppresses scanning of the remaining
 text on that line; the flat scanner does not parse general source syntax.
+
+
+`client_key_data` in key-material covers Kubernetes `client-key-data` after the
+standard separator normalization. Its role is private key material; public
+certificate-data fields are not added as aliases. A synthetic literal, full-key
+negative and reference controls accompany this alias in the packaged inventory.

@@ -11,14 +11,16 @@ explicitly configured organization-specific pack without modifying this wheel.
 The detector covers flat credential fields from six bundled alias groups and
 literal HTTP `Authorization: Basic` and `Authorization: Bearer` headers. Field
 aliases map to password, API key, client secret, access token, and private key
-rules. It does not infer nested record semantics, validate credentials against
+rules. It descends JSON-style containers and recognizes bounded plist dictionary values;
+it does not infer arbitrary record semantics, validate credentials against
 services, or cover every credential format. Rules are `block`; findings carry
 rule, line, and bounded analysis offsets into the original input, not values.
 Keys are ASCII case-insensitive with `_`, `-`, and `.` removed; matching is for
 the complete key. A quoted scalar is literal, including a quoted `$NAME`;
 unquoted environment references and pure placeholder forms are excluded. Empty
-values and unquoted null/boolean atoms are excluded. The lexer handles flat
-field syntax rather than interpreting prose: an unmatched quote or apostrophe
+values and unquoted null/boolean atoms are excluded. The lexer uses bounded declaration/reference grammar selected by syntax and
+source language, without evaluating code. It also supports explicit contextual
+password disclosures. For unrelated quoted scalars, an unmatched quote or apostrophe
 earlier on a line can suppress a later assignment on that line. Inputs and
 resources are bounded; exceeding bounds fails the operation instead of silently reporting a
 clean result. See the implementation and coverage document for exact syntax,
@@ -30,7 +32,7 @@ the bundled data.
 
 | Input | Supported representation and limits |
 | --- | --- |
-| Flat fields | A complete alias key followed by `:` or `=` and a single-line quoted or unquoted scalar. A comma, semicolon, closing brace, or line ending terminates an unquoted scalar. Literal values are 1–4,096 Unicode codepoints; the value limit also applies to unknown flat fields. The scanner accepts at most 10,000,000 input codepoints, 100,000 fields, and 10,000 field spans. |
+| Flat fields | A complete alias key followed by `:` or `=` and a single-line quoted or unquoted scalar. A comma, semicolon, closing brace, or line ending terminates an unquoted scalar. Literal values are 1–4,096 Unicode codepoints; unknown scalar fields are consumed without the credential-value bound. The scanner accepts at most 10,000,000 input codepoints, 100,000 fields, and 10,000 field spans. |
 | HTTP Authorization | Complete Basic or Bearer header lines; at most 10,000,000 input codepoints, 8,192 codepoints per line, 4,096 per token, and 10,000 HTTP spans. Basic accepts canonical Base64 for printable UTF-8 `username:password`, including an empty username and requiring a nonempty password. It does not recursively scan decoded content. |
 
 The field scanner excludes supported unquoted environment references and pure
@@ -41,9 +43,9 @@ it or returning a clean result.
 Alias resources are packaged JSON files loaded with `importlib.resources`. The
 installed runtime identity follows explicitly declared distributions and hashes
 their installed files, including JSON; a version string alone is not resource
-identity. Both the public and example plugin manifests declare
-`external_state="unknown"` as a conservative fence: persistent result reuse and
-continuation cannot rely on their identity in this phase. Installed acceptance
+identity. The bundled public plugin declares `external_state="none"` and uses explicitly
+packaged resources. Unknown external-state extensions remain a conservative
+fence: persistent result reuse and continuation cannot rely on their identity. Installed acceptance
 must demonstrate that fence; a wheel hash receipt alone is not that proof.
 An audit using an unknown-state plugin must finish within one bounded slice;
 it cannot resume an earlier slice as though its external state were fixed.
@@ -95,3 +97,39 @@ It verifies required JSON resources, rejects editable or checkout imports, runs
 the inspection using isolated Python, and emits `receipt.json`. This packaging
 check does not replace the synthetic installed CLI, Git, host, cache and native
 platform acceptance gates. It installs no NLP models and enables no services.
+
+
+## Alpha refinement grammar and schema checks
+
+Core 0.2.1a4 and credential detector 0.1.0a3 share `credential_syntax` for typed
+booleans, null/default punctuation, comparisons, code references, declaration
+parameters, format placeholders, and bounded multiword credential prompts.
+Quoted null/boolean/type/format words remain literal candidates. Unquoted
+`.env` strings (including `true`/`false`), dotted opaque values and short
+passwords stay visible. Type declarations can be followed by real assignments;
+the parser resumes after the type instead of swallowing the remaining body.
+The existing explicit placeholder and native XML/HTTP/provider rule grammars
+remain separate validators; unknown or unsupported forms keep their normal
+candidate/error behavior rather than gaining a path exclusion.
+
+`artifact_context` interprets narrow schemas independently of aliases: a
+validated RSA SubjectPublicKeyInfo in an extension manifest's public `key`,
+JSON `localizationKey` metadata, plist dictionary tags, and exact identity
+labels in Apple string tables. Sibling credential fields remain visible.
+Typed plist credential values retain raw source spans, including bounded data
+values up to 524,288 characters. Base64 decoding is bounded to 262,144 bytes per
+payload and 1,048,576 bytes total. Relevant native findings on lines wholly
+inside recognized binary data remain review findings; mixed lines and textual
+data receive no reduction. This neither authenticates keys nor decrypts data.
+
+Long anchored signatures in a validated hash/regex catalogue retain AWS-shaped
+observations as review only when every AWS lexical candidate on that source
+line lies in approved signature values. An unknown/literal sibling on the same
+minified line prevents reclassification. The bundled AWS rule and source
+classifier share the pinned 8.30.1 grammar, enforced by regression tests.
+Native chunk columns are never promoted to absolute source offsets. Native
+line-only deduplication remains a documented limitation; no new cross-detector
+grouping is performed without trustworthy source spans.
+
+Native preparation applies only to the exact bundled rule closure bytes.
+Different caller-supplied policies receive admitted input bytes unchanged.

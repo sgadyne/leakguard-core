@@ -87,3 +87,15 @@ regex = '''(?i)\b((?:sgp_(?:[a-f0-9]{16}|local)_[a-f0-9]{40}|sgp_[a-f0-9]{40}|so
 secretGroup = 1
 entropy = 3
 keywords = ["sgp_", "sourcegraph"]
+
+
+# Explicit format profile keeps the source-side classifier and backend grammar
+# identical. Review of anchored signature data never removes an observation.
+[[rules]]
+id = "aws-access-token"
+description = "AWS access key ID candidate (pinned Gitleaks 8.30.1 format)"
+regex = '''\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\b'''
+entropy = 3
+keywords = ["a3t", "akia", "asia", "abia", "acca"]
+  [[rules.allowlists]]
+  regexes = ['''.+EXAMPLE$''']

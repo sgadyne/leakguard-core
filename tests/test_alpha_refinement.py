@@ -188,3 +188,111 @@ class NativeObservedRegressionTests(unittest.TestCase):
         self.assertTrue(all(f.start_line==1 for f in rows))
         spans=scan_fields(text,CredentialDetector().pack,logical_path='bundle.js')
         self.assertEqual([text[s.start:s.end] for s in spans],[TOKEN])
+
+
+class NativePreparationCacheTests(unittest.TestCase):
+    def test_distinct_source_with_same_prepared_payload_cannot_reuse_downgrade(self):
+        from unittest.mock import patch
+        from leakguard_core._supervision import WorkerResult
+        from leakguard_core.artifact_context import mask_artifact_labels
+        from leakguard_core._result_cache import OBSERVATIONS, CacheScope
+        head=base64.b64encode(b'bplist00x').decode();square='EAAA'+(TOKEN*2)[:60]
+        original=plist('<key>payload</key><data>\n'+head+'\n'+square+'\n</data>')
+        prepared=mask_artifact_labels(original,inspect_artifact(original))
+        self.assertNotEqual(original,prepared)
+        self.assertFalse(inspect_artifact(prepared).binary_lines)
+        with tempfile.TemporaryDirectory() as tmp:
+            binary=Path(tmp)/'backend';binary.write_bytes(b'synthetic');binary.chmod(0o700)
+            raw=b'[{"RuleID":"square-access-token","StartLine":3,"EndLine":3}]'
+            scope=CacheScope()
+            with patch.object(backends,'run_worker',return_value=WorkerResult(raw,1)) as worker:
+                a=backends.detect(original,binary=binary,cache_scope=scope,cache_identity='synthetic')
+                b=backends.detect(prepared,binary=binary,cache_scope=scope,cache_identity='synthetic')
+            self.assertEqual(worker.call_count,2)
+            self.assertEqual([f.severity for f in a],['review'])
+            self.assertEqual([f.severity for f in b],['block'])
+            OBSERVATIONS.clear_scope(scope)
+
+
+class SignatureSchemaReviewTests(unittest.TestCase):
+    def test_aws_native_profile_and_source_classifier_are_identical(self):
+        import tomllib
+        from leakguard_core.artifact_context import AWS_ACCESS_PATTERN
+        rules=tomllib.loads(Path(backends.__file__).with_name('rules.toml').read_text())['rules']
+        self.assertEqual(next(r['regex'] for r in rules if r['id']=='aws-access-token'),AWS_ACCESS_PATTERN)
+
+    def test_only_anchored_signature_objects_qualify_and_sibling_prevents_line_guess(self):
+        aws='AKIA'+'BCDEFGHIJKLMNPQR'
+        signature='(?i)^('+r'\\w+'*350+')'+aws+'$'
+        document=json.dumps([{'hash':'a193b7c4'*8,'regex':signature}])
+        self.assertEqual(inspect_artifact(document).aws_review_lines,frozenset({1}))
+        mixed=json.dumps([{'hash':'a193b7c4'*8,'regex':signature},{'hash':1234,'regex':aws}])
+        self.assertFalse(inspect_artifact(mixed).aws_review_lines)
+        sibling=json.dumps([{'hash':'a193b7c4'*8,'regex':signature,'api_key':aws}])
+        self.assertFalse(inspect_artifact(sibling).aws_review_lines)
+        short=json.dumps([{'hash':'a193b7c4'*8,'regex':'(?i)^('+aws+')$'}])
+        self.assertFalse(inspect_artifact(short).aws_review_lines)
+
+    def test_large_typed_private_key_data_keeps_precise_candidate_span(self):
+        encoded=base64.b64encode(b'-----BEGIN PRIVATE KEY-----\n'+b'synthetic-only'*500+b'\n-----END PRIVATE KEY-----').decode()
+        text=plist('<key>private_key</key><data>'+encoded+'</data>')
+        spans=scan_fields(text,CredentialDetector().pack)
+        self.assertEqual([s.rule for s in spans],['credential-private-key'])
+        self.assertEqual(text[spans[0].start:spans[0].end],encoded)
+
+    @unittest.skipUnless(os.environ.get('LEAKGUARD_GITLEAKS'),'pinned native backend required')
+    def test_aws_signature_candidates_stay_review_and_literal_control_blocks(self):
+        aws='AKIA'+'BCDEFGHIJKLMNPQR';signature='(?i)^('+r'\\w+'*350+')'+aws+'$'
+        binary=os.environ['LEAKGUARD_GITLEAKS']
+        document=json.dumps([{'hash':'a193b7c4'*8,'regex':signature}])
+        rows=[x for x in backends.detect(document,binary=binary) if x.rule=='aws-access-token']
+        self.assertTrue(rows);self.assertTrue(all(x.severity=='review' for x in rows))
+        literal=json.dumps({'aws_access_key_id':aws})
+        rows=[x for x in backends.detect(literal,binary=binary) if x.rule=='aws-access-token']
+        self.assertTrue(rows);self.assertTrue(all(x.severity=='block' for x in rows))
+        mixed=json.dumps([{'hash':'a193b7c4'*8,'regex':signature},{'hash':1234,'regex':aws}])
+        rows=[x for x in backends.detect(mixed,binary=binary) if x.rule=='aws-access-token']
+        self.assertTrue(rows);self.assertTrue(all(x.severity=='block' for x in rows))
+
+    def test_penpot_shaped_354_character_a256kw_jwe_is_a_positive(self):
+        from jose_recognizers.scanner import scan_compact_tokens
+        def segment(data):return base64.urlsafe_b64encode(data).decode().rstrip('=')
+        header=segment(json.dumps({'alg':'A256KW','enc':'A256GCM'},separators=(',',':')).encode())
+        token=None
+        for length in range(128,200):
+            candidate='.'.join([header,segment(bytes(range(40))),segment(bytes(range(12))),segment(bytes(i%256 for i in range(length))),segment(bytes(range(16)))])
+            if len(candidate)==354:token=candidate;break
+        self.assertIsNotNone(token)
+        matches=scan_compact_tokens(token)
+        self.assertEqual([(x.entity_type,x.score) for x in matches],[('JOSE_COMPACT_JWE',.99)])
+
+
+class SelectorPrefixGuards(unittest.TestCase):
+    def test_multi_parameter_objc_selectors_and_nearby_literal_assignment(self):
+        pack=CredentialDetector().pack
+        declaration='- (void)login:(id)sender password:(NSString *)password refreshToken:(NSString *)refreshToken;'
+        self.assertEqual(scan_fields(declaration,pack,logical_path='Auth.h'),())
+        text=declaration+'\npassword="synthetic-nearby-literal";'
+        spans=scan_fields(text,pack,logical_path='Auth.h')
+        self.assertEqual([text[s.start:s.end] for s in spans],['synthetic-nearby-literal'])
+        typed='let password: String = "synthetic-initialized-literal"'
+        spans=scan_fields(typed,pack,logical_path='Auth.swift')
+        self.assertTrue(spans)
+        self.assertTrue(any(s.start<typed.index('synthetic-initialized-literal')+len('synthetic-initialized-literal') and s.end>typed.index('synthetic-initialized-literal') for s in spans))
+        if os.environ.get('LEAKGUARD_GITLEAKS'):
+            rows=backends.detect(declaration,binary=os.environ['LEAKGUARD_GITLEAKS'],logical_path='Auth.h')
+            self.assertNotIn('literal-password',{f.rule for f in rows})
+            rows=backends.detect(text,binary=os.environ['LEAKGUARD_GITLEAKS'],logical_path='Auth.h')
+            self.assertIn('literal-password',{f.rule for f in rows})
+
+
+class BooleanContextGuards(unittest.TestCase):
+    def test_unquoted_environment_boolean_words_remain_literal_candidates(self):
+        pack=CredentialDetector().pack
+        for word in ('true','false'):
+            text='password='+word
+            self.assertEqual([text[x.start:x.end] for x in scan_fields(text,pack,logical_path='secrets.env')],[word])
+            self.assertEqual(mask_nonliteral_labels(text,logical_path='secrets.env'),text)
+            self.assertEqual(scan_fields(text,pack,logical_path='options.toml'),())
+            if os.environ.get('LEAKGUARD_GITLEAKS'):
+                self.assertIn('literal-password',{x.rule for x in backends.detect(text,binary=os.environ['LEAKGUARD_GITLEAKS'],logical_path='secrets.env')})

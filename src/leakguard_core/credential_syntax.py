@@ -22,6 +22,17 @@ _FIELD = re.compile(r"(?<![\w.-])(?P<quote>[\"']?)(?P<key>[A-Za-z][A-Za-z0-9_.-]
 _RELEVANT = re.compile(r'password|passwd|passphrase|pwd|token|secret|api[_.-]?key', re.I)
 
 
+def declaration_prefix_length(raw: str) -> int | None:
+    """Consume one recognized type/selector parameter, never an initializer."""
+    objc = re.match(_OBJC.pattern.removesuffix(r'\Z') +
+                    r'(?=[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*[ \t]*:|[,;)\r\n{}]|$))', raw)
+    if objc:
+        return objc.end()
+    typed = re.match(_TYPE.pattern.removesuffix(r'\Z') +
+                     r'(?=[ \t]*(?:[,;)\r\n{]|$))', raw)
+    return typed.end() if typed else None
+
+
 def nonliteral_reason(text: str, key: str, field_start: int, value_start: int,
                       value_end: int, *, quoted: bool, key_quoted: bool = False,
                       operator: str = '=', logical_path: str = '') -> str | None:
@@ -49,13 +60,15 @@ def nonliteral_reason(text: str, key: str, field_start: int, value_start: int,
     # with a trailing ')' or a dotted name remains reviewable without context.
     scalar = re.sub(r'[ \t]*[)\]:]+[ \t]*$', '', raw) if code else raw
     scalar = scalar.strip()
-    if scalar.lower() in {'true', 'false', 'null', 'none', 'undefined', '~'}:
-        return 'typed-null-or-boolean'
+    if scalar.lower() in {'null', 'none', 'undefined', '~'}:
+        return 'typed-null'
+    if (scalar.lower() in {'true', 'false'} and
+            (code or operator == ':' or suffix == '.toml')):
+        return 'typed-boolean'
     if code and scalar == 'nil':
         return 'typed-null'
     if (not key_quoted and operator == ':' and code and
-            (_TYPE.fullmatch(scalar) or _OBJC.fullmatch(scalar)
-             or re.match(_TYPE.pattern.removesuffix(r'\Z') + r'[ \t]*\)[ \t]*(?:\{|->|$)', raw))):
+            declaration_prefix_length(raw) is not None):
         return 'type-declaration'
     if code and scalar in {'!0', '!1'}:
         return 'boolean-expression'

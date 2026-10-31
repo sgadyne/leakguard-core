@@ -5,7 +5,7 @@ import re
 import unicodedata
 from .aliases import AliasPack, normalize_key
 from .types import CredentialSpan
-from leakguard_core.credential_syntax import nonliteral_reason
+from leakguard_core.credential_syntax import nonliteral_reason, declaration_prefix_length
 
 RULES = {
     'password': 'credential-password',
@@ -148,19 +148,16 @@ def scan_fields(text: str, pack: AliasPack, *, logical_path: str = '') -> tuple[
             if (match.group('bare') and _IDENTIFIER_VALUE.fullmatch(raw)
                     and _CODE_OBJECT_CONTEXT.search(text[max(0, match.start()-2048):match.start()])):
                 continue
-            if raw.lower() in {'null', 'none', '~', 'true', 'false'} or _REFERENCE.fullmatch(raw) or _PLACEHOLDER.fullmatch(raw):
+            if raw.lower() in {'null', 'none', '~'} or _REFERENCE.fullmatch(raw) or _PLACEHOLDER.fullmatch(raw):
                 continue
         operator = ':' if text[match.start():match.end()].rstrip().endswith(':') else '='
-        if nonliteral_reason(text, key, match.start(), start, end, quoted=quoted,
+        reason = nonliteral_reason(text, key, match.start(), start, end, quoted=quoted,
                 key_quoted=bool(match.group('double') or match.group('single')),
-                operator=operator, logical_path=logical_path):
-            # A parameter declaration can be followed by a body on the same
-            # line. Resume after its type, so actual body assignments survive.
-            if operator == ':' and not quoted:
-                import re as _declaration_re
-                declared = _declaration_re.match(r'(?:string|number|boolean|unknown|any|never|void|String|NSString|Boolean|Bool|Data)(?:[?!]|\[\])?', text[start:end])
-                if declared:
-                    cursor = start + declared.end()
+                operator=operator, logical_path=logical_path)
+        if reason:
+            # Continue at the next selector parameter or actual body assignment.
+            if reason == 'type-declaration':
+                cursor = start + declaration_prefix_length(text[start:end])
             continue
         if end > start:
             if len(result) >= MAX_SPANS:
