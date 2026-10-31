@@ -1,0 +1,321 @@
+"""Synthetic reproducer for the stateless SSH enumeration deadline."""
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+
+WORKER = Path(__file__).resolve().parents[1] / 'src/leakguard_host/ssh_location_worker.py'
+# Each clock check advances one simulated second. This models a directory
+# whose prefix takes longer to walk than the per-request three-second budget,
+# without sleeping or relying on filesystem speed.
+SLOW_PREFIX = r'''
+import runpy, sys, time
+counter = iter(range(100000))
+time.monotonic = lambda: next(counter)
+runpy.run_path(sys.argv[1], run_name='__main__')
+'''
+
+
+def enumerate_page(root, cursor=None):
+    request = {'op': 'enumerate', 'root': str(root), 'path': str(root),
+               'cursor': cursor, 'limit': 1000}
+    process = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', SLOW_PREFIX, str(WORKER)],
+                             input=json.dumps(request).encode(), stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, check=True, timeout=10)
+    result = json.loads(process.stdout)
+    if result['status'] == 'timeout':
+        return result, None
+    assert result['status'] == 'available'
+    info = result['info']
+    signature = [info[key] for key in ('st_dev', 'st_ino', 'st_mode', 'st_size',
+                                       'st_mtime_ns', 'st_ctime_ns', 'st_flags')]
+    next_cursor = {'signature': signature, 'entries': result['position'], 'prefix': result['prefix']}
+    return result, next_cursor
+
+
+def test_stateless_browse_surfaces_slow_prefix_as_timeout(tmp_path):
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    first, cursor = enumerate_page(root)
+    assert first['stable'] and len(first['entries']) == 2 and not first['complete']
+    stalled, _ = enumerate_page(root, cursor)
+    assert stalled['status'] == 'timeout'
+
+
+class LocalRunner:
+    port = None
+
+    def __init__(self, slow=False):
+        self.slow = slow
+
+    def _command(self, target, python, script, *, isolated):
+        assert isolated
+        clock = "import time\n_clock=iter(range(100000))\ntime.monotonic=lambda:next(_clock)\n" if self.slow else ''
+        # Simulate a Linux endpoint for protocol tests running on the Mac.
+        # Its real Linux address-space limit is verified only on Linux.
+        platform = ("import sys,resource\nsys.platform='linux'\n_original_limit=resource.setrlimit\n"
+                    "resource.setrlimit=lambda kind,limit: None if kind==resource.RLIMIT_AS else _original_limit(kind,limit)\n")
+        return [sys.executable, '-I', '-S', '-B', '-c', platform + clock + script]
+
+
+def cursor_for(page):
+    info = page['info']
+    return {'signature': [info[key] for key in ('st_dev', 'st_ino', 'st_mode', 'st_size',
+                                                 'st_mtime_ns', 'st_ctime_ns', 'st_flags')],
+            'entries': page['position'], 'prefix': page['prefix']}
+
+
+def call(sessions, root, cursor=None, *, runner=None, expected=None, path=None, cancel=None, limit=1000):
+    return sessions.request(runner or LocalRunner(), 'synthetic',
+                            {'op': 'enumerate', 'root': str(root), 'path': str(path or root),
+                             'expected': expected, 'cursor': cursor, 'limit': limit},
+                            python='/usr/bin/python3', cancel=cancel)
+
+
+def make_files(root, count=6):
+    root.mkdir()
+    names = {f'fixture-{i:02d}.txt' for i in range(count)}
+    for name in sorted(names):
+        (root / name).touch()
+    return names
+
+
+def test_session_advances_and_replays_a_durable_slow_prefix_after_restart(tmp_path):
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    root = tmp_path / 'synthetic'
+    expected = make_files(root, 10)
+    runner = LocalRunner(slow=True)
+    sessions = DirectorySessions()
+    try:
+        first = call(sessions, root, runner=runner)
+        assert first['stable'] and not first['complete'] and first['entries']
+        assert first['session_capability'] == 'retained-linux'
+        durable = cursor_for(first)
+        # Restart discards the iterator. Replaying the old prefix may consume
+        # several requests, but must never retreat the durable cursor or emit it.
+        sessions.close()
+        seen = {entry['name'] for entry in first['entries']}
+        cursor = durable
+        for _ in range(20):
+            page = call(sessions, root, cursor, runner=runner)
+            assert page['stable']
+            new = {entry['name'] for entry in page['entries']}
+            assert not seen.intersection(new)
+            seen.update(new)
+            next_cursor = cursor_for(page)
+            assert next_cursor['entries'] >= cursor['entries']
+            if not new and not page['complete']:
+                assert next_cursor == cursor
+            cursor = next_cursor
+            if page['complete']:
+                break
+        assert page['complete'] and seen == expected
+    finally:
+        sessions.close()
+
+
+def test_uncommitted_cursor_replays_without_skipping_entries(tmp_path):
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    sessions = DirectorySessions()
+    try:
+        first = call(sessions, root, limit=2)
+        original_cursor = cursor_for(first)
+        uncommitted = call(sessions, root, original_cursor, limit=2)
+        replay = call(sessions, root, original_cursor, limit=2)
+        assert replay['entries'] == uncommitted['entries']
+        assert cursor_for(replay) == cursor_for(uncommitted)
+    finally:
+        sessions.close()
+
+
+def test_mutated_directory_discards_stream_and_cursor(tmp_path):
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    sessions = DirectorySessions()
+    try:
+        first = call(sessions, root, limit=2)
+        (root / 'new-file').touch()
+        changed = call(sessions, root, cursor_for(first), limit=2)
+        assert changed['stable'] is False and not changed['entries'] and not changed['complete']
+        fresh = call(sessions, root, limit=1000)
+        assert fresh['stable'] and fresh['complete'] and 'new-file' in {x['name'] for x in fresh['entries']}
+    finally:
+        sessions.close()
+
+
+def test_session_revalidates_ancestry_and_source(tmp_path):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    root = tmp_path / 'root'
+    root.mkdir()
+    child = root / 'child'
+    make_files(child)
+    sessions = DirectorySessions()
+    try:
+        first = call(sessions, root, path=child, limit=2)
+        child.rename(root / 'old')
+        child.symlink_to(root / 'old', target_is_directory=True)
+        with pytest.raises(HostError):
+            call(sessions, root, cursor_for(first), path=child, limit=2)
+        with pytest.raises(HostError) as error:
+            call(sessions, root, expected={'machine': 'wrong', 'device': 1, 'inode': 1})
+        assert error.value.code == 'source-changed'
+    finally:
+        sessions.close()
+
+
+def test_cancellation_and_session_limit_release_processes(tmp_path):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    sessions = DirectorySessions(max_sessions=2)
+    try:
+        roots = [tmp_path / str(i) for i in range(3)]
+        for root in roots:
+            make_files(root)
+            call(sessions, root, limit=1)
+        assert len(sessions._sessions) == 2
+        processes = [item['process'] for item in sessions._sessions.values()]
+        with pytest.raises(HostError) as error:
+            call(sessions, roots[-1], cancel=lambda: True)
+        assert error.value.code == 'cancelled'
+        assert processes[-1].poll() is not None
+    finally:
+        sessions.close()
+    assert all(process.poll() is not None for process in processes)
+
+
+def test_bad_prefix_is_rejected_after_incremental_replay(tmp_path):
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    root = tmp_path / 'synthetic'
+    make_files(root, 10)
+    sessions = DirectorySessions()
+    runner = LocalRunner(slow=True)
+    try:
+        first = call(sessions, root, limit=3)
+        cursor = cursor_for(first)
+        cursor['prefix'] = '0' * 64
+        sessions.close()
+        for _ in range(10):
+            page = call(sessions, root, cursor, runner=runner)
+            assert not page['entries'] and not page['complete']
+            if not page['stable']:
+                break
+            assert cursor_for(page) == cursor
+        assert page['stable'] is False
+    finally:
+        sessions.close()
+
+
+def test_remote_discovery_instances_share_owner_session(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from leakguard_host import discovery_remote
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    monkeypatch.setattr(discovery_remote, 'SSHRunner', lambda **kwargs: LocalRunner())
+    owner = SimpleNamespace(store=None, config=None)
+    source = {'ssh_target': 'synthetic', 'remote_root': str(root)}
+    try:
+        first = discovery_remote.RemoteDiscovery(owner)._request(source, 'enumerate', path=str(root), cursor=None, limit=1)
+        process = next(iter(owner._ssh_directory_sessions._sessions.values()))['process']
+        second = discovery_remote.RemoteDiscovery(owner)._request(source, 'enumerate', path=str(root), cursor=cursor_for(first), limit=1)
+        assert process is next(iter(owner._ssh_directory_sessions._sessions.values()))['process']
+        assert second['entries'] and second['entries'] != first['entries']
+    finally:
+        owner._ssh_directory_sessions.close()
+
+
+def test_crashed_session_replays_and_repeated_losses_are_a_gap(tmp_path):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    root = tmp_path / 'synthetic'
+    make_files(root, 10)
+    sessions = DirectorySessions()
+    try:
+        page = call(sessions, root, limit=3)
+        cursor = cursor_for(page)
+        # Each replacement process loses its iterator while replaying. The
+        # manager must eventually surface an unavailable coverage gap.
+        for _ in range(3):
+            next(iter(sessions._sessions.values()))['process'].kill()
+            next(iter(sessions._sessions.values()))['process'].wait()
+            try:
+                page = call(sessions, root, cursor, runner=LocalRunner(slow=True))
+            except HostError as error:
+                assert error.code == 'ssh-directory-replay-stalled'
+                break
+            assert not page['complete'] and not page['entries'] and cursor_for(page) == cursor
+        else:
+            pytest.fail('repeated lost sessions were not reported as a gap')
+    finally:
+        sessions.close()
+
+
+def test_inflight_cancel_kills_process_without_counting_a_failure(tmp_path):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    class SlowRunner(LocalRunner):
+        def _command(self, target, python, script, *, isolated):
+            return super()._command(target, python, 'import time; time.sleep(5)\n' + script, isolated=isolated)
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    sessions = DirectorySessions()
+    checks = iter([False, False, True])
+    try:
+        with pytest.raises(HostError) as error:
+            call(sessions, root, runner=SlowRunner(), cancel=lambda: next(checks, True))
+        assert error.value.code == 'cancelled'
+        assert not sessions._sessions and not sessions._losses
+    finally:
+        sessions.close()
+
+
+def test_replaced_root_rejects_expected_source_identity(tmp_path):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    sessions = DirectorySessions()
+    try:
+        probe = subprocess.run([sys.executable, '-I', '-S', '-B', str(WORKER)],
+                               input=json.dumps({'op': 'probe', 'root': str(root)}).encode(),
+                               stdout=subprocess.PIPE, check=True, timeout=10)
+        identity = json.loads(probe.stdout)['identity']
+        first = call(sessions, root, expected=identity, limit=1)
+        root.rename(tmp_path / 'old')
+        root.mkdir()
+        with pytest.raises(HostError) as error:
+            call(sessions, root, cursor_for(first), expected=identity, limit=1)
+        assert error.value.code == 'source-changed'
+    finally:
+        sessions.close()
+
+
+def test_unsupported_platform_falls_back_and_reports_a_stalled_prefix(tmp_path):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    class UnsupportedRunner(LocalRunner):
+        def _command(self, target, python, script, *, isolated):
+            if 'def _remote_main()' in script:
+                prelude = "import sys\nsys.platform='darwin'\n"
+            else:
+                prelude = "import time\n_clock=iter(range(100000))\ntime.monotonic=lambda:next(_clock)\n"
+            return [sys.executable, '-I', '-S', '-B', '-c', prelude + script]
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    sessions = DirectorySessions()
+    runner = UnsupportedRunner()
+    try:
+        first = call(sessions, root, runner=runner)
+        assert first['session_capability'] == 'unsupported' and len(first['entries']) == 2
+        assert not sessions._sessions
+        with pytest.raises(HostError) as error:
+            call(sessions, root, cursor_for(first), runner=runner)
+        assert error.value.code == 'ssh-timeout'
+    finally:
+        sessions.close()

@@ -20,7 +20,14 @@ class RemoteDiscovery:
  def __init__(self,owner):self.owner=owner;self.store=owner.store;self.config=owner.config;self.client=SSHLocations()
  def _request(self,source,op,**kwargs):
   cancel=kwargs.pop('cancel',None)
-  return SSHLocations(runner=SSHRunner(port=source.get('ssh_port'))).request(source['ssh_target'],{'op':op,'root':source['remote_root'],'expected':source.get('remote_identity'),**kwargs},python=source.get('ssh_python','/usr/bin/python3'),cancel=cancel)
+  runner=SSHRunner(port=source.get('ssh_port'))
+  request={'op':op,'root':source['remote_root'],'expected':source.get('remote_identity'),**kwargs}
+  python=source.get('ssh_python','/usr/bin/python3')
+  if op=='enumerate':
+   from .ssh_directory_session import DirectorySessions
+   if not hasattr(self.owner,'_ssh_directory_sessions'):self.owner._ssh_directory_sessions=DirectorySessions()
+   return self.owner._ssh_directory_sessions.request(runner,source['ssh_target'],request,python=python,cancel=cancel)
+  return SSHLocations(runner=runner).request(source['ssh_target'],request,python=python,cancel=cancel)
  def _excluded(self,path,source,settings):
   return any(path==p or path.startswith(p.rstrip('/')+'/') for p in source['exclusions'])
  def tick(self,source,job,settings,*,cancel):
@@ -47,6 +54,7 @@ class RemoteDiscovery:
     else:
      try:
       result=self._request(source,'enumerate',path=remote_path(source,path),cursor=json.loads(row[8]) if row[8] else None,limit=1000,cancel=cancel)
+      job['remote_directory_session_capability']=result.get('session_capability','one-shot-posix')
       info=result['info'];physical=f"{source['id']}:{source['remote_identity']['machine']}:{info['st_dev']}:{info['st_ino']}"
       if not self.store.physical_visit(physical,job['inventory_generation'],path):self.store.inventory_set(path,'alias',detail='physical-directory-already-enumerated')
       else:

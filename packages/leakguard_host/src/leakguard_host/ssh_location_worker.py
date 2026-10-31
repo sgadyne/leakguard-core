@@ -79,6 +79,9 @@ def main():
        try:value=metadata(entry.stat(follow_symlinks=False))
        except OSError:value=None
        entries.append({'name':entry.name,'info':value})
+     # The one-shot browse path cannot retain a replay iterator. Report a
+     # bounded timeout instead of returning the same cursor indefinitely.
+     if resume and position and position<=resume and not entries and not complete:raise TimeoutError()
      result={'status':'available','identity':identity,'info':metadata(before),'entries':entries,'position':position,'prefix':prefix.hexdigest(),'complete':complete,'stable':signature(before)==signature(os.fstat(fd))}
     finally:os.close(fd)
    elif operation in {'read','check'}:
