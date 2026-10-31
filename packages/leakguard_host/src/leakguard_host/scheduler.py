@@ -22,6 +22,14 @@ from . import navigation
 _ACTIVE = {"queued", "running", "paused", "backoff"}
 _FINAL = {"completed", "cancelled", "failed"}
 _UNSET = object()
+# Stable, value-free transport/helper causes. Unknown HostErrors stay sanitized.
+_REMOTE_FAILURES = frozenset({'ssh-timeout', 'ssh-execution-failed', 'ssh-output-limit',
+    'ssh-unavailable', 'ssh-worker-invalid', 'remote-report-invalid'})
+
+
+def _request_refresh(job):
+    job['refresh_requested']=True
+    job['refresh_revision']=job.get('refresh_revision',0)+1
 
 
 class HostStateStore(Protocol):
@@ -258,7 +266,7 @@ class HostService:
                 jobs=[j for j in self._state['jobs'].values() if j['source_id']==source['id']]
                 latest=max(jobs,key=lambda j:j['created_at']) if jobs else {}
                 error=latest.get('last_error')
-                source['availability']='permission-needed' if error=='permission-denied' else 'offline' if error in {'offline','source-unavailable','unreadable'} else 'paused' if not source['enabled'] or self._protection['paused'] or source.get('automatic') and not self._protection['automatic_this_mac'] or latest.get('state')=='paused' else 'scanning' if latest.get('state') in {'queued','running'} else 'current-with-gaps' if latest.get('state')=='completed' else 'unverified'
+                source['availability']='permission-needed' if error=='permission-denied' else 'retrying' if error in _REMOTE_FAILURES else 'offline' if error in {'offline','source-unavailable','unreadable'} else 'paused' if not source['enabled'] or self._protection['paused'] or source.get('automatic') and not self._protection['automatic_this_mac'] or latest.get('state')=='paused' else 'scanning' if latest.get('state') in {'queued','running'} else 'current-with-gaps' if latest.get('state')=='completed' else 'unverified'
             return rows
 
     def add_source(self, root, *, label: str | None = None, kind: str = "local", exclusions=(), target: str | None = None, ssh_port: int | None = None) -> dict:
@@ -436,7 +444,12 @@ class HostService:
         return job
 
     def submit(self, source_id: str) -> dict:
-        result = self._mutate(lambda: self._submit(source_id))
+        def request():
+            job=self._submit(source_id)
+            if self._source(source_id).get('managed_inventory') and job['slices']:
+                _request_refresh(job)
+            return job
+        result = self._mutate(request)
         self._wake.set()
         return result
 
@@ -482,7 +495,8 @@ class HostService:
                 probe=SSHLocations(runner=SSHRunner(port=source.get('ssh_port'))).probe(source['ssh_target'],source['remote_root'],python=source.get('ssh_python','/usr/bin/python3'),expected=source.get('remote_identity'),cancel=lambda:self._stop.is_set())
                 with self._lock:self._source(source['id']).update(remote_identity=probe['identity'],remote_python_version=probe['python_version'])
                 return 'available'
-            except HostError as error:return error.code if error.code in {'source-changed','permission-denied'} else 'offline'
+            except HostError as error:
+                return error.code if error.code in _REMOTE_FAILURES | {'source-changed','permission-denied','source-unavailable'} else 'source-unavailable'
         path = Path(source["root"])
         if source['kind']=='mounted':
             marker=navigation.mount_marker(path)
@@ -564,7 +578,7 @@ class HostService:
                     def enqueue():
                         for source_id in scheduled:
                             scheduled_job=self._submit(source_id)
-                            if self._source(source_id).get('managed_inventory') and scheduled_job['slices']:scheduled_job['refresh_requested']=True
+                            if self._source(source_id).get('managed_inventory') and scheduled_job['slices']:_request_refresh(scheduled_job)
                             source = self._source(source_id)
                             from .protection import next_run
                             schedule={'mode':'interval','interval_seconds':source['schedule_seconds']} if source['schedule_seconds'] is not None else source.get('schedule') or self._protection['schedule']
@@ -603,7 +617,6 @@ class HostService:
                         managed_result=self._discovery.tick(managed_source,managed_job,self._protection,cancel=lambda:self._cancelled(job_id))
                 except Exception as error:
                     failure=getattr(error,'code','scan-failed')
-                    if source['kind']=='ssh' and failure in {'ssh-timeout','ssh-execution-failed','ssh-output-limit','remote-report-invalid'}:failure='source-unavailable'
             else:
                 values = self._config.to_mapping()
                 scope = "host-" + source["id"]
@@ -626,7 +639,10 @@ class HostService:
                     source_now = self._source(job["source_id"])
                     if managed_result is not None:
                         protected={'id','source_id','state','created_at','updated_at','next_retry_at','attempts','slices','last_error'}
+                        refresh_revision=job.get('refresh_revision',0)
+                        refresh_during_slice=refresh_revision>managed_job.get('refresh_revision',0)
                         job.update({k:v for k,v in managed_job.items() if k not in protected})
+                        if refresh_during_slice:job.update(refresh_requested=True,refresh_revision=refresh_revision)
                         if job.get('invalidate_cursor',0)>=256:job['offline_invalidated']=False
                         if 'inspection_identity' in managed_source:source_now['inspection_identity']=managed_source['inspection_identity']
                         if managed_job.get('reconciliation_started_at'):source_now['last_run_at']=_timestamp(managed_job['reconciliation_started_at'])
@@ -644,7 +660,8 @@ class HostService:
                         job.update(state="paused", last_error="service-stopped",pause_reason="system")
                         return job
                     if failure is not None:
-                        if source.get('managed_inventory') and failure in {'offline','source-unavailable','source-changed','unreadable','permission-denied'} and not job.get('offline_invalidated'):
+                        if source['kind']=='ssh':job['content_success_streak']=0
+                        if source.get('managed_inventory') and failure in (_REMOTE_FAILURES | {'offline','source-unavailable','source-changed','unreadable','permission-denied'}) and not job.get('offline_invalidated'):
                             job.update(invalidate_cursor=0,offline_invalidated=True,refresh_requested=True)
                         if failure in {"work-identity-unavailable", "work-identity-invalid", "state-reset-unavailable"}:
                             job.update(state="failed", last_error=failure, coverage="incomplete")
@@ -653,7 +670,7 @@ class HostService:
                     elif managed_result is not None:
                         counts=self._store.inventory_counts(source['id'])
                         job.update(inventory_counts=counts,pending_files=counts.get('pending',0)+counts.get('changed',0),pending_directories=counts.get('enumerating',0),coverage='incomplete')
-                        current=managed_result['inventory_complete'] and not counts.get('enumerating') and (not (counts.get('pending',0)+counts.get('changed',0)) or self._protection['new_content']=='inventory')
+                        current=managed_result['inventory_complete'] and not job.get('refresh_requested') and not counts.get('enumerating') and (not (counts.get('pending',0)+counts.get('changed',0)) or self._protection['new_content']=='inventory')
                         job.update(state='completed' if current else 'queued',attempts=0,last_error=None)
                         if current:source_now['last_success_at']=job['updated_at']
                     elif report.coverage.enumeration_complete and report.coverage.required_complete:

@@ -387,6 +387,11 @@ class EncryptedScanStore:
             self._ensure_open()
             return self._partitions.inventory_page(*args, **kwargs)
 
+    def queue_backfill_refresh(self, *args):
+        with self._mutex:
+            self._ensure_open();self._dirty=True
+            return self._partitions.queue_backfill_refresh(*args)
+
     def queue_reconciliation(self, *args):
         with self._mutex:
             self._ensure_open();self._dirty=True

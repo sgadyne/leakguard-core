@@ -209,7 +209,7 @@ class EncryptedPartitions:
                 for path in changed:child.record_event(path,'changed')
                 store=self.get(bucket)
             with store.conn:
-                store.conn.executemany('''INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET location=excluded.location,kind=excluded.kind,signature=excluded.signature,status=CASE WHEN inventory.signature=excluded.signature AND inventory.kind='directory' AND inventory.generation=excluded.generation AND inventory.status IN ('enumerated','alias','inaccessible','excluded') THEN inventory.status WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.status WHEN inventory.signature IS NOT excluded.signature AND excluded.status='pending' THEN 'changed' ELSE excluded.status END,priority=excluded.priority,generation=excluded.generation,size=excluded.size,cursor=excluded.cursor,detail=CASE WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.detail ELSE excluded.detail END''', group)
+                store.conn.executemany('''INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET location=excluded.location,kind=excluded.kind,signature=excluded.signature,status=CASE WHEN inventory.signature=excluded.signature AND inventory.kind='directory' AND inventory.generation=excluded.generation AND inventory.status IN ('enumerated','alias','inaccessible','excluded') THEN inventory.status WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.status WHEN inventory.signature IS NOT excluded.signature AND excluded.status='pending' THEN 'changed' ELSE excluded.status END,priority=excluded.priority,generation=excluded.generation,size=excluded.size,cursor=CASE WHEN inventory.kind='directory' AND inventory.status='enumerating' AND excluded.status='enumerating' AND inventory.signature=excluded.signature AND inventory.generation=excluded.generation AND excluded.cursor IS NULL THEN inventory.cursor ELSE excluded.cursor END,detail=CASE WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.detail ELSE excluded.detail END''', group)
 
     def inventory_page(self, location, kind, status, *, cursor=0, limit=100,prefer_priority=True):
         states=(status,) if isinstance(status,str) else tuple(status)
@@ -279,6 +279,18 @@ class EncryptedPartitions:
         if paths and (evidence in self.catalog or evidence in self.cache):
             child=self.get(evidence)
             for path, in paths:child.record_event(path,'deleted')
+
+    def queue_backfill_refresh(self,source,index):
+        """Revisit completed metadata while preserving all active cursors.
+
+        The initial generation and pending content remain authoritative. This
+        request does not resolve absent paths or claim a complete inventory.
+        """
+        bucket=f'i{index:02x}'
+        if bucket in self.catalog or bucket in self.cache:
+            store=self.get(bucket)
+            with store.conn:
+                store.conn.execute("UPDATE inventory SET status='enumerating',cursor=NULL,detail='metadata-refresh-during-backfill' WHERE location=? AND kind='directory' AND status IN ('enumerated','inaccessible')",(source['id'],))
 
     def queue_reconciliation(self,source,generation,index):
         bucket=f'i{index:02x}'

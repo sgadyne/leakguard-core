@@ -97,6 +97,26 @@ class _Evidence:
             self.child.conn.execute('DELETE FROM scan_runs WHERE run_id<>?',(report.run_id,))
 
 
+class _DirectoryStream:
+    """One bounded, scope-anchored metadata iterator; never file content.
+
+    The durable cursor remains authoritative. An uncommitted anchor forces a
+    fresh replay after any interrupted publication; at most eight streams live.
+    """
+    def __init__(self, context, signature, anchor, generation):
+        self.context = context
+        self.iterator = iter(context.__enter__())
+        self.signature, self.anchor, self.generation = signature, anchor, generation
+        self.position = 0
+        self.prefix = hashlib.sha256()
+        self.closed = False
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self.context.__exit__(None, None, None)
+
+
 class DiscoveryCoordinator:
     def __init__(self,store,config,*,scanner_factory=Scanner.open,clock=time.time):
         self.store,self.config,self.scanner_factory=store,config,scanner_factory
@@ -135,6 +155,53 @@ class DiscoveryCoordinator:
         if source.get('automatic') and (path==Path('/Volumes') or path.is_relative_to('/System/Volumes') or path==Path('/dev')):return True
         return False
 
+    def _refresh_metadata(self,source,job):
+        """Honor scheduled/manual refresh before initial backfill completes."""
+        if (job.get('refresh_requested') and job.get('refresh_cursor',256)>=256
+                and job.get('backfill_refresh_cursor',256)>=256):
+            if job.get('inventory_complete'):
+                job.update(inventory_generation=int(self.clock()*1_000_000),inventory_complete=False,
+                           refresh_requested=False,refresh_cursor=0,reconcile_cursor=0,
+                           empty_directory_pages=0,unknown_descendants=0,reconciliation_started_at=self.clock())
+            else:
+                # No new generation and no restart of unfinished directories.
+                job.update(refresh_requested=False,backfill_refresh_cursor=0,
+                           backfill_refresh_started_at=self.clock())
+        if job.get('backfill_refresh_cursor',256)<256:
+            job['backfill_refresh_cursor']=_advance_partitions(job['backfill_refresh_cursor'],
+                lambda index:self.store.queue_backfill_refresh(source,index))
+        if job.get('refresh_cursor',256)<256:
+            job['refresh_cursor']=_advance_partitions(job['refresh_cursor'],
+                lambda index:self.store.queue_reconciliation(source,job['inventory_generation'],index))
+
+    def _discard_stream(self, key):
+        stream = self._iterators.pop(key, None)
+        if stream is not None:
+            stream.close()
+
+    def _directory_stream(self, key, path, root, info, signature, anchor, generation):
+        stream = self._iterators.pop(key, None)
+        if stream is not None and (stream.signature != signature or
+                stream.anchor != anchor or stream.generation != generation):
+            stream.close()
+            stream = None
+        if stream is not None:
+            try:
+                # Reopen all ancestry with O_NOFOLLOW on every slice. Matching
+                # the same directory identity authorizes use of the retained fd.
+                with navigation._scoped_scandir(path, root, info):
+                    pass
+            except BaseException:
+                stream.close()
+                raise
+        else:
+            stream = _DirectoryStream(navigation._scoped_scandir(path, root, info),
+                                      signature, anchor, generation)
+        while len(self._iterators) >= 8:
+            self._discard_stream(next(iter(self._iterators)))
+        self._iterators[key] = stream
+        return stream
+
     def _enumerate(self,source,job,settings,cancel,deadline):
         generation=job['inventory_generation'];seen=0
         while seen<5000 and time.monotonic()<deadline and not cancel():
@@ -143,82 +210,98 @@ class DiscoveryCoordinator:
             if not rows:
                 job['empty_directory_pages']=job.get('empty_directory_pages',0)+1
                 if job['empty_directory_pages']>=32:
-                    if job.get('refresh_cursor',256)>=256:job['inventory_complete']=True
+                    if job.get('refresh_cursor',256)>=256 and job.get('backfill_refresh_cursor',256)>=256:job['inventory_complete']=True
                     return
                 continue
             job['empty_directory_pages']=0
             row=rows[0];path=Path(row[0]);old_cursor=json.loads(row[8]) if row[8] else None
+            stream_key=(source['id'],str(path))
             if self._excluded(path,source,settings):
+                self._discard_stream(stream_key)
                 self.store.inventory_set(str(path),'excluded',detail='unknown-descendants');job['unknown_descendants']+=1;continue
             try:
-                mounted=None
+                mounted=None;stream=None
                 if source['kind']=='mounted':
                     from .mounted_worker import call
                     mounted=call({'op':'enumerate','root':source['root'],'path':str(path),'cursor':old_cursor,'expected':source.get('active_root_identity'),'limit':min(1000,5000-seen)},cancel=cancel)
                     info=SimpleNamespace(**mounted['info'])
                 else:info=path.lstat()
                 if not stat.S_ISDIR(info.st_mode):
+                    self._discard_stream(stream_key)
                     self.store.inventory_set(str(path),'changed',detail='directory-replaced');continue
                 physical=f'{source["id"]}:{info.st_dev}:{info.st_ino}'
                 if not self.store.physical_visit(physical,generation,str(path)):
+                    self._discard_stream(stream_key)
                     self.store.inventory_set(str(path),'alias',detail='physical-directory-already-enumerated');continue
                 signature=_sig(info)
                 resume=old_cursor['entries'] if old_cursor and old_cursor['signature']==signature else 0
-                prefix=hashlib.sha256();position=0;entries=[];exhausted=True
-                @contextmanager
-                def entries_for_directory():
-                    if mounted is None:
-                        with navigation._scoped_scandir(path,Path(source['root']),info) as iterator:yield iterator
-                    else:
-                        class Entry:
-                            def __init__(self,item):self.name=item['name'];self.item=item
-                            def stat(self,**kwargs):
-                                if self.item['info'] is None:raise OSError()
-                                return SimpleNamespace(**self.item['info'])
-                        yield iter(Entry(item) for item in mounted['entries'])
-                if mounted is not None:
-                    # Prefix replay has already been bounded and verified in
-                    # the isolated worker; count only newly returned entries.
-                    resume=0
-                    position=mounted['position']-len(mounted['entries'])
-                with entries_for_directory() as iterator:
-                    for entry in iterator:
-                        if mounted is None and (cancel() or time.monotonic()>=deadline or seen>=5000):
-                            exhausted=False;break
-                        position+=1
-                        if mounted is None:prefix.update(os.fsencode(entry.name)+b'\0')
-                        if position<=resume:
-                            if position==resume and prefix.hexdigest()!=old_cursor['prefix']:
-                                resume=0;position=0;prefix=hashlib.sha256();exhausted=False;break
-                            continue
-                        seen+=1;child=path/entry.name
-                        if len(str(child))>4096:
-                            marker=str(Path(source['root'])/('[path-limit-'+hashlib.sha256(str(child).encode('utf-8','surrogatepass')).hexdigest()[:20]+']'))
-                            entries.append((marker,source['id'],'unknown',None,'unsupported',100,generation,0,None,'path-length-limit; unknown-descendants'));continue
-                        try:
-                            value=entry.stat(follow_symlinks=False);kind='directory' if stat.S_ISDIR(value.st_mode) else 'file' if stat.S_ISREG(value.st_mode) else 'symlink' if stat.S_ISLNK(value.st_mode) else 'special'
-                            state='enumerating' if kind=='directory' else 'pending' if kind=='file' else 'excluded';detail=None
-                            if self._excluded(child,source,settings):state='excluded';detail='unknown-descendants' if kind=='directory' else 'operator-exclusion'
-                            elif source.get('automatic') and kind=='directory' and value.st_dev not in source.get('local_devices',[info.st_dev]):state='excluded';detail='mount-boundary-unknown-descendants'
-                            elif kind=='file' and (getattr(value,'st_flags',0)&0x40000000 or entry.name.endswith('.icloud')):state='remote-only';detail='cloud-placeholder-not-hydrated'
-                            elif kind=='file' and protected_store(child):state='protected';detail='encrypted-store-inventory-only'
-                            entries.append((str(child),source['id'],kind,_sig(value),state,_priority(child),generation,value.st_size,None,detail))
-                        except OSError:
-                            entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
+                entries=[];exhausted=False;mismatch=False
+                if mounted is None:
+                    stream=self._directory_stream(stream_key,path,Path(source['root']),info,
+                                                  signature,row[8],generation)
+                    iterator=stream.iterator;position=stream.position;prefix=stream.prefix
+                    # Any exception before successful inventory publication must
+                    # invalidate this in-memory cursor on the next attempt.
+                    stream.anchor=object()
+                else:
+                    class Entry:
+                        def __init__(self,item):self.name=item['name'];self.item=item
+                        def stat(self,**kwargs):
+                            if self.item['info'] is None:raise OSError()
+                            return SimpleNamespace(**self.item['info'])
+                    iterator=iter(Entry(item) for item in mounted['entries'])
+                    resume=0;position=mounted['position']-len(mounted['entries']);prefix=None
+                while mounted is not None or not (cancel() or time.monotonic()>=deadline or seen>=5000):
+                    try:entry=next(iterator)
+                    except StopIteration:
+                        exhausted=True;break
+                    position+=1
+                    if stream is not None:
+                        stream.position=position
+                        prefix.update(os.fsencode(entry.name)+b'\0')
+                    if position<=resume:
+                        if position==resume and prefix.hexdigest()!=old_cursor['prefix']:
+                            mismatch=True;break
+                        continue
+                    seen+=1;child=path/entry.name
+                    if len(str(child))>4096:
+                        marker=str(Path(source['root'])/('[path-limit-'+hashlib.sha256(str(child).encode('utf-8','surrogatepass')).hexdigest()[:20]+']'))
+                        entries.append((marker,source['id'],'unknown',None,'unsupported',100,generation,0,None,'path-length-limit; unknown-descendants'));continue
+                    try:
+                        value=entry.stat(follow_symlinks=False);kind='directory' if stat.S_ISDIR(value.st_mode) else 'file' if stat.S_ISREG(value.st_mode) else 'symlink' if stat.S_ISLNK(value.st_mode) else 'special'
+                        state='enumerating' if kind=='directory' else 'pending' if kind=='file' else 'excluded';detail=None
+                        if self._excluded(child,source,settings):state='excluded';detail='unknown-descendants' if kind=='directory' else 'operator-exclusion'
+                        elif source.get('automatic') and kind=='directory' and value.st_dev not in source.get('local_devices',[info.st_dev]):state='excluded';detail='mount-boundary-unknown-descendants'
+                        elif kind=='file' and (getattr(value,'st_flags',0)&0x40000000 or entry.name.endswith('.icloud')):state='remote-only';detail='cloud-placeholder-not-hydrated'
+                        elif kind=='file' and protected_store(child):state='protected';detail='encrypted-store-inventory-only'
+                        entries.append((str(child),source['id'],kind,_sig(value),state,_priority(child),generation,value.st_size,None,detail))
+                    except OSError:
+                        entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
                 self.store.inventory_put(entries)
                 if mounted is not None:
                     exhausted=mounted['complete'];position=mounted['position']
                 stable=mounted['stable'] if mounted is not None else _sig(path.lstat())==signature
-                if not stable or position<resume:
+                if not stable or mismatch:
+                    self._discard_stream(stream_key)
                     self.store.inventory_set(str(path),'enumerating',detail='changed-during-enumeration')
+                elif position<resume:
+                    # Prefix replay may itself take several bounded slices.
+                    # Keep the durable prefix until it has been fully verified.
+                    self.store.inventory_set(str(path),'enumerating',cursor=row[8],signature=signature,detail='metadata-prefix-replay')
+                    stream.anchor=row[8]
                 elif exhausted:
+                    self._discard_stream(stream_key)
                     self.store.inventory_set(str(path),'enumerated',detail='metadata-only',signature=signature)
                 else:
-                    self.store.inventory_set(str(path),'enumerating',cursor=json.dumps({'signature':signature,'entries':position,'prefix':mounted['prefix'] if mounted is not None else prefix.hexdigest()}),signature=signature)
+                    saved=json.dumps({'signature':signature,'entries':position,'prefix':mounted['prefix'] if mounted is not None else prefix.hexdigest()})
+                    self.store.inventory_set(str(path),'enumerating',cursor=saved,signature=signature)
+                    if stream is not None:stream.anchor=saved
                 job['metadata_enumerated']+=len(entries)
             except PermissionError:
+                self._discard_stream(stream_key)
                 self.store.inventory_set(str(path),'inaccessible',detail='unknown-descendants-permission-needed');job['unknown_descendants']+=1
             except (OSError,navigation.HostError):
+                self._discard_stream(stream_key)
                 self.store.inventory_set(str(path),'inaccessible',detail='unknown-descendants-unreadable');job['unknown_descendants']+=1
 
     def tick(self,source,job,settings,*,cancel):
@@ -238,10 +321,7 @@ class DiscoveryCoordinator:
         if job.get('priority_cursor',256)<256:
             job['priority_cursor']=_advance_partitions(job['priority_cursor'],lambda index:self.store.reprioritize_location(source,index,_priority))
             return {'scanned':0,'inventory_complete':False}
-        if job.get('refresh_requested') and job.get('inventory_complete') and job.get('refresh_cursor',256)>=256:
-            job.update(inventory_generation=int(self.clock()*1_000_000),inventory_complete=False,refresh_requested=False,refresh_cursor=0,reconcile_cursor=0,empty_directory_pages=0,unknown_descendants=0,reconciliation_started_at=self.clock())
-        if job.get('refresh_cursor',256)<256:
-            job['refresh_cursor']=_advance_partitions(job['refresh_cursor'],lambda index:self.store.queue_reconciliation(source,job['inventory_generation'],index))
+        self._refresh_metadata(source,job)
         deadline=time.monotonic()+10
         if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2))
         scanned=0

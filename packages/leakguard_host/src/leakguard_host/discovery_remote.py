@@ -36,14 +36,11 @@ class RemoteDiscovery:
    job['invalidate_cursor']=_advance_partitions(job['invalidate_cursor'],lambda index:self.store.invalidate_location(source,index));return {'scanned':0,'inventory_complete':False}
   if job.get('priority_cursor',256)<256:
    job['priority_cursor']=_advance_partitions(job['priority_cursor'],lambda index:self.store.reprioritize_location(source,index,_priority));return {'scanned':0,'inventory_complete':False}
-  if job.get('refresh_requested') and job.get('inventory_complete') and job.get('refresh_cursor',256)>=256:
-   job.update(inventory_generation=int(self.owner.clock()*1_000_000),inventory_complete=False,refresh_requested=False,refresh_cursor=0,reconcile_cursor=0,unknown_descendants=0,reconciliation_started_at=self.owner.clock())
-  if job.get('refresh_cursor',256)<256:
-   job['refresh_cursor']=_advance_partitions(job['refresh_cursor'],lambda index:self.store.queue_reconciliation(source,job['inventory_generation'],index))
+  self.owner._refresh_metadata(source,job)
   if not job.get('inventory_complete') and not cancel():
    rows,cursor=self.store.inventory_page(source['id'],'directory','enumerating',cursor=job['inventory_cursor'],limit=1,prefer_priority=job['slices']%10!=0);job['inventory_cursor']=cursor
    if not rows:
-    if job.get('refresh_cursor',256)>=256:job['inventory_complete']=True
+    if job.get('refresh_cursor',256)>=256 and job.get('backfill_refresh_cursor',256)>=256:job['inventory_complete']=True
    else:
     row=rows[0];path=row[0]
     if self._excluded(path,source,settings):self.store.inventory_set(path,'excluded',detail='unknown-descendants');job['unknown_descendants']+=1
@@ -104,14 +101,16 @@ class RemoteDiscovery:
      except Exception:
       transient.close()
       if cancel():return {'scanned':0,'inventory_complete':False}
+      self._record_batch_outcome(job,False)
       self._retry_missing(admitted,set(),job)
       return {'scanned':0,'inventory_complete':False}
      checked=self._request(source,'check',paths=[remote_path(source,path) for path in snapshots],cancel=cancel) if not cancel() else {'entries':[]}
      checks={uri(source['ssh_target'],x['path']):x for x in checked['entries']};job['last_slice_issues']=sorted({x.code.value for x in report.issues});job['last_slice_results']=len(report.results)
-     observed=set()
+     observed=set();complete_batch=len(inputs)==len(admitted) and not any(x.required for x in report.issues)
      for original in report.results:
       logical=original.source.path;snapshot=snapshots[logical];current=checks.get(logical);valid=current and current.get('status')=='available' and current.get('signature')==snapshot['signature'];reference=SourceRef(SourceKind.FILESYSTEM,logical)
       observed.add(logical)
+      complete_batch=complete_batch and bool(valid) and original.coverage in {CoverageState.COMPLETE,CoverageState.OMITTED}
       identity=replace(original.identity,context_id=hashlib.sha256(json.dumps([original.identity.context_id,source['remote_identity'],snapshot['signature']],sort_keys=True).encode()).hexdigest(),cache_eligible=False)
       findings=tuple(replace(f,source=reference,id=hashlib.sha256(('ssh-snapshot-v1:'+logical+':'+f.id).encode()).hexdigest()) for f in original.findings)
       result=replace(original,source=reference,identity=identity,findings=findings)
@@ -121,7 +120,9 @@ class RemoteDiscovery:
        view=_Evidence(child,self.store);generation=view.reserve(reference);view.record_result(result,generation=generation);job['new_findings']+=view.new_findings
       previous=next((row[9] for row in admitted if row[0]==logical),None)
       self._record_inventory_outcome(logical,snapshot,result,valid,job,previous);scanned+=1
-     if not cancel():self._retry_missing([r for r in admitted if r[0] in snapshots],observed,job)
+     if not cancel():
+      self._retry_missing([r for r in admitted if r[0] in snapshots],observed,job)
+      self._record_batch_outcome(job,complete_batch and observed==set(snapshots))
      inputs.clear();snapshots.clear();transient.close()
   if job.get('inventory_complete') and job.get('reconcile_cursor',0)<256:
    job['reconcile_cursor']=_advance_partitions(job.get('reconcile_cursor',0),lambda index:self.store.reconcile_location(source,job['inventory_generation'],index))
@@ -139,15 +140,32 @@ class RemoteDiscovery:
   else:
    # A report can contain a partial result after exhausting a shared batch
    # deadline. Retry that version alone before retaining an explicit gap.
-   attempts+=1;job['content_batch_limit']=1
+   attempts+=1;job['content_batch_limit']=1;job['content_success_streak']=0
    state='pending' if attempts<3 else 'inspection-error'
   self.store.inventory_set(logical,state,detail=json.dumps({'digest':snapshot['sha256'],'remote_signature':snapshot['signature'],'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({x.code.value for x in result.issues}),'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==snapshot['sha256'] if previous.get('digest') else None,'transport':'ssh','checked_after_scan':bool(valid)}))
 
  def _retry_missing(self,rows,observed,job):
   missing=[row for row in rows if row[0] not in observed]
-  if missing:job['content_batch_limit']=max(1,job.get('content_batch_limit',25)//2)
+  if missing:
+   job['content_batch_limit']=max(1,job.get('content_batch_limit',25)//2);job['content_success_streak']=0
   for row in missing:
    try:previous=json.loads(row[9] or '{}')
    except (ValueError,TypeError):previous={}
    attempts=int(previous.get('attempts',0))+1 if isinstance(previous,dict) else 1
    self.store.inventory_set(row[0],'inspection-error' if attempts>=3 and job['content_batch_limit']==1 else row[4],detail=json.dumps({'attempts':attempts,'issues':['remote-inspection-no-result']}))
+
+ def _record_batch_outcome(self,job,complete):
+  """Recover cautiously after three fully checked, published clean batches.
+
+  Incomplete/missing results retain the existing per-file attempts and shrinking
+  behavior. Recovery never changes a file's retry count or inspection status.
+  """
+  if not complete:
+   job['content_success_streak']=0;return
+  current=job.get('content_batch_limit',25)
+  if current>=25:
+   job['content_success_streak']=0;return
+  streak=job.get('content_success_streak',0)+1
+  if streak>=3:
+   job['content_batch_limit']=min(25,current+max(1,current//4));streak=0
+  job['content_success_streak']=streak
