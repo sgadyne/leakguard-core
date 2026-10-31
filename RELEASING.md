@@ -1,5 +1,39 @@
 # Release procedure
 
+## GitHub Actions policy
+
+`quick.yml` runs one Linux/Python 3.11 installed-wheel regression job for PRs
+targeting `main` and pushes to `main`. Ordinary feature-branch pushes do not
+build release artifacts. Superseded quick checks are cancelled. The check covers
+filter controls, encrypted vault safety, backfill refresh, publication failures,
+runtime identity, native observation-cache invalidation and desktop migration.
+It does not replace platform qualification or the full compatibility suite.
+
+`test.yml` retains the broad compatibility matrix as a manual workflow.
+`alpha-kit.yml` manually builds and qualifies one selected platform (or all three),
+including clean installation and prior-alpha upgrade/rollback; these are CLI kits,
+not desktop installers. Both workflows require an explicit Run workflow action.
+Once these workflow files are on the default branch, select the intended release
+branch/tag in the Actions UI. Record its resolved commit in the release receipt.
+Manual builds may test a candidate branch; a published release should identify a
+commit reachable from main. No commit-message markers or automatic publication.
+
+Desktop releases currently use `deploy/desktop/build_backend.py` and
+`deploy/desktop/build.py` on a native Mac with verified runtime/kit inputs.
+Do not claim the CLI workflow produces the desktop app. Moving those verified
+runtime inputs and native acceptance into a hosted Mac release job is follow-up
+work; it is not a prerequisite for using the already qualified local alpha.
+
+Publish only the exact archives that passed installation and identity checks,
+with source commit, SHA-256 sums, test scope and signing status. Retain temporary
+Actions artifacts for seven days; durable releases are a separate deliberate
+promotion. Developer ID signing/notarization remains required for the intended
+public Mac distribution. Do not upload private replay data, profiles or run logs.
+
+The 2026-10-31 Mac alpha is described by `docs/alpha-release-20261031.json`.
+Its app identifies product commit `0c2a394`; later CI/documentation commits do not
+change or relabel that qualified binary.
+
 ## Integrated CLI-first alpha
 
 Use the [CLI kit staging and install guide](docs/CLI-INSTALL.md). Build from a

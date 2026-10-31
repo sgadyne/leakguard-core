@@ -1,19 +1,31 @@
-name: Alpha deployment kits
-on: [push, pull_request]
+name: Build and qualify CLI release kits
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Target to build and qualify (CLI kits, not the desktop app)
+        required: true
+        default: macos-arm64
+        type: choice
+        options:
+          - macos-arm64
+          - linux-x86_64
+          - windows-x86_64
+          - all
+permissions:
+  contents: read
+concurrency:
+  group: cli-release-${{ github.ref }}-${{ inputs.platform }}
+  cancel-in-progress: false
 jobs:
   alpha-kit:
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: linux-x86_64
-          - os: macos-latest
-            target: macos-arm64
-          - os: windows-latest
-            target: windows-x86_64
-    runs-on: ${{ matrix.os }}
+        target: ${{ fromJSON(inputs.platform == 'all' && '["macos-arm64","linux-x86_64","windows-x86_64"]' || format('["{0}"]', inputs.platform)) }}
+    timeout-minutes: 45
+    runs-on: ${{ matrix.target == 'macos-arm64' && 'macos-15' || matrix.target == 'windows-x86_64' && 'windows-latest' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -60,9 +72,11 @@ jobs:
           name: alpha-upgrade-evidence-${{ matrix.target }}
           path: ${{ runner.temp }}/alpha-upgrade/receipt.json
           if-no-files-found: error
+          retention-days: 7
       - name: Retain exact target deployment artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: alpha-kit-${{ matrix.target }}
           path: ${{ runner.temp }}/alpha-dist/*
           if-no-files-found: error
+          retention-days: 7

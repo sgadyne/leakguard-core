@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-31",
+  "status": "qualified-ad-hoc-macos-arm64-alpha",
+  "product_commit": "0c2a394105e84aa2812ac819460d3f2cd68033ed",
+  "artifact": "Password-Buddy-Alpha-0c2a394-macos-arm64.zip",
+  "sha256": "ba2c30052e080628b7a7fdf0e452d040f5a08c2dcdaa70555b0dd8902610ddcf",
+  "packaged_tests": {
+    "passed": 74,
+    "subtests_passed": 68,
+    "source_resource_files_matched": 99
+  },
+  "native_qualification": [
+    "isolated upgrade and verified backup",
+    "encrypted vault preserved",
+    "restart resumes queued work",
+    "scheduled new-file detection during backfill",
+    "final-path launch and archive round-trip identity"
+  ],
+  "signing": {
+    "ad_hoc": true,
+    "developer_id": false,
+    "notarized": false
+  },
+  "limitations": [
+    "No exhaustive machine-coverage claim",
+    "No fresh Windows/Linux desktop qualification",
+    "No broad speedup claim",
+    "Public signing credentials unavailable"
+  ],
+  "live_profile_modified": false
+}

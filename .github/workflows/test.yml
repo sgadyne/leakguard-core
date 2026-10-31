@@ -1,5 +1,11 @@
-name: Synthetic checks
-on: [push, pull_request]
+name: Extended compatibility checks
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: extended-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     strategy:
@@ -9,6 +15,7 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
         python-version: ['3.11', '3.13']
         documents: [false, true]
+    timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -49,6 +56,7 @@ jobs:
       matrix:
         python-version: ['3.11', '3.13']
         documents: [false, true]
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -104,6 +112,7 @@ jobs:
             python-version: '3.11'
           - os: windows-latest
             python-version: '3.11'
+    timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -140,6 +149,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -186,6 +196,7 @@ jobs:
           python -I scripts/credential_acceptance.py --source-root "$GITHUB_WORKSPACE" --expected-sha "$CANDIDATE_SHA" --gitleaks "$GITHUB_WORKSPACE/.tools/gitleaks" --sealed-fixture "$GITHUB_WORKSPACE/tests/credentials_acceptance/development.json" --sealed-sha256 "$FIXTURE_SHA" --fixture-kind development --output-dir "$RUNNER_TEMP/credential-development" "${WHEEL_ARGS[@]}"
 
   broker-installed:
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
