@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "base": "4e50b588bcf6aa8c229279908c82b615ee767158",
   "created_utc": "2026-10-31T00:23:15.167583+00:00",
   "scope": "Point-in-time live observations, synthetic structural regressions; no population claim",
@@ -24,10 +24,14 @@
       "minimal_safe_regression": "sourcegraph repo then sha=hex40",
       "close_positive": "SOURCEGRAPH_ACCESS_TOKEN=hex40",
       "implementation": [
-        "rules.toml"
+        "src/leakguard_core/rules.toml"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "fixed",
+      "regression_evidence": [
+        "NativeObservedRegressionTests.test_sourcegraph_prefixes_and_local_legacy"
+      ],
+      "result_detail": "Prefixed formats remain global; bare hex requires local Sourcegraph credential field. Git SHA fields clear."
     },
     {
       "id": "LG-A002",
@@ -44,11 +48,17 @@
       "minimal_safe_regression": "password:(NSString *)password; password: string;",
       "close_positive": "password=\"string\"; refreshToken=\"synthetic\"",
       "implementation": [
-        "credential_syntax.py",
+        "src/leakguard_core/credential_syntax.py",
         "credential_detector.engine"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "fixed",
+      "regression_evidence": [
+        "SelectorPrefixGuards",
+        "SharedGrammarTests",
+        "NativeObservedRegressionTests.test_syntax_negative_pairs_and_literal_controls"
+      ],
+      "result_detail": "Bounded declaration prefixes skip types/selector parameters and resume before later assignments; no directory exclusions."
     },
     {
       "id": "LG-A003",
@@ -64,10 +74,15 @@
       "minimal_safe_regression": "password == other; password=nil; pwd=self.pwd; pwd=None):; password:%s template",
       "close_positive": "password=\"nil\"; password=\"true\"; password=\"%s\"; PWD=opaque.token",
       "implementation": [
-        "credential_syntax.py"
+        "src/leakguard_core/credential_syntax.py"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "fixed-with-documented-detector-difference",
+      "regression_evidence": [
+        "SharedGrammarTests",
+        "BooleanContextGuards"
+      ],
+      "result_detail": "Shared source grammar handles expressions/nulls/references; explicit quoted and env controls stay alias candidates. Gitleaks upstream global false-substring allowlist remains a native-only limitation; combined profile retains false credentials."
     },
     {
       "id": "LG-A004",
@@ -83,10 +98,15 @@
       "minimal_safe_regression": "Password: <type your password>",
       "close_positive": "password=\"<opaque synthetic>\"",
       "implementation": [
-        "credential_syntax.py"
+        "src/leakguard_core/credential_syntax.py"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "fixed",
+      "regression_evidence": [
+        "SharedGrammarTests",
+        "NativeObservedRegressionTests.test_syntax_negative_pairs_and_literal_controls"
+      ],
+      "result_detail": "Bounded complete prompt recognition precedes tokenization; arbitrary angle literal positive retained."
     },
     {
       "id": "LG-A005",
@@ -102,10 +122,15 @@
       "minimal_safe_regression": "password:true; password:!0",
       "close_positive": "password=\"true\"; password=\"!0\"",
       "implementation": [
-        "credential_syntax.py"
+        "src/leakguard_core/credential_syntax.py"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "fixed-with-documented-detector-difference",
+      "regression_evidence": [
+        "BooleanContextGuards",
+        "SharedGrammarTests"
+      ],
+      "result_detail": "Code booleans excluded; env true/false and quoted values retained by credential alias. Native inherited false allowlist limitation documented."
     },
     {
       "id": "LG-A006",
@@ -120,10 +145,15 @@
       "minimal_safe_regression": "manifest_version,key=<DER public key>",
       "close_positive": "manifest shared secret; private key; sibling api_key",
       "implementation": [
-        "artifact_context.py"
+        "src/leakguard_core/artifact_context.py"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "fixed",
+      "regression_evidence": [
+        "ArtifactContextTests.test_public_key_requires_structure_and_extension_manifest_schema",
+        "NativeObservedRegressionTests.test_manifest_and_localization_structures_with_sibling_secret"
+      ],
+      "result_detail": "Valid bounded RSA DER SPKI only in extension manifest; private/unknown structures and sibling secrets remain candidates."
     },
     {
       "id": "LG-A007",
@@ -139,10 +169,15 @@
       "minimal_safe_regression": "plist hex dictionary keys; localizationKey; \"Password\"=\"Password\"",
       "close_positive": "plist password string; api_key hex; password=\"Password\" in config",
       "implementation": [
-        "artifact_context.py"
+        "src/leakguard_core/artifact_context.py"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "fixed",
+      "regression_evidence": [
+        "ArtifactContextTests",
+        "SharedGrammarTests.test_localization_identity_needs_file_type_and_complete_mapping"
+      ],
+      "result_detail": "Exact structural labels only; actual Numbers same-version replay: 42 generic-api-key block to zero. XML password values and sibling secrets remain candidates; other classes qualified synthetically. Actual same-version Italian Citrix UTF-16 resource native decode: 1 literal-password block to zero."
     },
     {
       "id": "LG-A008",
@@ -158,11 +193,16 @@
       "minimal_safe_regression": "plist <data> encoding bplist binary with EAAA fragment",
       "close_positive": "Square EAAA token; base64 text password; kube private-key data",
       "implementation": [
-        "artifact_context.py",
+        "src/leakguard_core/artifact_context.py",
         "backends.py"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "reclassified-review",
+      "regression_evidence": [
+        "ArtifactContextTests.test_encoded_binary_review_lines_exclude_mixed_and_text_data",
+        "NativeObservedRegressionTests.test_square_binary_fragment_is_retained_review_and_real_token_blocks"
+      ],
+      "result_detail": "Known bounded binary plist/media payload interior lines remain review. Textual/mixed lines, legacy Square token and private-key data retained. Does not assert decoded content secret-free."
     },
     {
       "id": "LG-A009",
@@ -177,10 +217,14 @@
       "minimal_safe_regression": "safe synthetic long regex with AKIA shape",
       "close_positive": "actual AWS access key in same JSON sibling",
       "implementation": [
-        "artifact_context.py"
+        "src/leakguard_core/artifact_context.py"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "retained-uncertain-review",
+      "regression_evidence": [
+        "SignatureSchemaReviewTests"
+      ],
+      "result_detail": "Actual same-version DuckDuckGo resource: 30 AWS native observations block to review; all retained. Full regex container/schema and same-line complete lexical coverage required; unknown/literal siblings prevent downgrade."
     },
     {
       "id": "LG-A010",
@@ -199,7 +243,12 @@
         "private-local-replay"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "retained-versioned",
+      "regression_evidence": [
+        "Mac-only frozen replay",
+        "exact source reconstruction receipts"
+      ],
+      "result_detail": "19/19 unchanged original positives; 3 original version gaps. 185 negatives clear; 4 intentional literal block examples plus shortened Bearer review; 6 negative version gaps. Current controls separately frozen. No population precision/recall."
     },
     {
       "id": "LG-A011",
@@ -218,7 +267,86 @@
         "observation projection"
       ],
       "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
-      "result": "pending"
+      "result": "presentation-fixed-dedup-deferred",
+      "regression_evidence": [
+        "SignatureSchemaReviewTests.test_penpot_shaped_354_character_a256kw_jwe_is_a_positive",
+        "apps/buddy/tests/test_categories.py",
+        "npm build"
+      ],
+      "result_detail": "Safe entity/recognizer/version/score/span/static reason shown; 354-char A256KW/A256GCM synthetic JWE remains .99 positive. Native absolute columns untrusted; invasive line-only dedup change deferred."
     }
+  ],
+  "updated_utc": "2026-10-31T01:53:54.731861+00:00",
+  "source_logic_commit": "3694b2487237bafe48ad631bf32b53b95b6a2187",
+  "qualification": "Source regressions and isolated installed wheels; native macOS artifact gate reported separately.",
+  "additional_positive_guards": [
+    {
+      "structure": "accounts array with seven password literals",
+      "evidence": "SharedGrammarTests.test_nested_accounts_all_seven_precise_spans",
+      "result": "all seven distinct source spans retained; JSON container-consumption bug corrected"
+    },
+    {
+      "structure": "private-key-data kubeconfig",
+      "evidence": "SharedGrammarTests.test_kube_private_key_data_is_a_private_role; SignatureSchemaReviewTests.test_large_typed_private_key_data_keeps_precise_candidate_span",
+      "result": "versioned alias private role and bounded large encoded candidate span retained"
+    }
+  ],
+  "operational_cases": [
+    {
+      "id": "LG-O001",
+      "problem": "Remote batch limit shrank permanently after incomplete/missing results",
+      "result": "fixed",
+      "implementation": "discovery_remote.RemoteDiscovery._record_batch_outcome",
+      "evidence": [
+        "test_remote_batch_recovers_only_after_three_complete_batches",
+        "test_remote_failed_file_retry_semantics_survive_batch_recovery"
+      ],
+      "detail": "Three complete fetched/checked/published batches permit bounded growth to 25. Failure resets success streak; existing per-file attempts and explicit third-attempt gap retained."
+    },
+    {
+      "id": "LG-O002",
+      "problem": "Wide-directory prefix replay could consume each metadata slice",
+      "result": "fixed",
+      "implementation": "discovery.DiscoveryCoordinator._directory_stream",
+      "evidence": [
+        "test_wide_directory_prefix_exceeding_slice_budget_makes_forward_progress",
+        "test_reopened_coordinator_replays_durable_prefix_in_bounded_chunks",
+        "test_directory_mutation_discards_stream_and_revalidates_prefix",
+        "test_scope_ancestry_is_revalidated_before_cached_stream_resumes",
+        "test_interrupted_inventory_publication_cannot_advance_cached_cursor",
+        "test_directory_stream_cache_is_bounded_and_shutdown_closes_all"
+      ],
+      "detail": "At most eight scope-anchored metadata streams; durable cursor authoritative. Fresh no-follow ancestry checks on every resume; mutation/signature/generation/anchor change closes stream; restart prefix replay itself advances in bounded slices."
+    },
+    {
+      "id": "LG-O003",
+      "problem": "Distinct safe SSH probe/helper failures flattened into offline",
+      "result": "fixed",
+      "implementation": "scheduler._REMOTE_FAILURES and HostService._available",
+      "evidence": [
+        "test_ssh_probe_preserves_safe_cause_and_recovers_transiently",
+        "test_unknown_ssh_error_details_are_not_published"
+      ],
+      "detail": "Stable timeout/execution/output/helper/report causes survive with retrying status; unknown details sanitized. Transient retry and evidence invalidation retained. No SSH/VPN/service configuration changed."
+    },
+    {
+      "id": "LG-O004",
+      "problem": "Scheduled/manual metadata refresh waited for inventory completion",
+      "result": "fixed",
+      "implementation": "discovery._refresh_metadata; vault.queue_backfill_refresh; scheduler refresh_revision",
+      "evidence": [
+        "test_local_new_and_changed_metadata_precedes_remaining_backlog",
+        "test_remote_refresh_discovers_new_and_changed_metadata_with_backlog",
+        "test_scheduled_refresh_publishes_new_and_changed_findings_before_backfill_finishes",
+        "test_manual_scan_now_requests_refresh_for_active_managed_backfill"
+      ],
+      "detail": "Same generation refresh requeues completed directories while preserving unfinished cursors/pending files; actual local host/native publication before synthetic 100k-entry backlog finishes; remote metadata acceptance covered. Concurrent Scan now request survives copied slice publication. No whole-machine latency bound asserted."
+    }
+  ],
+  "explicit_limits": [
+    "Native Gitleaks global false-substring allowlist is pre-existing; combined alias profile guard passes; no broad provider catalogue replacement.",
+    "Encoded/schema uncertain findings remain review; no credential authentication performed.",
+    "Existing native line-only dedup remains; distinct precise alias fields and all locations preserved.",
+    "Native macOS packaged smoke remains a separate pending qualification gate when disk floor prevents packaging."
   ]
 }
