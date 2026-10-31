@@ -31,6 +31,7 @@ TESTS = (
     "packages/leakguard_host/tests/test_publication_and_protected_stores.py",
     "packages/leakguard_vault/tests/test_vault.py",
     "packages/leakguard_vault/tests/test_partitions.py",
+    "packages/leakguard_vault/tests/test_inventory_fairness.py",
     "apps/buddy/tests/test_categories.py",
     "apps/buddy/tests/test_beta_storage.py",
     "apps/buddy/tests/test_desktop.py",

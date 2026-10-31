@@ -28,6 +28,9 @@ _SCHEMA = '''
 CREATE TABLE IF NOT EXISTS inventory(path TEXT PRIMARY KEY,location TEXT NOT NULL,kind TEXT NOT NULL,signature TEXT,status TEXT NOT NULL,priority INTEGER NOT NULL,generation INTEGER NOT NULL,size INTEGER NOT NULL DEFAULT 0,cursor TEXT,detail TEXT);
 CREATE INDEX IF NOT EXISTS inventory_pending ON inventory(location,kind,status,priority,path);
 CREATE TABLE IF NOT EXISTS physical(identity TEXT PRIMARY KEY,generation INTEGER NOT NULL,path TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS inventory_admissions(path TEXT PRIMARY KEY,sequence INTEGER NOT NULL CHECK(typeof(sequence)='integer' AND sequence>=0));
+CREATE TABLE IF NOT EXISTS inventory_admission_clock(id INTEGER PRIMARY KEY CHECK(id=1),sequence INTEGER NOT NULL CHECK(typeof(sequence)='integer' AND sequence>=0));
+INSERT OR IGNORE INTO inventory_admission_clock VALUES(1,0);
 '''
 
 
@@ -99,6 +102,10 @@ class EncryptedPartitions:
         plain = self._read(item['base']) if item and item['base'] else None
         store = SQLiteScanStore.from_memory(plain, config=self.owner._store.config, material_key=self.owner._store._memory_material_key)
         try:
+            # A journal written by a newer runtime can reference auxiliary
+            # scheduling tables absent from an older encrypted base. Install
+            # the idempotent host schema before replaying those statements.
+            store.conn.executescript(_SCHEMA)
             if item:
                 for name in item['logs']:
                     commands = envelope.load_json(self._read(name))
@@ -107,7 +114,6 @@ class EncryptedPartitions:
                     for sql in commands:
                         store.conn.execute(sql)
                 store.conn.commit()
-            store.conn.executescript(_SCHEMA)
             # A partition cannot attach a plaintext database or invoke extension
             # loading, even if a future accidental SQL statement attempts it.
             store.conn.set_authorizer(lambda action, a, b, db, source: sqlite3.SQLITE_DENY if action in {sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH} else sqlite3.SQLITE_OK)
@@ -227,9 +233,17 @@ class EncryptedPartitions:
             if priority is not None:candidates.append((priority if prefer_priority else 0,(index-cursor)%256,index))
         for _,_,index in sorted(candidates)[:8]:
             store=self.get(f'i{index:02x}')
-            order='priority,path' if prefer_priority else 'path'
-            rows=store.conn.execute('SELECT * FROM inventory WHERE location=? AND kind=? AND status IN ('+placeholders+') ORDER BY '+order+' LIMIT ?',(location,kind,*states,limit)).fetchall()
-            if rows:return rows,(index+1)%256
+            order='inventory.priority,inventory.path' if prefer_priority else 'coalesce(admission.sequence,0),inventory.path'
+            rows=store.conn.execute('SELECT inventory.* FROM inventory LEFT JOIN inventory_admissions AS admission ON admission.path=inventory.path WHERE inventory.location=? AND inventory.kind=? AND inventory.status IN ('+placeholders+') ORDER BY '+order+' LIMIT ?',(location,kind,*states,limit)).fetchall()
+            if rows:
+                # Admission is scheduling evidence, never inspection evidence.
+                # Record priority selections too, so a repeatedly active row
+                # cannot monopolize the reserved fair slice in its hash bucket.
+                with store.conn:
+                    store.conn.execute('UPDATE inventory_admission_clock SET sequence=sequence+1 WHERE id=1')
+                    sequence=store.conn.execute('SELECT sequence FROM inventory_admission_clock WHERE id=1').fetchone()[0]
+                    store.conn.executemany('INSERT INTO inventory_admissions VALUES(?,?) ON CONFLICT(path) DO UPDATE SET sequence=excluded.sequence',[(row[0],sequence) for row in rows])
+                return rows,(index+1)%256
         return [],(cursor+8)%256
 
     def inventory_set(self, path, status, *, cursor=None, detail=None,signature=None):
