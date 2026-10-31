@@ -15,6 +15,20 @@ import sys
 import time
 
 
+def _unique_json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON key')
+        result[key] = value
+    return result
+
+
+def _client_supports_sessions():
+    # Windows select() cannot wait on subprocess pipes.
+    return os.name == 'posix' and callable(getattr(os, 'set_blocking', None))
+
+
 def _sig(info):
     return [info.st_dev, info.st_ino, info.st_mode, info.st_size,
             info.st_mtime_ns, info.st_ctime_ns, getattr(info, 'st_flags', 0)]
@@ -101,7 +115,7 @@ def _remote_main():
                 break
             if len(raw) > 262145 or not raw.endswith(b'\n'):
                 raise ValueError()
-            req = json.loads(raw)
+            req = json.loads(raw, object_pairs_hook=_unique_json_pairs)
             if req.get('op') != 'enumerate' or type(req.get('limit', 1000)) is not int or not 1 <= req.get('limit', 1000) <= 1000:
                 raise ValueError()
             fixed = (req.get('root'), req.get('path'), req.get('expected'))
@@ -273,6 +287,11 @@ class DirectorySessions:
             if cancel is not None and cancel():
                 self._discard(key)
                 raise HostError('cancelled')
+            if not _client_supports_sessions():
+                self._discard(key)
+                from .ssh_locations import SSHLocations
+                result = SSHLocations(runner=runner).request(target, req, python=python, cancel=cancel)
+                return {**result, 'session_capability': 'client-unsupported'}
             now = time.monotonic()
             if self._unsupported.get(key, 0) > now:
                 from .ssh_locations import SSHLocations
@@ -349,7 +368,7 @@ class DirectorySessions:
                             if not output.endswith(b'\n') or output.count(b'\n') != 1:
                                 raise HostError('remote-report-invalid')
                             break
-                result = json.loads(output)
+                result = json.loads(output, object_pairs_hook=_unique_json_pairs)
                 if type(result) is not dict or result.get('version') != 1:
                     raise HostError('remote-report-invalid')
                 if result.get('status') == 'session-unsupported':

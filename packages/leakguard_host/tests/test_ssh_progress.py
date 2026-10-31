@@ -1,4 +1,5 @@
 """Synthetic reproducer for the stateless SSH enumeration deadline."""
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -336,5 +337,94 @@ def test_completed_session_exits_normally_and_is_reaped(tmp_path):
             if page['complete']:
                 break
         assert not sessions._sessions and process.returncode == 0
+    finally:
+        sessions.close()
+
+
+def test_non_posix_client_uses_stateless_transport_without_starting_session(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from leakguard_host import ssh_directory_session as module
+
+    class OneShotRunner(LocalRunner):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def _command(self, target, python, script, *, isolated):
+            self.calls += 1
+            assert 'def _remote_main()' not in script
+            return super()._command(target, python, script, isolated=isolated)
+
+    root = tmp_path / 'synthetic'
+    expected = make_files(root)
+    runner = OneShotRunner()
+    sessions = module.DirectorySessions()
+    # Isolate the simulated platform attribute from the real os module used
+    # by subprocess and pathlib. This is not native Windows qualification.
+    monkeypatch.setattr(module, 'os', SimpleNamespace(name='nt'))
+    try:
+        first = call(sessions, root, runner=runner, limit=2)
+        assert first['session_capability'] == 'client-unsupported'
+        second = call(sessions, root, cursor_for(first), runner=runner, limit=2)
+        assert second['session_capability'] == 'client-unsupported'
+        assert {e['name'] for e in first['entries']}.isdisjoint(e['name'] for e in second['entries'])
+        assert all(e['name'] in expected for e in first['entries'] + second['entries'])
+        assert runner.calls == 2 and not sessions._sessions
+    finally:
+        sessions.close()
+
+
+def test_session_worker_rejects_duplicate_request_keys(tmp_path):
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    request = json.dumps({'op': 'enumerate', 'root': str(root), 'path': str(root), 'limit': 1000})
+    request = request.replace('"op": "enumerate"', '"op": "enumerate", "op": "enumerate"', 1)
+    assert json.loads(request)['op'] == 'enumerate'
+    script = (Path(__file__).resolve().parents[1] / 'src/leakguard_host/ssh_directory_session.py').read_text()
+    runner = LocalRunner()
+    process = subprocess.run(runner._command('synthetic', '/usr/bin/python3', script, isolated=True),
+                             input=(request + '\n').encode(),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=10)
+    assert json.loads(process.stdout)['status'] == 'unavailable'
+
+
+def test_session_client_rejects_duplicate_response_keys(tmp_path):
+    from leakguard_host.errors import HostError
+    from leakguard_host.ssh_directory_session import DirectorySessions
+
+    fields = ('st_dev', 'st_ino', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_flags')
+    payload = json.dumps({'version': 1, 'status': 'available', 'identity': None,
+                          'info': {key: 1 for key in fields}, 'entries': [], 'position': 0,
+                          'prefix': hashlib.sha256().hexdigest(), 'stable': True, 'complete': True})
+    payload = payload.replace('"version": 1', '"version": 1, "version": 1', 1)
+    assert json.loads(payload)['status'] == 'available'
+
+    class DuplicateRunner(LocalRunner):
+        def _command(self, target, python, script, *, isolated):
+            code = f'import sys;sys.stdin.readline();print({payload!r},flush=True)'
+            return [sys.executable, '-I', '-S', '-B', '-c', code]
+
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    sessions = DirectorySessions()
+    try:
+        with pytest.raises(HostError) as error:
+            call(sessions, root, runner=DuplicateRunner())
+        assert error.value.code == 'remote-report-invalid' and not sessions._sessions
+    finally:
+        sessions.close()
+
+
+def test_posix_client_without_nonblocking_pipe_api_uses_stateless_transport(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from leakguard_host import ssh_directory_session as module
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    sessions = module.DirectorySessions()
+    monkeypatch.setattr(module, 'os', SimpleNamespace(name='posix'))
+    try:
+        page = call(sessions, root, limit=2)
+        assert page['session_capability'] == 'client-unsupported'
+        assert page['entries'] and not sessions._sessions
     finally:
         sessions.close()
