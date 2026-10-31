@@ -39,6 +39,7 @@ class PreparedBackend:
     directory: Path
     rules: Path
     cache_identity: str | None = None
+    bundled_policy: bool = False
 
 
 def _pin_executable(executable, scratch, check):
@@ -102,7 +103,8 @@ def prepare(*, binary=None, rules=None, check=None, cache_native=False):
                         if binary_id is not None else None)
             if check is not None:
                 check()
-            yield PreparedBackend(pinned, directory, staged_config, identity)
+            yield PreparedBackend(pinned, directory, staged_config, identity,
+                                  closure.files[0][1] == Path(__file__).with_name('rules.toml').read_bytes() and not closure.external)
     except RuleConfigError:
         raise BackendError('configuration-invalid') from None
 
@@ -110,7 +112,7 @@ def prepare(*, binary=None, rules=None, check=None, cache_native=False):
 def detect(text: str, *, binary=None, rules=None, timeout=45,
            max_findings=100_000, cancel=None, prepared=None,
            worker_policy='strict', cache_scope=None, cache_identity=None,
-           cache_domain=None) -> tuple[BackendFinding, ...]:
+           cache_domain=None, logical_path='') -> tuple[BackendFinding, ...]:
     if type(text) is not str or type(max_findings) is not int or max_findings <= 0:
         raise BackendError('detector-output-invalid')
     started = time.monotonic()
@@ -126,9 +128,16 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
             return detect(text, timeout=max(0.001, timeout - (time.monotonic() - started)),
                           max_findings=max_findings, cancel=cancel, prepared=setup,
                           worker_policy=worker_policy, cache_scope=cache_scope,
-                          cache_identity=cache_identity, cache_domain=cache_domain)
+                          cache_identity=cache_identity, cache_domain=cache_domain, logical_path=logical_path)
     if type(prepared) is not PreparedBackend:
         raise BackendError('configuration-invalid')
+    artifact = None
+    if prepared.bundled_policy:
+        from .artifact_context import inspect_artifact, mask_artifact_labels
+        artifact = inspect_artifact(text)
+        text = mask_artifact_labels(text, artifact)
+        from .credential_syntax import mask_nonliteral_labels
+        text = mask_nonliteral_labels(text, logical_path=logical_path)
     payload = text.encode('utf-8')
     if len(payload) > 80_000_000:
         raise BackendError('detector-failed')
@@ -139,12 +148,12 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
     def compute():
         check_budget()
         return _detect(text, payload, prepared, timeout=max(0.001, timeout - (time.monotonic() - started)),
-                       max_findings=max_findings, cancel=cancel, worker_policy=worker_policy)
+                       max_findings=max_findings, cancel=cancel, worker_policy=worker_policy, artifact=artifact)
     if not eligible:
         return compute()
     from ._result_cache import OBSERVATIONS
     key = hashlib.sha256(json.dumps(['native-observations-1', cache_identity,
-            prepared.cache_identity, worker_policy, max_findings, len(payload),
+            prepared.cache_identity, worker_policy, max_findings, logical_path, len(payload),
             hashlib.sha256(payload).hexdigest()], separators=(',', ':')).encode()).hexdigest()
     def rows():
         return tuple((item.rule, item.start_line, item.end_line, item.severity) for item in compute())
@@ -154,7 +163,7 @@ def detect(text: str, *, binary=None, rules=None, timeout=45,
     return tuple(BackendFinding(*item) for item in cached)
 
 
-def _detect(text, payload, prepared, *, timeout, max_findings, cancel, worker_policy):
+def _detect(text, payload, prepared, *, timeout, max_findings, cancel, worker_policy, artifact=None):
     command = [prepared.executable, 'stdin', '--config', str(prepared.rules), '--redact=100',
                '--ignore-gitleaks-allow', '--no-banner', '--no-color', '--log-level', 'fatal',
                '--report-format', 'json', '--report-path', '-', '--timeout', str(max(1, math.ceil(timeout)))]
@@ -193,7 +202,9 @@ def _detect(text, payload, prepared, *, timeout, max_findings, cancel, worker_po
                     or type(first) is not int or type(last) is not int
                     or not 1 <= first <= last <= line_count):
                 raise ValueError
-            findings.append(BackendFinding(rule, first, last))
+            from .artifact_context import native_severity
+            severity = native_severity(rule, first, last, artifact) if artifact is not None else 'block'
+            findings.append(BackendFinding(rule, first, last, severity))
         return tuple(findings)
     except BackendError:
         raise

@@ -10,7 +10,7 @@ from .http import scan_http
 
 API_VERSION = 2
 MANIFEST = PluginManifest(
-    id='credential-detector', implementation_version='0.1.0a2', kind='detector',
+    id='credential-detector', implementation_version='0.1.0a3', kind='detector',
     rules=tuple(RuleSpec(rule, 'review' if rule == 'credential-http-bearer' else 'block') for rule in (*RULES.values(), 'credential-http-basic', 'credential-http-bearer')),
     formats=(), part_kinds=(), options_schema=OptionSchema(),
     dependencies=(DistributionSpec('leakguard-credential-detector'), DistributionSpec('leakguard-core')), deterministic=True, external_state='none', result_schema=2,
@@ -24,8 +24,7 @@ class CredentialDetector:
         self.pack = load_packs('credential_detector.resources', DEFAULT_RESOURCES)
 
     def detect(self, text: str, context: DetectionContext):
-        del context
-        spans = sorted((*scan_fields(text, self.pack), *scan_http(text), *scan_contextual(text)), key=lambda s: (s.start, s.end, s.rule))
+        spans = sorted((*scan_fields(text, self.pack, logical_path=context.logical_path), *scan_http(text), *scan_contextual(text)), key=lambda s: (s.start, s.end, s.rule))
         # Calculate line numbers in one pass instead of repeatedly scanning input.
         line, position = 1, 0
         for span in spans:
@@ -34,7 +33,7 @@ class CredentialDetector:
             yield NewFinding(rule=span.rule, line=line, severity=span.severity, analysis=AnalysisMetadata(
                 schema_version=1, start=span.start, end=span.end, entity_type=span.rule,
                 score=None, recognizer_id=span.rule, analyzer_id='credential-detector',
-                analyzer_version='0.1.0a2', model_id='none'))
+                analyzer_version='0.1.0a3', model_id='none'))
 
 
 def create_plugin(options: Mapping[str, object]) -> CredentialDetector:

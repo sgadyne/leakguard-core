@@ -21,6 +21,11 @@
       "name": "signing_private_key",
       "role": "private-key",
       "group": "key-material"
+    },
+    {
+      "name": "client_key_data",
+      "role": "private-key",
+      "group": "key-material"
     }
   ]
 }

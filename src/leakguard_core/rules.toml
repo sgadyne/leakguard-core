@@ -53,7 +53,7 @@ entropy = 0
 keywords = ["password", "passwd", "passphrase", "pwd"]
   [[rules.allowlists]]
   regexTarget = "secret"
-  regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*(?::=|[:=])\s*["']?(?:\$\{[a-z_][a-z0-9_]*\}?|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password|change[-_ ]?me|replace[-_ ]?me|not[-_ ]?a[-_ ]?secret|test|none|null|undefined)["']?$''']
+  regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*(?::=|[:=])\s*["']?(?:\$\{[a-z_][a-z0-9_]*\}?|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password|change[-_ ]?me|replace[-_ ]?me|not[-_ ]?a[-_ ]?secret|test)["']?$''']
   [[rules.allowlists]]
   regexTarget = "secret"
   regexes = ['''(?i)^["']?(?:password|passwd|passphrase|pwd|user[_-]?password|db[_-]?password|login[_-]?password|smtp[_-]?password|service[_-]?password)["']?\s*(?::=|[:=])\s*(?:os\.environ\s*\[\s*["']|os\.environ\.get\s*\(\s*["']|os\.getenv\s*\(\s*["']|process\.env\.[a-z_][a-z0-9_]*|get_password\s*\(\))["']?$''']
@@ -78,3 +78,12 @@ keywords = ["password", "passwd", "pwd"]
   [[rules.allowlists]]
   regexTarget = "secret"
   regexes = ['''(?i)^(?:key|name)\s*=\s*["'](?:[^"'\r\n]{0,40}[_:.])?(?:password|passwd|pwd)["']\s+value\s*=\s*["'](?:\$\{[a-z_][a-z0-9_]*\}|%[a-z_][a-z0-9_]*%|<password>|<redacted>|placeholder-value|your-password|example-password|change[-_ ]?me|replace[-_ ]?me|not[-_ ]?a[-_ ]?secret|test|none|null|undefined)["']$''']
+
+
+[[rules]]
+id = "sourcegraph-access-token"
+description = "Sourcegraph prefixed token or locally assigned legacy credential"
+regex = '''(?i)\b((?:sgp_(?:[a-f0-9]{16}|local)_[a-f0-9]{40}|sgp_[a-f0-9]{40}|sourcegraph[_. -]?(?:access[_. -]?)?token["']?[ \t]*[:=][ \t]*["']?[a-f0-9]{40}|sourcegraph["']?[ \t]*[:=][ \t]*\{[ \t]*["']?(?:access[_.-]?)?token["']?[ \t]*:[ \t]*["']?[a-f0-9]{40})\b)(?:[\x60'"\s;},]|\\[nr]|$)'''
+secretGroup = 1
+entropy = 3
+keywords = ["sgp_", "sourcegraph"]

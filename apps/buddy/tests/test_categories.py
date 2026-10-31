@@ -20,6 +20,24 @@ class FindingCategoryTests(unittest.TestCase):
             with self.subTest(rule=rule):
                 self.assertEqual(_finding_category(rule), category)
 
+    def test_jose_entity_category_and_value_free_provenance_survive_api(self):
+        from leakguard_buddy.backend import BuddyBackend
+        analysis = dict(schema_version=1,start=0,end=354,entity_type="JOSE_COMPACT_JWE",score=.99,
+                        recognizer_id="LeakGuardJOSECompactRecognizer",analyzer_id="presidio",
+                        analyzer_version="2.2.365",model_id="pattern-only")
+        self.assertEqual(_finding_category("presidio-entity", analysis), "credentials")
+        self.assertEqual(_finding_category("presidio-entity", {"entity_type":"EMAIL_ADDRESS"}), "other")
+        finding = {"id":"synthetic-jose", "rule":"presidio-entity", "analysis":analysis,
+                   "source":{"path":"/synthetic/auth.json"}, "severity":"review"}
+        store = SimpleNamespace(query_findings_page=lambda **kw:SimpleNamespace(rows=[finding],next_cursor=None),
+                                get_annotation=lambda fid:{"finding_id":fid,"state":"unreviewed"})
+        backend = object.__new__(BuddyBackend);backend._lock=threading.RLock();backend._observation_store=store
+        backend._host=SimpleNamespace(status=lambda:{},sources=lambda:[],jobs=lambda:[])
+        rows=backend.findings({"category":"credentials"})["findings"]
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]["analysis"],analysis)
+        self.assertEqual(rows[0]["rule"],"presidio-entity")
+
     def test_non_string_rule_is_not_interpreted_as_a_category(self):
         self.assertEqual(_finding_category(None), "other")
 

@@ -243,5 +243,12 @@
     "rule": "credential-password",
     "positive": "pin=\"x\"",
     "negative": "pin_suffix=\"x\""
+  },
+  {
+    "group": "key-material",
+    "name": "client_key_data",
+    "rule": "credential-private-key",
+    "positive": "client_key_data=\"x\"",
+    "negative": "prefixclient_key_datasuffix=\"x\""
   }
 ]

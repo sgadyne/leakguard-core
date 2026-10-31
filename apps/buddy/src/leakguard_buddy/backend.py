@@ -443,7 +443,7 @@ class BuddyBackend:
             page = store.query_findings_page(state=state, profile=profile, limit=limit, cursor=next_store_cursor)
             for raw in page.rows:
                 row = dict(raw)
-                row["category"] = _finding_category(row.get("rule", ""))
+                row["category"] = _finding_category(row.get("rule", ""), row.get("analysis"))
                 row["annotation"] = store.get_annotation(row.get("id", ""))
                 source = row.get("source") or {}
                 path = source.get("path", "") if type(source) is dict else ""
@@ -981,9 +981,12 @@ def _repository_key(path: str) -> str:
     return hashlib.sha256(os.path.normcase(os.path.abspath(path)).encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def _finding_category(rule: Any) -> str:
+def _finding_category(rule: Any, analysis: Any = None) -> str:
     """Map stable detector rule IDs to UI categories without inspecting values."""
     value = rule if type(rule) is str else ""
+    if (value == "presidio-entity" and type(analysis) is dict and
+            analysis.get("entity_type") in {"JOSE_COMPACT_JWE", "JOSE_COMPACT_JWS_CANDIDATE", "JOSE_COMPACT_UNVERIFIED"}):
+        return "credentials"
     if value.startswith("pii-contact-"):
         return "contact"
     if value.startswith("pii-financial-"):

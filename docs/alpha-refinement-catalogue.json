@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "base": "4e50b588bcf6aa8c229279908c82b615ee767158",
+  "created_utc": "2026-10-31T00:23:15.167583+00:00",
+  "scope": "Point-in-time live observations, synthetic structural regressions; no population claim",
+  "layers": [
+    "alias role catalogue",
+    "literal/reference grammar",
+    "credential format validators",
+    "artifact/schema interpretation",
+    "presentation/provenance"
+  ],
+  "cases": [
+    {
+      "id": "LG-A001",
+      "credential_role": "access-token",
+      "context": "Sourcegraph bare hex40 vs local assignment",
+      "originating_rules": [
+        "sourcegraph-access-token"
+      ],
+      "label": "confirmed",
+      "reason": "Global keyword admitted Git object IDs",
+      "desired_disposition": "override native rule: sgp_ always; legacy bare local Sourcegraph credential assignment only",
+      "minimal_safe_regression": "sourcegraph repo then sha=hex40",
+      "close_positive": "SOURCEGRAPH_ACCESS_TOKEN=hex40",
+      "implementation": [
+        "rules.toml"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A002",
+      "credential_role": "password/access-token",
+      "context": "Objective-C, Swift, TypeScript declarations",
+      "originating_rules": [
+        "literal-password",
+        "credential-password",
+        "credential-access-token"
+      ],
+      "label": "confirmed",
+      "reason": "Type annotation or selector parameter is syntax",
+      "desired_disposition": "shared bounded declaration classification",
+      "minimal_safe_regression": "password:(NSString *)password; password: string;",
+      "close_positive": "password=\"string\"; refreshToken=\"synthetic\"",
+      "implementation": [
+        "credential_syntax.py",
+        "credential_detector.engine"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A003",
+      "credential_role": "password",
+      "context": "Ruby/Python reference/null/comparison/template grammar",
+      "originating_rules": [
+        "literal-password",
+        "credential-password"
+      ],
+      "label": "confirmed",
+      "reason": "Equality, null default trailing syntax, references and format template are not values",
+      "desired_disposition": "shared bounded expression grammar, context-scoped reference recognition",
+      "minimal_safe_regression": "password == other; password=nil; pwd=self.pwd; pwd=None):; password:%s template",
+      "close_positive": "password=\"nil\"; password=\"true\"; password=\"%s\"; PWD=opaque.token",
+      "implementation": [
+        "credential_syntax.py"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A004",
+      "credential_role": "password",
+      "context": "Multiword prompt placeholder",
+      "originating_rules": [
+        "literal-password",
+        "credential-password"
+      ],
+      "label": "confirmed",
+      "reason": "Tokenizer cut prompt before closing angle",
+      "desired_disposition": "recognize bounded prompt grammar before tokenization",
+      "minimal_safe_regression": "Password: <type your password>",
+      "close_positive": "password=\"<opaque synthetic>\"",
+      "implementation": [
+        "credential_syntax.py"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A005",
+      "credential_role": "password",
+      "context": "JS option boolean expression",
+      "originating_rules": [
+        "literal-password",
+        "credential-password"
+      ],
+      "label": "confirmed",
+      "reason": "Unquoted boolean or minified boolean expression",
+      "desired_disposition": "typed code value classification",
+      "minimal_safe_regression": "password:true; password:!0",
+      "close_positive": "password=\"true\"; password=\"!0\"",
+      "implementation": [
+        "credential_syntax.py"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A006",
+      "credential_role": "api-key",
+      "context": "Browser extension manifest DER SubjectPublicKeyInfo",
+      "originating_rules": [
+        "generic-api-key"
+      ],
+      "label": "confirmed",
+      "reason": "Valid public key structure is public material",
+      "desired_disposition": "schema-scoped DER public key recognition; exact scalar span only",
+      "minimal_safe_regression": "manifest_version,key=<DER public key>",
+      "close_positive": "manifest shared secret; private key; sibling api_key",
+      "implementation": [
+        "artifact_context.py"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A007",
+      "credential_role": "api-key/password",
+      "context": "XML structural keys, JSON localizationKey, .strings label mapping",
+      "originating_rules": [
+        "generic-api-key",
+        "literal-password"
+      ],
+      "label": "confirmed",
+      "reason": "Structural names and UI localization are not alias credential values",
+      "desired_disposition": "typed scalar role from schema, no path exclusion",
+      "minimal_safe_regression": "plist hex dictionary keys; localizationKey; \"Password\"=\"Password\"",
+      "close_positive": "plist password string; api_key hex; password=\"Password\" in config",
+      "implementation": [
+        "artifact_context.py"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A008",
+      "credential_role": "access-token/api-key",
+      "context": "plist data base64 NSKeyedArchiver and binary/media payload",
+      "originating_rules": [
+        "square-access-token",
+        "generic-api-key"
+      ],
+      "label": "confirmed-fragments-ambiguous-content",
+      "reason": "Substring tokens in binary encoding; decoded content can still contain secrets",
+      "desired_disposition": "bounded decoded type classification, initially review ambiguous encoded payload matches; preserve source lines",
+      "minimal_safe_regression": "plist <data> encoding bplist binary with EAAA fragment",
+      "close_positive": "Square EAAA token; base64 text password; kube private-key data",
+      "implementation": [
+        "artifact_context.py",
+        "backends.py"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A009",
+      "credential_role": "access-key",
+      "context": "Long JSON regex signatures in malware filter set",
+      "originating_rules": [
+        "aws-access-token"
+      ],
+      "label": "uncertain",
+      "reason": "AWS-shaped strings in signatures are likely noise but not fully adjudicated",
+      "desired_disposition": "retain review if proven regex container; no global regex exemption",
+      "minimal_safe_regression": "safe synthetic long regex with AKIA shape",
+      "close_positive": "actual AWS access key in same JSON sibling",
+      "implementation": [
+        "artifact_context.py"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A010",
+      "credential_role": "mixed",
+      "context": "Frozen original private baseline",
+      "originating_rules": [
+        "mixed"
+      ],
+      "label": "confirmed-versioned",
+      "reason": "Five references clear; four literal examples intentionally retained; one Bearer review",
+      "desired_disposition": "version-aware Mac-only replay; unchanged identities required",
+      "minimal_safe_regression": "five reference reproductions",
+      "close_positive": "four literal examples and all frozen positive structures",
+      "implementation": [
+        "tests",
+        "private-local-replay"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    },
+    {
+      "id": "LG-A011",
+      "credential_role": "compact-jwe",
+      "context": "Presidio JOSE entity presentation",
+      "originating_rules": [
+        "presidio-entity/JOSE_COMPACT_JWE"
+      ],
+      "label": "confirmed-positive",
+      "reason": "Underlying structural entity hidden by generic rule display",
+      "desired_disposition": "expose existing value-free analysis metadata; dedup deferred without native offsets",
+      "minimal_safe_regression": "generic rule obscures entity label",
+      "close_positive": "A256KW/A256GCM five-part compact token",
+      "implementation": [
+        "Screens.tsx",
+        "observation projection"
+      ],
+      "provenance": "control/BRIEF.txt; live-sweep/review-20261030-evening.json and latest-observation.json",
+      "result": "pending"
+    }
+  ]
+}

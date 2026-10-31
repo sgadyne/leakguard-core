@@ -1461,7 +1461,7 @@ class ScanService:
                 issues.append(m.CoverageIssue(m.ErrorCode.CANCELLED if cancel and cancel() else m.ErrorCode.BUDGET_EXHAUSTED, source, part.part_id, True))
                 break
             try:
-                detected = backends.detect(part.text, binary=self.binary, rules=self.rules, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), max_findings=limits.max_findings, cancel=cancel, prepared=prepared, worker_policy=self.config.get('worker_policy', 'strict'), cache_scope=self._observation_scope if use_cache else None, cache_identity=self._runtime + ':' + policy_id, cache_domain=cache_domain)
+                detected = backends.detect(part.text, binary=self.binary, rules=self.rules, timeout=min(limits.detector_timeout_seconds, max(0.001, deadline - time.monotonic())), max_findings=limits.max_findings, cancel=cancel, prepared=prepared, logical_path=source.path, worker_policy=self.config.get('worker_policy', 'strict'), cache_scope=self._observation_scope if use_cache else None, cache_identity=self._runtime + ':' + policy_id, cache_domain=cache_domain)
                 for item in detected:
                     if not admit_finding(part):
                         break

@@ -5,6 +5,7 @@ import re
 import unicodedata
 from .aliases import AliasPack, normalize_key
 from .types import CredentialSpan
+from leakguard_core.credential_syntax import nonliteral_reason
 
 RULES = {
     'password': 'credential-password',
@@ -36,7 +37,7 @@ _CODE_OBJECT_CONTEXT = re.compile(
     r'|(?:const|let|var)[ \t]+[A-Za-z_$][\w$]*[ \t]*=[ \t]*)\{[^{}]{0,2048}\Z', re.ASCII)
 
 
-def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
+def scan_fields(text: str, pack: AliasPack, *, logical_path: str = '') -> tuple[CredentialSpan, ...]:
     """Scan flat assignments, returning offsets over literal value content only.
 
     Quoted values are literals except pure documented placeholder forms;
@@ -86,6 +87,11 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
         start = match.end()
         cursor = start
         if start >= len(text):
+            continue
+        # Unknown containers contain fields; unlike opaque scalars they must
+        # not consume their first child up to the next comma.
+        if role is None and text[start] in '{[':
+            cursor = start + 1
             continue
         quoted = text[start] in "\"'"
         if quoted:
@@ -144,11 +150,33 @@ def scan_fields(text: str, pack: AliasPack) -> tuple[CredentialSpan, ...]:
                 continue
             if raw.lower() in {'null', 'none', '~', 'true', 'false'} or _REFERENCE.fullmatch(raw) or _PLACEHOLDER.fullmatch(raw):
                 continue
+        operator = ':' if text[match.start():match.end()].rstrip().endswith(':') else '='
+        if nonliteral_reason(text, key, match.start(), start, end, quoted=quoted,
+                key_quoted=bool(match.group('double') or match.group('single')),
+                operator=operator, logical_path=logical_path):
+            # A parameter declaration can be followed by a body on the same
+            # line. Resume after its type, so actual body assignments survive.
+            if operator == ':' and not quoted:
+                import re as _declaration_re
+                declared = _declaration_re.match(r'(?:string|number|boolean|unknown|any|never|void|String|NSString|Boolean|Bool|Data)(?:[?!]|\[\])?', text[start:end])
+                if declared:
+                    cursor = start + declared.end()
+            continue
         if end > start:
             if len(result) >= MAX_SPANS:
                 raise ValueError('field finding limit exceeded')
             result.append(CredentialSpan(RULES[role], start, end))
-    return tuple(result)
+    from leakguard_core.artifact_context import inspect_artifact
+    for key, start, end in inspect_artifact(text).plist_fields:
+        try:
+            role = pack.aliases.get(normalize_key(key))
+        except ValueError:
+            role = None
+        if role is not None:
+            if len(result) >= MAX_SPANS:
+                raise ValueError('field finding limit exceeded')
+            result.append(CredentialSpan(RULES[role], start, end))
+    return tuple(sorted(result, key=lambda span: (span.start, span.end, span.rule)))
 
 
 _PROSE = re.compile(r'''(?im)\b(?:password|passphrase|pin)[ \t]+is[ \t]+(?P<value>"[^"\r\n]{1,4096}"|'[^'\r\n]{1,4096}'|[^\s\r\n]{1,4096})''')
