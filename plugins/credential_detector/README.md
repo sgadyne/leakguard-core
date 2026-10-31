@@ -133,3 +133,13 @@ grouping is performed without trustworthy source spans.
 
 Native preparation applies only to the exact bundled rule closure bytes.
 Different caller-supplied policies receive admitted input bytes unchanged.
+
+
+The inherited Gitleaks8.30.1 global allowlist contains the ungrouped expression
+`(?i)^true|false|null$`; its `false` alternative can suppress a native finding
+containing that word. This upstream provider-policy behavior is unchanged here.
+The bundled credential alias detector retains explicit quoted literals and
+unquoted environment strings such as `password=false`, with precise spans, so
+the combined credentials profile keeps these fields visible. Native-only
+provider candidates containing that substring remain an upstream limitation;
+this candidate makes no whole-machine false-negative-rate claim.

@@ -294,5 +294,23 @@ class BooleanContextGuards(unittest.TestCase):
             self.assertEqual([text[x.start:x.end] for x in scan_fields(text,pack,logical_path='secrets.env')],[word])
             self.assertEqual(mask_nonliteral_labels(text,logical_path='secrets.env'),text)
             self.assertEqual(scan_fields(text,pack,logical_path='options.toml'),())
-            if os.environ.get('LEAKGUARD_GITLEAKS'):
+            if word == 'true' and os.environ.get('LEAKGUARD_GITLEAKS'):
                 self.assertIn('literal-password',{x.rule for x in backends.detect(text,binary=os.environ['LEAKGUARD_GITLEAKS'],logical_path='secrets.env')})
+
+
+    @unittest.skipUnless(os.environ.get('LEAKGUARD_GITLEAKS'),'pinned backend required')
+    def test_combined_profile_preserves_literals_hidden_by_upstream_false_allowlist(self):
+        from leakguard_core.api import Scanner, ScanConfig
+        from leakguard_core.models import BytesInput, ScanLimits, ScanPolicy
+        config=ScanConfig.from_mapping({'gitleaks_executable':os.environ['LEAKGUARD_GITLEAKS'],
+            'plugins':[{'module':'credential_detector.plugin','options':{}}]})
+        inputs=[BytesInput(b'password=true','true.env'),BytesInput(b'password=false','false.env'),
+                BytesInput(b'password="false"','quoted.py')]
+        with Scanner.open(config=config) as scanner:
+            report=scanner.scan(inputs,policy=ScanPolicy.inventory(),limits=ScanLimits(20,3),use_cache=False)
+        self.assertTrue(report.coverage.required_complete)
+        self.assertEqual(len(report.results),3)
+        for result in report.results:
+            exact=[f for f in result.findings if f.rule=='credential-password' and f.analysis is not None]
+            self.assertEqual(len(exact),1)
+            self.assertEqual(exact[0].analysis.end-exact[0].analysis.start,4 if result.source.path=='true.env' else 5)
