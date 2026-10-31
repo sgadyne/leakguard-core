@@ -41,7 +41,7 @@ const messages: Record<string, string> = {
   "repository-not-found": "Choose an existing Git repository folder.", "hook-directory-shared": "Git uses a shared hooks folder; Buddy will not change hooks outside this repository.",
   "plugin-review-required": "Confirm that you reviewed and trust this plugin before installing it.",
   "extension-runtime-inspection-failed": "Buddy's private runtime is unavailable.",
-  "scan-progress-stalled": "The scan made no progress within its limits. Select a smaller folder or adjust scan limits before resuming.",
+  "scan-progress-stalled": "Some items remain uninspected because the scan could not make progress within its access or resource limits. Review the coverage gaps and retry when those limits are resolved.",
   "scheduler-failed": "The background scheduler stopped unexpectedly. Retry or restart Password Buddy.",
   "worker-still-running": "The scan worker is still stopping. Wait for it to finish before retrying.",
   "request-failed": "The local request failed. No secret or exception details were saved."

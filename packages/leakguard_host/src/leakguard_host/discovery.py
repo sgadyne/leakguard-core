@@ -11,7 +11,7 @@ import hashlib,json,os,stat,time
 from pathlib import Path
 from types import SimpleNamespace
 from contextlib import contextmanager
-from leakguard_core.api import Scanner, ScanConfig
+from leakguard_core.api import Scanner, ScanConfig, RuntimeSession
 from leakguard_core.models import ScanLimits,ScanPolicy
 from . import navigation
 from .protected_paths import protected_store
@@ -121,12 +121,45 @@ class DiscoveryCoordinator:
     def __init__(self,store,config,*,scanner_factory=Scanner.open,clock=time.time):
         self.store,self.config,self.scanner_factory=store,config,scanner_factory
         self._iterators={}
+        self._runtime_session=None
+        self._runtime_last_used=0
         self.clock=clock
+
+    @contextmanager
+    def scanner(self,store):
+        """Bind a fresh publisher to this profile's prepared detector owner."""
+        if self.scanner_factory != Scanner.open:
+            with self.scanner_factory(config=self.config,store=store) as scanner:
+                yield scanner
+            return
+        now=time.monotonic()
+        if self._runtime_session is not None and now-self._runtime_last_used>60:
+            self._runtime_session.close();self._runtime_session=None
+        if self._runtime_session is None:
+            self._runtime_session=RuntimeSession.open(config=self.config)
+        self._runtime_last_used=now
+        from leakguard_core.scan_store import StateError
+        try:
+            scanner=Scanner.open(config=self.config,store=store,runtime_session=self._runtime_session)
+        except StateError as error:
+            if error.code!='runtime-session-config-changed':raise
+            self._runtime_session.close()
+            self._runtime_session=RuntimeSession.open(config=self.config)
+            scanner=Scanner.open(config=self.config,store=store,runtime_session=self._runtime_session)
+        with scanner:
+            yield scanner
 
     def identity(self,settings):
         fixed=ScanLimits(deadline_seconds=10,max_files=100)
-        with self.scanner_factory(config=self.config,store=self.store) as scanner:
-            identity=scanner.work_identity(policy=ScanPolicy.inventory(),limits=fixed)
+        from leakguard_core.scan_policy import RuntimeIdentityError
+        for attempt in range(2):
+            try:
+                with self.scanner(self.store) as scanner:
+                    identity=scanner.work_identity(policy=ScanPolicy.inventory(),limits=fixed)
+                break
+            except RuntimeIdentityError:
+                if self._runtime_session is None or attempt:raise
+                self._runtime_session.close();self._runtime_session=None
         artifacts=[]
         for path in sorted(Path(__file__).parent.glob('*.py')):
             data=path.read_bytes()
@@ -138,6 +171,10 @@ class DiscoveryCoordinator:
     def close(self):
         for iterator in self._iterators.values():iterator.close()
         self._iterators.clear()
+        if self._runtime_session is not None:
+            self._runtime_session.close();self._runtime_session=None
+        sessions=getattr(self,'_ssh_directory_sessions',None)
+        if sessions is not None:sessions.close()
 
     def begin(self,source,job):
         generation=int(time.time_ns()//1000)
@@ -342,13 +379,8 @@ class DiscoveryCoordinator:
                 if cancel() or time.monotonic()>=deadline:break
                 with self.store.partition(bucket) as child:
                     view=_Evidence(child,self.store)
-                    with self.scanner_factory(config=self.config,store=view) as scanner:
+                    with self.scanner(view) as scanner:
                         limits=ScanLimits(deadline_seconds=8,max_files=100,max_file_bytes=self.config.to_mapping()['max_file_bytes'],max_report_bytes=4_000_000,detector_timeout_seconds=5)
-                        identity=scanner.work_identity(policy=ScanPolicy.inventory(),limits=limits)
-                        if job.get('detector_runtime')!=identity['runtime_id']:
-                            # A changed resource invalidates previous inventory
-                            # statuses in bounded partitions on subsequent ticks.
-                            job['detector_runtime']=identity['runtime_id']
                         if source['kind']=='mounted':
                             from .mounted_worker import call
                             from leakguard_core.api import parse_report

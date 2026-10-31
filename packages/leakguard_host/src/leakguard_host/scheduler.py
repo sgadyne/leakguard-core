@@ -24,7 +24,7 @@ _FINAL = {"completed", "cancelled", "failed"}
 _UNSET = object()
 # Stable, value-free transport/helper causes. Unknown HostErrors stay sanitized.
 _REMOTE_FAILURES = frozenset({'ssh-timeout', 'ssh-execution-failed', 'ssh-output-limit',
-    'ssh-unavailable', 'ssh-worker-invalid', 'remote-report-invalid'})
+    'ssh-unavailable', 'ssh-worker-invalid', 'remote-report-invalid', 'ssh-directory-replay-stalled'})
 
 
 def _request_refresh(job):

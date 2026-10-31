@@ -20,10 +20,13 @@ PACKAGES = {
 TESTS = (
     "tests/test_alpha_refinement.py",
     "tests/test_runtime_identity.py",
+    "tests/test_runtime_session.py",
+    "tests/test_native_filter_attribution.py",
     "tests/test_publication_failure.py",
     "tests/test_result_cache.py",
     "tests/test_desktop_migration.py",
     "packages/leakguard_host/tests/test_alpha_operational.py",
+    "packages/leakguard_host/tests/test_ssh_progress.py",
     "packages/leakguard_host/tests/test_alpha_backfill.py",
     "packages/leakguard_host/tests/test_publication_and_protected_stores.py",
     "packages/leakguard_vault/tests/test_vault.py",

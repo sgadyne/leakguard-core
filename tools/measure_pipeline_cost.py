@@ -188,7 +188,7 @@ class _SubprocessProxy:
 
 @contextmanager
 def instrumentation(meter):
-    from leakguard_core import api, backends, extraction, navigation, plugins, scan_policy, scan_store, sources, _session, _supervision
+    from leakguard_core import api, backends, engine, extraction, navigation, plugins, scan_policy, scan_store, sources, _session, _supervision
     # Patches are scoped to this isolated process and are restored even on error.
     # Functions that are imported at call time are patched at their definition.
     with ExitStack() as stack:
@@ -199,6 +199,8 @@ def instrumentation(meter):
         # Classmethod descriptor must be preserved.
         original = api.Scanner.__dict__['open'].__func__
         stack.enter_context(patch.object(api.Scanner, 'open', classmethod(meter.wrap('scanner_open', original, 'scanner_open_calls'))))
+        if hasattr(engine, '_PreparedRuntime'):
+            wrap(engine._PreparedRuntime, '__init__', 'runtime_prepare', 'runtime_prepare_calls')
         wrap(scan_policy, 'runtime_identity', 'runtime_verification')
         original_admit = scan_policy._IdentityBudget.admit
         @functools.wraps(original_admit)

@@ -226,19 +226,27 @@ class DirectorySessions:
         self._max_sessions = max_sessions
         self._idle_seconds = idle_seconds
 
-    def _discard(self, key):
+    def _discard(self, key, *, graceful=False):
         from .ssh import _terminate
         session = self._sessions.pop(key, None)
         if session is None:
             return
         process = session['process']
-        _terminate(process)
+        if graceful:
+            if process.stdin is not None:
+                process.stdin.close()
+            try:
+                process.wait(timeout=2)
+            except Exception:
+                _terminate(process)
+        else:
+            _terminate(process)
         try:
             process.wait(timeout=2)
         except Exception:
             pass
         for pipe in (process.stdin, process.stdout):
-            if pipe is not None:
+            if pipe is not None and not pipe.closed:
                 pipe.close()
 
     def close(self):
@@ -380,7 +388,7 @@ class DirectorySessions:
                 if result['entries'] or result['complete']:
                     self._losses.pop(key, None)
                 if result['complete'] or not result['stable']:
-                    self._discard(key)
+                    self._discard(key, graceful=True)
                 return {**result, 'session_capability': 'retained-linux'}
             except HostError as error:
                 self._discard(key)

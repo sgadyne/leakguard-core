@@ -134,6 +134,36 @@ class ScanConfig:
         return "ScanConfig(<validated>)"
 
 
+class RuntimeSession:
+    """Owner-scoped prepared detectors, independent of any evidence store.
+
+    A session admits one scanner at a time. Each scanner keeps its own store,
+    navigation and publication state. Closing fences an active binding; its
+    workers are reaped when that scanner releases its resources. A store
+    callback already admitted may finish; callers must await scanner shutdown
+    before locking or revoking its store. HostService.stop provides that fence.
+    """
+
+    def __init__(self, resource: object) -> None:
+        self._resource = resource
+
+    @classmethod
+    def open(cls, *, config: ScanConfig) -> RuntimeSession:
+        if type(config) is not ScanConfig:
+            raise ConfigurationError("configuration")
+        from .engine import _PreparedRuntime
+        return cls(_PreparedRuntime(config.to_mapping()))
+
+    def close(self) -> None:
+        self._resource.close()
+
+    def __enter__(self) -> RuntimeSession:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.close()
+
+
 class Scanner:
     """Thin, explicit facade over the shared engine service."""
 
@@ -148,16 +178,20 @@ class Scanner:
         config: ScanConfig,
         state_dir: Path | None = None,
         store: object | None = None,
+        runtime_session: RuntimeSession | None = None,
     ) -> Scanner:
         if type(config) is not ScanConfig:
             raise ConfigurationError("configuration")
         if state_dir is not None and not isinstance(state_dir, Path):
             raise TypeError("state_dir must be a pathlib.Path or None")
+        if runtime_session is not None and type(runtime_session) is not RuntimeSession:
+            raise TypeError("runtime_session must be a RuntimeSession or None")
         # This is the first import of engine internals. Calling open is the
         # explicit point at which backend and durable-state setup may occur.
         from .engine import ScanService
 
-        service = ScanService(config.to_mapping(), state_dir=state_dir, store=store)
+        service = ScanService(config.to_mapping(), state_dir=state_dir, store=store,
+                              runtime=runtime_session._resource if runtime_session is not None else None)
         return cls(service)
 
     def capabilities(self) -> dict[str, object]:
@@ -376,5 +410,5 @@ _SAFE_CONFIG_FIELDS = frozenset({
 
 __all__ = [
     "BytesInput", "ConfigurationError", "FileInput", "GitRequest", "ScanConfig",
-    "ScanLimits", "ScanPolicy", "ScanReport", "Scanner", "ReportError", "parse_report",
+    "ScanLimits", "ScanPolicy", "ScanReport", "Scanner", "RuntimeSession", "ReportError", "parse_report",
 ]

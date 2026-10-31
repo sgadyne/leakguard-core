@@ -319,3 +319,22 @@ def test_unsupported_platform_falls_back_and_reports_a_stalled_prefix(tmp_path):
         assert error.value.code == 'ssh-timeout'
     finally:
         sessions.close()
+
+
+def test_completed_session_exits_normally_and_is_reaped(tmp_path):
+    from leakguard_host.ssh_directory_session import DirectorySessions
+    root = tmp_path / 'synthetic'
+    make_files(root)
+    sessions = DirectorySessions()
+    try:
+        first = call(sessions, root, limit=2)
+        process = next(iter(sessions._sessions.values()))['process']
+        cursor = cursor_for(first)
+        while True:
+            page = call(sessions, root, cursor, limit=2)
+            cursor = cursor_for(page)
+            if page['complete']:
+                break
+        assert not sessions._sessions and process.returncode == 0
+    finally:
+        sessions.close()

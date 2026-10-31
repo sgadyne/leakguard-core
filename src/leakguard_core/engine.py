@@ -482,47 +482,124 @@ def _cap_report(report, maximum):
                         (m.CoverageIssue(m.ErrorCode.DETECTOR_OUTPUT_LIMIT, required=True),))
 
 
-class ScanService:
-    """One bounded pipeline for files, caller bytes and immutable Git snapshots."""
-    def __init__(self, config, *, state_dir=None, store=None):
+def _service_config(config):
+    from .settings import validate
+    value = validate(config.to_mapping() if hasattr(config, 'to_mapping') else dict(config))
+    if value.get('extension_registry'):
+        from .extensions import ExtensionRegistry
+        value = ExtensionRegistry(value['extension_registry']).apply(value, value.get('detection_profile', 'credentials'))
+    return value
+
+
+class _PreparedRuntime:
+    """A bounded detector owner; never holds a store or source capability."""
+    def __init__(self, config, *, resolved=False):
+        import threading
         from . import scan_policy
-        from .scan_store import MemoryScanStore, SQLiteScanStore
-        from .settings import validate
-        self.config = validate(config.to_mapping() if hasattr(config, 'to_mapping') else dict(config))
-        if self.config.get('extension_registry'):
-            from .extensions import ExtensionRegistry
-            self.config = ExtensionRegistry(self.config['extension_registry']).apply(self.config, self.config.get('detection_profile', 'credentials'))
+        from ._result_cache import CacheScope, OBSERVATIONS
+        self.config = config if resolved else _service_config(config)
         self.binary = self.config.get('gitleaks_executable') or shutil.which('gitleaks') or 'gitleaks'
         self.rules = self.config.get('gitleaks_config') or ROOT / 'rules.toml'
+        self.scope = CacheScope()
+        self._binding = threading.Lock()
+        self._closing = threading.Event()
+        self._closed = False
+        self.plugins = []
+        try:
+            self.plugins = plugins.load(self.config.get('plugins', []), worker_policy=self.config.get('worker_policy', 'strict'))
+            if self.config.get('script_checks'):
+                self.plugins.extend(plugins.load_scripts(self.config['script_checks']))
+            self.runtime, self.work_verifiable = scan_policy.runtime_identity(
+                self.config, self.binary, self.config.get('plugins', ()),
+                plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self.plugins), for_work=True)
+            # Session reuse does not expand persistent semantic-cache eligibility.
+            self.cache_eligible = self.work_verifiable and not self.plugins
+        except BaseException:
+            OBSERVATIONS.close_scope(self.scope)
+            plugins.close(self.plugins)
+            raise
+
+    @property
+    def closing(self):
+        return self._closing.is_set()
+
+    def acquire(self, config):
+        from .scan_store import StateError
+        if self.closing:
+            raise StateError('state-closed')
+        if not self._binding.acquire(blocking=False):
+            raise StateError('runtime-session-busy')
+        try:
+            if self.closing:
+                raise StateError('state-closed')
+            if config != self.config:
+                raise StateError('runtime-session-config-changed')
+        except BaseException:
+            self._binding.release()
+            raise
+
+    def release(self):
+        self._binding.release()
+        if self.closing:
+            self.close()
+
+    def validate(self):
+        from . import scan_policy
+        if self.closing:
+            raise scan_policy.RuntimeIdentityError('source-unavailable')
+        current, _ = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()),
+            plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self.plugins), for_work=True)
+        if current != self.runtime or self.closing:
+            raise scan_policy.RuntimeIdentityError('source-unavailable')
+
+    def close(self):
+        # Fence L1 producers immediately. Never deadlock a caller that closes
+        # its session while holding a scanner; the last binding reaps workers.
+        self._closing.set()
+        from ._result_cache import OBSERVATIONS
+        OBSERVATIONS.close_scope(self.scope)
+        if not self._binding.acquire(blocking=False):
+            return
+        try:
+            if not self._closed:
+                self._closed = True
+                plugins.close(self.plugins)
+        finally:
+            self._binding.release()
+
+
+class ScanService:
+    """One bounded pipeline for files, caller bytes and immutable Git snapshots."""
+    def __init__(self, config, *, state_dir=None, store=None, runtime=None):
+        self.config = _service_config(config)
         self.state_dir = pathlib.Path(state_dir) if state_dir is not None else None
         from .storage import open_scan_store
         self.store = store if store is not None else open_scan_store(self.state_dir, config=self.config)
         self._owns_store = store is None
         self._closed = False
-        from ._result_cache import CacheScope
-        self._observation_scope = CacheScope()
-        from .navigation import Navigation
+        self._owns_runtime = runtime is None
+        self._prepared_runtime = None
         self._navigation = None
+        self._runtime_bound = False
         try:
+            self._prepared_runtime = runtime if runtime is not None else _PreparedRuntime(self.config, resolved=True)
+            self._prepared_runtime.acquire(self.config)
+            self._runtime_bound = True
+            self.binary, self.rules = self._prepared_runtime.binary, self._prepared_runtime.rules
+            self._plugins = self._prepared_runtime.plugins
+            self._runtime = self._prepared_runtime.runtime
+            self._work_verifiable = self._prepared_runtime.work_verifiable
+            self._cache_eligible = self._prepared_runtime.cache_eligible
+            self._observation_scope = self._prepared_runtime.scope
+            from .navigation import Navigation
             self._navigation = Navigation(helper=self.config.get('navigation_helper'))
-            self._plugins = plugins.load(self.config.get('plugins', []), worker_policy=self.config.get('worker_policy', 'strict'))
-            if self.config.get('script_checks'):
-                self._plugins.extend(plugins.load_scripts(self.config['script_checks']))
-            # Work verification and persistent-cache eligibility inspect the
-            # same artifacts. The work mode adds deterministic/external-state
-            # fences; without plugins its eligibility is identical to normal
-            # mode. Derive both flags from one bounded byte traversal here.
-            # Per-scan runtime validation before and after content is unchanged.
-            self._runtime, self._work_verifiable = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins),for_work=True)
-            # Until a verifiable plugin dependency closure is available, execution is
-            # supported and persistent semantic reuse is deliberately disabled.
-            self._cache_eligible = self._work_verifiable and not self._plugins
-        except Exception:
-            from ._result_cache import OBSERVATIONS
-            OBSERVATIONS.close_scope(self._observation_scope)
+        except BaseException:
             if self._navigation is not None:
                 self._navigation.close()
-            plugins.close(getattr(self, '_plugins', ()))
+            if self._runtime_bound:
+                self._prepared_runtime.release()
+            if self._owns_runtime and self._prepared_runtime is not None:
+                self._prepared_runtime.close()
             if self._owns_store:
                 self.store.close()
             raise
@@ -530,12 +607,14 @@ class ScanService:
     def close(self):
         if not self._closed:
             self._closed = True
-            from ._result_cache import OBSERVATIONS
-            OBSERVATIONS.close_scope(self._observation_scope)
-            self._navigation.close()
-            plugins.close(self._plugins)
-            if self._owns_store:
-                self.store.close()
+            try:
+                self._navigation.close()
+            finally:
+                self._prepared_runtime.release()
+                if self._owns_runtime:
+                    self._prepared_runtime.close()
+                if self._owns_store:
+                    self.store.close()
 
     def cache_metrics(self):
         """Aggregate L1 budgets/counters; never keys, paths or observations."""
@@ -595,6 +674,8 @@ class ScanService:
         from .scan_store import StateError
         if self._closed:
             raise StateError('state-closed')
+        if not self._owns_runtime:
+            self._prepared_runtime.validate()
         return self._work_context(policy=policy, limits=limits)[0]
 
     def scan(self, inputs, *, policy, limits, use_cache=True, cancel=None):
@@ -1107,6 +1188,8 @@ class ScanService:
         from .execution import Cancellation
         if not isinstance(cancel, Cancellation):
             cancel = Cancellation(cancel)
+        caller_cancel = cancel
+        cancel = Cancellation(lambda: self._prepared_runtime.closing or caller_cancel())
         deadline = _deadline if _deadline is not None else time.monotonic() + limits.deadline_seconds
         if hasattr(self.store, 'set_deadline'):
             try:
@@ -1150,7 +1233,7 @@ class ScanService:
         identity_failure = None
         try:
             runtime, eligible = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins), deadline=deadline, cancel=cancel)
-            runtime_valid = runtime == self._runtime
+            runtime_valid = runtime == self._runtime and not self._prepared_runtime.closing
             if not runtime_valid:
                 identity_failure = m.ErrorCode.SOURCE_UNAVAILABLE
         except scan_policy.RuntimeIdentityError as error:
@@ -1230,7 +1313,7 @@ class ScanService:
         if identity_failure is None:
             try:
                 current_runtime, _ = scan_policy.runtime_identity(self.config, self.binary, self.config.get('plugins', ()), plugin_manifests=tuple(getattr(instance, 'manifest', None) for instance in self._plugins), deadline=deadline, cancel=cancel)
-                if current_runtime != self._runtime:
+                if current_runtime != self._runtime or self._prepared_runtime.closing:
                     identity_failure = m.ErrorCode.SOURCE_UNAVAILABLE
             except scan_policy.RuntimeIdentityError as error:
                 identity_failure = self._error_code(error.code, 'source-unavailable')
@@ -1255,6 +1338,13 @@ class ScanService:
                 results[index] = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome, coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (m.CoverageIssue(code, required=True),))
         # Publication is after validation; no slow detector runs under a write lock.
         for index, (result, (generation, cache_key), observations, anchor) in enumerate(zip(results, reservations, material_results, anchors)):
+            if cancel():
+                issue = m.CoverageIssue(m.ErrorCode.CANCELLED, result.source, required=True)
+                result = replace(result, outcome=m.ScanOutcome.ERROR if result.outcome is m.ScanOutcome.REUSED else result.outcome,
+                                 coverage=m.CoverageState.INCOMPLETE, last_verified_at=None, issues=result.issues + (issue,))
+                results[index] = result
+                cache_key = None
+                enumeration_complete = False
             try:
                 kwargs = {'work': work_claims.get(result.source.path)} if work_claims is not None else {}
                 if anchor is not None and hasattr(self.store, 'source_anchor') and hasattr(self.store, 'confirm_absent'):
