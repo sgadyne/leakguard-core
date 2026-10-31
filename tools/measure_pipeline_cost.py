@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from contextlib import ExitStack, contextmanager
 import functools
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -111,6 +112,13 @@ class Meter:
                 row['exclusive_ns'] += max(0, elapsed - frame[1])
 
     def wrap(self, name, function, counter=None):
+        if inspect.isgeneratorfunction(function):
+            @functools.wraps(function)
+            def generator_call(*args, **kwargs):
+                if counter:
+                    self.add(counter)
+                return _TimedGenerator(function(*args, **kwargs), self, name)
+            return generator_call
         @functools.wraps(function)
         def call(*args, **kwargs):
             if counter:
@@ -131,6 +139,35 @@ class Meter:
         with self.lock:
             return {'timings': {k: dict(v) for k, v in self.times.items()}, 'counts': dict(self.counts)}
 
+
+
+class _TimedGenerator:
+    """Time only generator execution, including explicit or abandoned close.
+
+    Suspending at a yield ends the span, so consumer work is never charged to
+    the producer and no timer remains on the thread-local stack between steps.
+    """
+    def __init__(self, generator, meter, name):
+        self.generator, self.meter, self.name = generator, meter, name
+    def __iter__(self):
+        return self
+    def __next__(self):
+        with self.meter.span(self.name):
+            return next(self.generator)
+    def send(self, value):
+        with self.meter.span(self.name):
+            return self.generator.send(value)
+    def throw(self, *args):
+        with self.meter.span(self.name):
+            return self.generator.throw(*args)
+    def close(self):
+        with self.meter.span(self.name):
+            return self.generator.close()
+    def __getattr__(self, name):
+        return getattr(self.generator, name)
+    def __del__(self):
+        if self.generator.gi_frame is not None:
+            self.close()
 
 def difference(after, before):
     names = set(after['timings']) | set(before['timings'])
@@ -235,7 +272,7 @@ def instrumentation(meter):
         wrap(navigation.Navigation, '_start_helper', 'navigation_helper_start', 'navigation_helper_start_attempts')
         wrap(extraction, 'extract', 'extraction')
         wrap(backends, 'detect', 'detection_native')
-        wrap(plugins, 'detect', 'detection_plugin')
+        wrap(plugins, 'detect', 'detection_plugin', 'plugin_detect_calls')
         for cls in (scan_store.MemoryScanStore, scan_store.SQLiteScanStore):
             wrap(cls, 'record_result', 'publication')
         # Imported aliases are intentional: both call sites must be wrapped.
@@ -299,7 +336,7 @@ def main():
                          'max_file_bytes': args.max_file_bytes, 'max_directory_entries': args.max_directory_entries}, 'use_cache': not args.no_cache},
         'fixture': {'file_count': len(files), 'declared_input_bytes': sum(len(f['text'].encode('utf-8')) for f in files),
                     'manifest_order_sha256': json_digest([(f['name'], digest(f['text'].encode('utf-8'))) for f in files])},
-        'timing_accounting': 'Nanoseconds, summed per call. Exclusive subtracts directly nested instrumented spans on the same thread. Worker threads overlap each other and the main scan; sums are not a wall-time decomposition. Navigation measures listing open/close, next and directory signature calls, not all walk overhead. Source bounded-read bytes count returned data from successful reads, including validations, not failed or non-file reads. Popen success counts report process starts; call attempts are separate. Runtime stream bytes count reads in scan_policy file identity only; admitted bytes are declared stat sizes, including rejected admissions. SSH RPC bytes are not measured.',
+        'timing_accounting': 'Nanoseconds, summed per call. Exclusive subtracts directly nested instrumented spans on the same thread. Worker threads overlap each other and the main scan; sums are not a wall-time decomposition. Navigation measures listing open/close, next and directory signature calls, not all walk overhead. Source bounded-read bytes count returned data from successful reads, including source acquisition, proof/context reads and final validation, not failed or non-file reads. Generator timing calls count resume/close operations; plugin_detect_calls counts generator creation. Popen success counts report process starts; call attempts are separate. Runtime stream bytes count reads in scan_policy file identity only; admitted bytes are declared stat sizes, including rejected admissions. SSH RPC bytes are not measured.',
         'runs': []}
     with tempfile.TemporaryDirectory(prefix='leakguard-synthetic-cost-') as temporary:
         root = Path(temporary) / 'fixture'
