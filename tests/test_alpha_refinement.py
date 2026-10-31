@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -303,6 +304,7 @@ class BooleanContextGuards(unittest.TestCase):
         from leakguard_core.api import Scanner, ScanConfig
         from leakguard_core.models import BytesInput, ScanLimits, ScanPolicy
         config=ScanConfig.from_mapping({'gitleaks_executable':os.environ['LEAKGUARD_GITLEAKS'],
+            'worker_policy':'supervised-alpha' if sys.platform == 'darwin' else 'strict',
             'plugins':[{'module':'credential_detector.plugin','options':{}}]})
         inputs=[BytesInput(b'password=true','true.env'),BytesInput(b'password=false','false.env'),
                 BytesInput(b'password="false"','quoted.py')]
