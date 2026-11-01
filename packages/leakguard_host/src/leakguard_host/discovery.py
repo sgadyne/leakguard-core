@@ -610,6 +610,8 @@ class DiscoveryCoordinator:
                             if result.coverage.value=='incomplete':attempts+=1;job['content_batch']=max(1,job.get('content_batch',100)//2)
                             detail=json.dumps({'digest':result.content.digest if result.content else None,'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({i.code.value for i in result.issues}),'omissions':omitted,'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==result.content.digest if previous.get('digest') and result.content else None})
                             self.store.inventory_set(path,state,detail=detail);scanned+=1
+                            if source['kind']=='local' and state=='pending' and path not in remaining:
+                                remaining.append(path)
                         job['new_findings']+=view.new_findings
             if source['kind']=='local':
                 # The oldest slot, byte cap or deadline can defer a one-shot

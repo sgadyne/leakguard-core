@@ -355,3 +355,33 @@ def test_observed_arrivals_cannot_consume_every_reserved_oldest_slot(tmp_path,mo
         child=store._partitions.get(store._partitions.bucket(str(oldest)))
         assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(oldest),)).fetchone()[0]=='inspected', 'observed replenishment consumed every oldest-work execution slot'
     finally:owner.close();store.close()
+
+
+def test_incomplete_result_keeps_source_fenced_retry_on_saved_page(tmp_path,monkeypatch):
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    from leakguard_core.api import ScanConfig
+    from leakguard_core import backends
+    from leakguard_host.protection import defaults
+    file=tmp_path/'retry.env';file.write_text('ordinary synthetic retry control')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-incomplete-retry')
+    source={'id':'source','root':str(tmp_path),'kind':'local','exclusions':[]}
+    store.inventory_put([(str(file),'source','file',_sig(file.stat()),'pending',0,1,file.stat().st_size,None,None)])
+    job={'inventory_generation':1,'inventory_complete':True,'slices':0,'content_cursor':0,'files_scanned':0,'new_findings':0,'reconcile_cursor':256}
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}));calls=[]
+    monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',lambda *a,**k:('synthetic-runtime',True))
+    def interrupted_once(*args,**kwargs):
+        calls.append(True)
+        if len(calls)==1:raise backends.BackendError('budget-exhausted')
+        return ()
+    monkeypatch.setattr(backends,'detect',interrupted_once)
+    try:
+        owner.tick(source,job,defaults(),cancel=lambda:False)
+        child=store._partitions.get(store._partitions.bucket(str(file)))
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(file),)).fetchone()[0]=='pending'
+        assert job.get('content_remainder')==[str(file)], 'an incomplete actual result lost its immediate retry'
+        owner.inventory_page=lambda *a,**k:[];job['slices']=1
+        owner.tick(source,job,defaults(),cancel=lambda:False)
+        child=store._partitions.get(store._partitions.bucket(str(file)))
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(file),)).fetchone()[0]=='inspected'
+        assert not job['content_remainder'] and len(calls)==2
+    finally:owner.close();store.close()
