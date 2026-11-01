@@ -32,7 +32,7 @@ def main():
     assert client.request("POST","/api/observations/create",{"passphrase":obs})[0]==201
     assert client.request("POST","/api/observations/lock",{})[0]==200
    configuration={"phase":phase,"origin":ready["origin"],"token":child.command("bootstrap")["token"],"observationPhrase":obs,"vaultPhrase":vault,"source":str(source),"screenshotDir":str(work/"screenshots"),"modules":str(args.modules.absolute()),"executable":str(args.browser.absolute()),"libraries":args.libraries}
-   run=subprocess.run(["node",str(ROOT/"tools/check_standalone_ui.mjs")],input=json.dumps(configuration),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=450)
+   run=subprocess.run(["node",str(ROOT/"tools/check_standalone_ui.mjs")],input=json.dumps(configuration),stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=220)
    try:receipt=json.loads(run.stdout)
    except ValueError:receipt={"passed":False,"failure":"browser-output-invalid","stderr_tail":run.stderr[-4000:]}
    result["phases"].append(receipt)

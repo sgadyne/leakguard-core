@@ -5,13 +5,13 @@ import path from "node:path";
 let input="";for await(const chunk of process.stdin)input+=chunk;
 const cfg=JSON.parse(input),require=createRequire(path.join(cfg.modules,"package.json"));
 const {chromium}=require("playwright");
-let browser,stage="launch";
+let browser,page,stage="launch";
 const receipt={passed:false,phase:cfg.phase,checks:{},screenshots:[],consoleErrors:[],pageErrors:[],unexpectedNetwork:[],expectedHttpFailures:[]};
 function check(name,value){receipt.checks[name]=Boolean(value);if(!value)throw Error(name);}
 try {
  browser=await chromium.launch({headless:true,executablePath:cfg.executable,env:{...process.env,LD_LIBRARY_PATH:cfg.libraries}});
  const context=await browser.newContext({viewport:{width:1440,height:930},reducedMotion:"reduce"});
- const page=await context.newPage();page.setDefaultTimeout(15000);
+ page=await context.newPage();page.setDefaultTimeout(15000);
  page.on("pageerror",error=>receipt.pageErrors.push(error.name));
  page.on("console",m=>{if(m.type()==="error"&&!(/Failed to load resource: the server responded with a status of/.test(m.text())&&["unsupported-capability","stale-preview","preflight-failure"].includes(stage)))receipt.consoleErrors.push(m.text().slice(0,180));});
  page.on("response",r=>{if(r.status()>=400){const item={stage,status:r.status(),path:new URL(r.url()).pathname};if(["unsupported-capability","stale-preview","preflight-failure"].includes(stage))receipt.expectedHttpFailures.push(item);else receipt.unexpectedNetwork.push(item);}});
@@ -59,6 +59,6 @@ try {
   stage="csp-and-network";const boundary=await page.evaluate(()=>{const nonce=document.querySelector('meta[name="buddy-style-nonce"]')?.content,styles=[...document.querySelectorAll("style")];return {nonce:!!nonce&&!nonce.includes("__BUDDY_"),nonced:styles.length>0&&styles.every(s=>s.nonce===nonce),noNodeGlobals:typeof window.require==="undefined"&&typeof window.process==="undefined",reducedMotion:matchMedia("(prefers-reduced-motion: reduce)").matches};});for(const [name,value]of Object.entries(boundary))check(name,value);
  }
  check("no_page_errors",receipt.pageErrors.length===0);check("no_unexpected_network",receipt.unexpectedNetwork.length===0);check("no_console_errors",receipt.consoleErrors.length===0);receipt.passed=true;
-} catch(error){receipt.failure=error.message;receipt.stage=stage;}
+} catch(error){receipt.failure=error.message;receipt.stage=stage;if(page){const file="failure-"+cfg.phase+"-"+stage+".png";await page.screenshot({path:path.join(cfg.screenshotDir,file)}).catch(()=>{});receipt.failureScreenshot=file;receipt.gridStructure=await page.evaluate(()=>[...document.querySelectorAll('[role="row"]')].slice(0,4).map(e=>({class:e.className,rowIndex:e.getAttribute("row-index"),ariaIndex:e.getAttribute("aria-rowindex")}))).catch(()=>[]);}}
 finally {if(browser)await browser.close();}
 process.stdout.write(JSON.stringify(receipt)+"\n");process.exitCode=receipt.passed?0:1;
