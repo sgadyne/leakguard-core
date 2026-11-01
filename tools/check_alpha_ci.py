@@ -29,6 +29,8 @@ TESTS = (
     "packages/leakguard_host/tests/test_ssh_progress.py",
     "packages/leakguard_host/tests/test_alpha_backfill.py",
     "packages/leakguard_host/tests/test_inventory_priority.py",
+    "packages/leakguard_host/tests/test_known_availability.py",
+    "packages/leakguard_host/tests/test_mounted_worker.py",
     "packages/leakguard_host/tests/test_publication_and_protected_stores.py",
     "packages/leakguard_vault/tests/test_vault.py",
     "packages/leakguard_vault/tests/test_partitions.py",

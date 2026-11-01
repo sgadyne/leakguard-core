@@ -40,6 +40,45 @@ def info(value):
 def signature(value):return json.dumps([value[k] for k in ('st_dev','st_ino','st_mode','st_size','st_mtime_ns','st_ctime_ns','st_flags')],separators=(',',':'))
 
 
+def availability(root,paths,*,expected=None):
+    """Metadata only; negative observations never certify content is clear."""
+    if (os.name!='posix' or os.open not in os.supports_dir_fd
+            or os.stat not in os.supports_dir_fd
+            or not all(hasattr(os,key) for key in ('O_DIRECTORY','O_NOFOLLOW'))):
+        return {'capability':'descriptor-metadata-unsupported','entries':[]}
+    if type(paths) is not list or not 1<=len(paths)<=25:raise ValueError()
+    from leakguard_core.sources import FilesystemBoundary,AcquisitionError
+    boundary=FilesystemBoundary(root);entries=[]
+    if expected is not None and [boundary.identity.device,boundary.identity.inode]!=expected:raise ValueError()
+    for text in paths:
+        if type(text) is not str or len(text)>4096:raise ValueError()
+        path=Path(text)
+        if not path.is_absolute() or path==root or not path.is_relative_to(root):raise ValueError()
+        descriptor=None;state='unavailable';metadata=None;parent_metadata=None
+        try:
+            descriptor=boundary.directory_fd(path.parent)
+            if descriptor is None:raise AcquisitionError('source-unavailable')
+            parent=os.fstat(descriptor);parent_metadata=info(parent)
+            try:
+                value=os.stat(path.name,dir_fd=descriptor,follow_symlinks=False)
+                metadata=info(value)
+                state='present' if stat.S_ISREG(value.st_mode) and not getattr(value,'st_flags',0)&0x40000000 else 'unavailable'
+            except FileNotFoundError:state='absent'
+            boundary.check(path.parent,directory=True)
+            current=path.parent.lstat()
+            if (current.st_dev,current.st_ino,current.st_mode)!=(parent.st_dev,parent.st_ino,parent.st_mode):
+                state='unavailable';metadata=None;parent_metadata=None
+        except (OSError,AcquisitionError):state='unavailable';metadata=None;parent_metadata=None
+        finally:
+            if descriptor is not None:os.close(descriptor)
+        entries.append({'path':text,'status':state,'info':metadata,'parent_info':parent_metadata})
+    boundary.check(root,directory=True)
+    if expected is not None:
+        value=root.lstat()
+        if [value.st_dev,value.st_ino]!=expected:raise ValueError()
+    return {'capability':'descriptor-metadata','entries':entries}
+
+
 def main():
     try:
         raw=sys.stdin.buffer.read(262145)
@@ -71,6 +110,8 @@ def main():
                     entries.append({'name':entry.name,'info':metadata})
             after=info(path.lstat())
             result={'info':before,'entries':entries,'position':position,'prefix':prefix.hexdigest(),'complete':complete,'stable':signature(before)==signature(after)}
+        elif operation=='availability':
+            result=availability(root,req['paths'],expected=req.get('expected'))
         elif operation=='scan':
             from leakguard_core.api import ScanConfig,Scanner
             from leakguard_core.models import ScanLimits,ScanPolicy

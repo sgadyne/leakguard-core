@@ -246,10 +246,11 @@ class DiscoveryCoordinator:
         runtime and publication checks still authorize every admitted version.
         A filtered empty page never proves inventory completion.
         """
-        job['navigation_profile']={'version':'bounded-refresh-v2','cycle':10,
+        job['navigation_profile']={'version':'bounded-refresh-v3','cycle':10,
             'oldest_slot':0,'refresh_slot':5,'metadata_seconds':2,
             'slice_seconds':10,'max_metadata_entries':5000,
-            'filtered_fallback_queries':1,'new_arrivals':'monotonic-clock'}
+            'filtered_fallback_queries':1,'new_arrivals':'monotonic-clock',
+            'known_availability_page_rows':25,'known_availability_seconds':2}
         key='inventory_cursor' if kind=='directory' else 'content_cursor'
         if job['slices']%10==5:
             refresh_key='refresh_'+key
@@ -263,6 +264,83 @@ class DiscoveryCoordinator:
         job[key]=cursor
         return rows
 
+    def _known_availability(self,source,job,settings,cancel):
+        """Poll one bounded existing-finding page, never read file content.
+
+        This only downgrades unavailable observations to unknown. It cannot
+        resolve a finding or certify an unchanged file's content as current.
+        The existing worker bounds potentially blocking filesystem metadata.
+        """
+        if source['kind']!='local':
+            job['known_availability_capability']='unsupported-source-kind';return
+        page_method=getattr(self.store,'query_findings_page',None)
+        if not callable(page_method):
+            job['known_availability_capability']='finding-page-unavailable';return
+        page=page_method(limit=25,cursor=job.get('known_availability_cursor'))
+        job['known_availability_cursor']=page.next_cursor
+        paths=set();root=Path(source['root'])
+        for row in page.rows:
+            text=(row.get('source') or {}).get('path')
+            if row.get('state')!='active' or not isinstance(text,str):continue
+            path=Path(text)
+            if (path==root or '..' in path.parts or not path.is_absolute() or not path.is_relative_to(root)
+                    or self._excluded(path,source,settings) or protected_store(path)):continue
+            paths.add(text)
+        if not paths or cancel():return
+        from .mounted_worker import call
+        try:
+            result=call({'op':'availability','root':str(root),'paths':sorted(paths),
+                'expected':source.get('active_root_identity')},timeout=2,cancel=cancel)
+            if type(result) is not dict or set(result)!={'capability','entries'}:raise navigation.HostError('source-unavailable')
+            capability=result.get('capability')
+            job['known_availability_capability']=capability
+            if capability=='descriptor-metadata-unsupported':return
+            if capability!='descriptor-metadata':raise navigation.HostError('source-unavailable')
+            entries=result.get('entries')
+            if (type(entries) is not list or len(entries)!=len(paths)
+                    or any(type(item) is not dict or set(item)!={'path','status','info','parent_info'} or type(item.get('path')) is not str or type(item.get('status')) is not str for item in entries)
+                    or {item.get('path') for item in entries}!=paths
+                    or any(item.get('status') not in {'present','absent','unavailable'} for item in entries)):
+                raise navigation.HostError('source-unavailable')
+        except navigation.HostError:
+            if cancel():return
+            job['known_availability_capability']='worker-unavailable'
+            entries=[{'path':path,'status':'unavailable','info':None,'parent_info':None} for path in sorted(paths)]
+        observed={}
+        keys=('st_dev','st_ino','st_mode','st_size','st_mtime_ns','st_ctime_ns','st_flags')
+        def valid_metadata(value,kind):
+            return (type(value) is dict and set(value)==set(keys)
+                and all(type(value[k]) is int for k in keys) and value['st_size']>=0
+                and (stat.S_ISDIR(value['st_mode']) if kind=='directory' else stat.S_ISREG(value['st_mode'])))
+        valid=all((item['parent_info'] is None or valid_metadata(item['parent_info'],'directory'))
+            and (item['info'] is None or (type(item['info']) is dict and set(item['info'])==set(keys)
+                and all(type(item['info'][k]) is int for k in keys) and item['info']['st_size']>=0))
+            and (item['status']!='present' or valid_metadata(item['info'],'file') and item['parent_info'] is not None)
+            and (item['status']!='absent' or item['info'] is None and item['parent_info'] is not None)
+            for item in entries)
+        if not valid:
+            if cancel():return
+            entries=[{'path':path,'status':'unavailable','info':None,'parent_info':None} for path in sorted(paths)]
+            job['known_availability_capability']='worker-unavailable'
+        for item in entries:
+            if item.get('parent_info') is not None:observed[(str(Path(item['path']).parent),'directory')]=item['parent_info']
+            if item['status']=='present' and item.get('info') is not None:observed[(item['path'],'file')]=item['info']
+        observe=getattr(self.store,'inventory_observed',None)
+        if callable(observe) and isinstance(source.get('id'),str) and type(job.get('inventory_generation')) is int:
+            from .mounted_worker import signature
+            for (path,kind),metadata in observed.items():
+                if cancel():return
+                changed=observe(path,source['id'],job['inventory_generation'],kind,signature(metadata),metadata['st_size'])
+                if changed:job['known_availability_changed']=job.get('known_availability_changed',0)+1
+        job['known_availability_checked']=job.get('known_availability_checked',0)+len(entries)
+        for item in entries:
+            if cancel():break
+            if item['status']=='present':continue
+            with self.store.partition(_bucket(item['path'],'e')) as child:
+                child.set_deadline(None)
+                child.record_event(item['path'],'deleted' if item['status']=='absent' else 'changed')
+            job['known_availability_unknown']=job.get('known_availability_unknown',0)+1
+
     def _enumerate(self,source,job,settings,cancel,deadline):
         generation=job['inventory_generation'];seen=0
         while seen<5000 and time.monotonic()<deadline and not cancel():
@@ -275,7 +353,7 @@ class DiscoveryCoordinator:
                 continue
             job['empty_directory_pages']=0
             row=rows[0];path=Path(row[0]);old_cursor=json.loads(row[8]) if row[8] else None
-            refresh=row[9]=='metadata-refresh-during-backfill'
+            refresh=row[9] in {'metadata-refresh-during-backfill','metadata-version-refresh-during-backfill'}
             stream_key=(source['id'],str(path))
             if self._excluded(path,source,settings):
                 self._discard_stream(stream_key)
@@ -335,7 +413,7 @@ class DiscoveryCoordinator:
                         elif source.get('automatic') and kind=='directory' and value.st_dev not in source.get('local_devices',[info.st_dev]):state='excluded';detail='mount-boundary-unknown-descendants'
                         elif kind=='file' and (getattr(value,'st_flags',0)&0x40000000 or entry.name.endswith('.icloud')):state='remote-only';detail='cloud-placeholder-not-hydrated'
                         elif kind=='file' and protected_store(child):state='protected';detail='encrypted-store-inventory-only'
-                        elif refresh and kind in {'file','directory'}:detail='content-refresh-during-backfill' if kind=='file' else 'metadata-refresh-during-backfill'
+                        elif refresh and kind in {'file','directory'}:detail='content-refresh-during-backfill' if kind=='file' else row[9]
                         entries.append((str(child),source['id'],kind,_sig(value),state,_priority(child),generation,value.st_size,None,detail))
                     except OSError:
                         entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
@@ -345,19 +423,19 @@ class DiscoveryCoordinator:
                 stable=mounted['stable'] if mounted is not None else _sig(path.lstat())==signature
                 if not stable or mismatch:
                     self._discard_stream(stream_key)
-                    self.store.inventory_set(str(path),'enumerating',detail='metadata-refresh-during-backfill' if refresh else 'changed-during-enumeration')
+                    self.store.inventory_set(str(path),'enumerating',detail=row[9] if refresh else 'changed-during-enumeration')
                     if refresh:job['refresh_metadata_restarts']=job.get('refresh_metadata_restarts',0)+1
                 elif position<resume:
                     # Prefix replay may itself take several bounded slices.
                     # Keep the durable prefix until it has been fully verified.
-                    self.store.inventory_set(str(path),'enumerating',cursor=row[8],signature=signature,detail='metadata-refresh-during-backfill' if refresh else 'metadata-prefix-replay')
+                    self.store.inventory_set(str(path),'enumerating',cursor=row[8],signature=signature,detail=row[9] if refresh else 'metadata-prefix-replay')
                     stream.anchor=row[8]
                 elif exhausted:
                     self._discard_stream(stream_key)
                     self.store.inventory_set(str(path),'enumerated',detail='metadata-only',signature=signature)
                 else:
                     saved=json.dumps({'signature':signature,'entries':position,'prefix':mounted['prefix'] if mounted is not None else prefix.hexdigest()})
-                    self.store.inventory_set(str(path),'enumerating',cursor=saved,signature=signature,detail='metadata-refresh-during-backfill' if refresh else None)
+                    self.store.inventory_set(str(path),'enumerating',cursor=saved,signature=signature,detail=row[9] if refresh else None)
                     if stream is not None:stream.anchor=saved
                 job['metadata_enumerated']+=len(entries)
             except PermissionError:
@@ -386,6 +464,7 @@ class DiscoveryCoordinator:
             return {'scanned':0,'inventory_complete':False}
         self._refresh_metadata(source,job)
         deadline=time.monotonic()+10
+        self._known_availability(source,job,settings,cancel)
         if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2))
         scanned=0
         if settings['new_content']=='inspect' and not cancel():
