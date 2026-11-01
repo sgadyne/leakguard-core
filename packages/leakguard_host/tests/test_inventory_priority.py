@@ -79,3 +79,57 @@ def test_partial_refresh_tags_new_content_and_preserves_metadata_cursor(tmp_path
         assert store.inventory_counts()=={'enumerated':1,'pending':2}
     finally:
         owner.close();store.close()
+
+
+def test_nested_create_and_unstable_local_refresh_keep_reserved_admission(tmp_path,monkeypatch):
+    import time
+    from leakguard_host import discovery
+    root=tmp_path/'inputs';root.mkdir();nested=root/'new-folder';nested.mkdir();(nested/'fresh.env').write_text('synthetic ordinary refresh fixture')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-refresh-retry-passphrase')
+    source={'id':'source','root':str(root),'kind':'local','exclusions':[]}
+    job={'slices':5,'inventory_generation':1,'inventory_cursor':0,'content_cursor':0,'metadata_enumerated':0,'unknown_descendants':0}
+    store.inventory_put([(str(root),'source','directory',discovery._sig(root.lstat()),'enumerating',0,1,0,None,'metadata-refresh-during-backfill')])
+    owner=discovery.DiscoveryCoordinator(store,None);original=discovery._sig;root_inode=root.lstat().st_ino;calls=0
+    def unstable_once(info):
+        nonlocal calls
+        if info.st_ino==root_inode:
+            calls+=1
+            if calls==2:return 'changed-during-enumeration'
+        return original(info)
+    monkeypatch.setattr(discovery,'_sig',unstable_once)
+    try:
+        # Stop after the unstable first page, then retry through normal routing.
+        owner._enumerate(source,job,{'exclusions':[]},lambda:calls>=2,time.monotonic()+2)
+        with store.partition(store._partitions.bucket(str(root),'i')) as child:
+            row=child.conn.execute('SELECT * FROM inventory WHERE path=?',(str(root),)).fetchone()
+        assert row[4]=='enumerating' and row[8] is None and row[9]=='metadata-refresh-during-backfill'
+        assert job['refresh_metadata_restarts']==1
+        owner._enumerate(source,job,{'exclusions':[]},lambda:False,time.monotonic()+2)
+        assert store.inventory_counts()=={'enumerated':2,'pending':1}
+        with store.partition(store._partitions.bucket(str(nested/'fresh.env'),'i')) as child:
+            row=child.conn.execute('SELECT * FROM inventory WHERE path=?',(str(nested/'fresh.env'),)).fetchone()
+        assert row[9]=='content-refresh-during-backfill'
+    finally:owner.close();store.close()
+
+
+def test_unstable_remote_refresh_retains_slot_and_tags_nested_directory(tmp_path):
+    from leakguard_host.discovery import DiscoveryCoordinator
+    from leakguard_host.discovery_remote import RemoteDiscovery
+    from leakguard_host.ssh_locations import uri
+    root=uri('fixture-host','/fixture')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-remote-refresh-passphrase')
+    source={'id':'source','kind':'ssh','root':root,'remote_root':'/fixture','ssh_target':'fixture-host','remote_identity':{'machine':'synthetic-machine','device':1},'exclusions':[]}
+    job={'slices':5,'inventory_generation':1,'inventory_cursor':0,'content_cursor':0,'metadata_enumerated':0,'unknown_descendants':0,'files_scanned':0,'new_findings':0,'inventory_complete':False}
+    store.inventory_put([(root,'source','directory','sig','enumerating',0,1,0,None,'metadata-refresh-during-backfill')])
+    owner=DiscoveryCoordinator(store,None);owner.identity=lambda settings:{'policy_id':'synthetic-policy','runtime_id':'synthetic-runtime'}
+    remote=RemoteDiscovery(owner)
+    info={'st_dev':1,'st_ino':2,'st_mode':0o40700,'st_size':0,'st_mtime_ns':1,'st_ctime_ns':1,'st_flags':0}
+    remote._request=lambda *args,**kwargs:{'info':info,'entries':[{'name':'new-folder','info':dict(info,st_ino=3)}],'stable':False,'complete':False,'position':1,'prefix':'synthetic-prefix'}
+    try:
+        remote.tick(source,job,{'new_content':'inventory'},cancel=lambda:False)
+        assert job['refresh_metadata_restarts']==1 and not job['inventory_complete']
+        for path in (root,root+'/new-folder'):
+            with store.partition(store._partitions.bucket(path,'i')) as child:
+                row=child.conn.execute('SELECT * FROM inventory WHERE path=?',(path,)).fetchone()
+            assert row[4]=='enumerating' and row[8] is None and row[9]=='metadata-refresh-during-backfill'
+    finally:owner.close();store.close()

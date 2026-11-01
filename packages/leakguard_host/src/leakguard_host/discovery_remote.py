@@ -72,10 +72,12 @@ class RemoteDiscovery:
          elif kind=='file' and value['st_dev']!=source['remote_identity']['device']:state='unsupported';detail='mount-boundary'
          elif kind=='file' and (value['st_flags']&0x40000000 or actual.name.endswith('.icloud')):state='remote-only';detail='placeholder-not-hydrated'
          elif kind=='file' and protected_store(actual,remote=True):state='protected';detail='protected-store-inventory-only'
-         elif refresh and kind=='file':detail='content-refresh-during-backfill'
+         elif refresh and kind in {'file','directory'}:detail='content-refresh-during-backfill' if kind=='file' else 'metadata-refresh-during-backfill'
         entries.append((child,source['id'],kind,json.dumps(sig(value)) if value else None,state,_priority(PurePosixPath(child)),job['inventory_generation'],value['st_size'] if value else 0,None,detail))
        self.store.inventory_put(entries);job['metadata_enumerated']+=len(entries)
-       if not result['stable']:self.store.inventory_set(path,'enumerating',detail='changed-during-enumeration')
+       if not result['stable']:
+        self.store.inventory_set(path,'enumerating',detail='metadata-refresh-during-backfill' if refresh else 'changed-during-enumeration')
+        if refresh:job['refresh_metadata_restarts']=job.get('refresh_metadata_restarts',0)+1
        elif result['complete']:self.store.inventory_set(path,'enumerated',detail='remote-metadata-only',signature=json.dumps(sig(info)))
        else:self.store.inventory_set(path,'enumerating',cursor=json.dumps({'signature':sig(info),'entries':result['position'],'prefix':result['prefix']}),signature=json.dumps(sig(info)),detail='metadata-refresh-during-backfill' if refresh else None)
      except HostError as error:

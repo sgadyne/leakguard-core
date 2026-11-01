@@ -335,7 +335,7 @@ class DiscoveryCoordinator:
                         elif source.get('automatic') and kind=='directory' and value.st_dev not in source.get('local_devices',[info.st_dev]):state='excluded';detail='mount-boundary-unknown-descendants'
                         elif kind=='file' and (getattr(value,'st_flags',0)&0x40000000 or entry.name.endswith('.icloud')):state='remote-only';detail='cloud-placeholder-not-hydrated'
                         elif kind=='file' and protected_store(child):state='protected';detail='encrypted-store-inventory-only'
-                        elif refresh and kind=='file':detail='content-refresh-during-backfill'
+                        elif refresh and kind in {'file','directory'}:detail='content-refresh-during-backfill' if kind=='file' else 'metadata-refresh-during-backfill'
                         entries.append((str(child),source['id'],kind,_sig(value),state,_priority(child),generation,value.st_size,None,detail))
                     except OSError:
                         entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
@@ -345,7 +345,8 @@ class DiscoveryCoordinator:
                 stable=mounted['stable'] if mounted is not None else _sig(path.lstat())==signature
                 if not stable or mismatch:
                     self._discard_stream(stream_key)
-                    self.store.inventory_set(str(path),'enumerating',detail='changed-during-enumeration')
+                    self.store.inventory_set(str(path),'enumerating',detail='metadata-refresh-during-backfill' if refresh else 'changed-during-enumeration')
+                    if refresh:job['refresh_metadata_restarts']=job.get('refresh_metadata_restarts',0)+1
                 elif position<resume:
                     # Prefix replay may itself take several bounded slices.
                     # Keep the durable prefix until it has been fully verified.
