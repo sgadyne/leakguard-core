@@ -18,7 +18,11 @@ successful exchange, so the installed shortcut can be used again while the
 service is running. `--config` points to the shared LeakGuard config. Buddy
 keeps its own selected detection profile and worker count in `buddy-config.json`
 under the private state directory; worker policy remains shared with the CLI
-and Git hooks.
+and Git hooks. Settings also provides [scan profiles and extension packs](../../docs/scan-profiles.md):
+preset/custom JSON selection, an inert preview and a checked apply operation.
+Their engine options persist in the private `scan-profile.json` overlay, with
+job preferences in `protection-settings.json`; the shared CLI config is not
+rewritten. Existing locations and per-source schedules are retained.
 
 Buddy stores encrypted scan observations and actual credentials separately in
 `observations.lgo` and `credentials.lgv`. Unlock sessions are independent.

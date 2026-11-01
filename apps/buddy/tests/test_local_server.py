@@ -23,6 +23,39 @@ class StubBackend:
         return {"filename": payload["filename"]}
 
 class LocalServerTests(unittest.TestCase):
+    def test_scan_profile_routes_require_auth_and_report_stale_preview(self):
+        from leakguard_buddy.backend import BuddyBackend
+        with tempfile.TemporaryDirectory(prefix="buddy-profile-http-") as name:
+            root = Path(name); config = root / "config.json"; config.write_text("{}")
+            app = LocalBuddy(BuddyBackend(state_dir=root / "profile", config_path=config, discovery_roots=()))
+            app.start()
+            try:
+                self.assertEqual(self._request(app, "GET", "/api/scan-profiles")[0], 401)
+                exchange = self._exchange(app, app.bootstrap)
+                cookie = exchange.getheader("Set-Cookie").split(";", 1)[0]
+                csrf = json.loads(exchange._buddy_body)["csrf"]
+                status, response = self._request(app, "GET", "/api/scan-profiles", cookie=cookie)
+                self.assertEqual(status, 200)
+                self.assertEqual(len(json.loads(response._buddy_body)["presets"]), 3)
+                doc = {"version": 1, "preset": "inventory"}
+                kwargs = dict(cookie=cookie, payload={"document": doc}, origin=app.server.origin)
+                self.assertEqual(self._request(app, "POST", "/api/scan-profiles/preview", **kwargs)[0], 403)
+                status, response = self._request(app, "POST", "/api/scan-profiles/preview", csrf=csrf, **kwargs)
+                self.assertEqual(status, 200)
+                identity = json.loads(response._buddy_body)["identity"]
+                kwargs["payload"]["expected_identity"] = "0" * 64
+                status, response = self._request(app, "POST", "/api/scan-profiles/apply", csrf=csrf, **kwargs)
+                self.assertEqual(status, 409)
+                self.assertEqual(json.loads(response._buddy_body), {"error": "scan-profile-preview-stale"})
+                kwargs["payload"]["expected_identity"] = identity
+                self.assertEqual(self._request(app, "POST", "/api/scan-profiles/apply", csrf=csrf, **kwargs)[0], 200)
+                kwargs["payload"] = {"document": {"version":1,"preset":"standard","overrides":{"jobs":{"changes":"events"}}}}
+                status, response = self._request(app, "POST", "/api/scan-profiles/preview", csrf=csrf, **kwargs)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(response._buddy_body), {"error": "scan-profile-capability-unavailable"})
+            finally:
+                app.close()
+
     def test_bootstrap_rotates_after_exchange_and_next_open_works(self):
         with tempfile.TemporaryDirectory(prefix="buddy-http-test-") as name:
             launch_file = Path(name) / "buddy-launch.url"

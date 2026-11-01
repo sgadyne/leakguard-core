@@ -30,6 +30,9 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,128}\Z")
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
 _STORAGE_ERRORS={'storage-unavailable','storage-path-invalid','storage-ownership-invalid','storage-filesystem-unsupported','storage-destination-exists','storage-path-unchanged','storage-space-unavailable','storage-verification-failed','storage-relocation-complete-restart-required','settings-invalid','state-storage-unavailable','state-partition-unavailable','ssh-target-invalid','ssh-port-invalid','remote-path-invalid','ssh-timeout','ssh-execution-failed','remote-report-invalid','source-changed'}
 _SAFE_BACKEND_ERRORS = _STORAGE_ERRORS | {
+    'scan-profile-invalid', 'scan-profile-component-conflict', 'scan-profile-not-found',
+    'scan-profile-inheritance-cycle', 'scan-profile-pack-not-found', 'scan-profile-capability-unavailable',
+    'scan-profile-policy-limit', 'scan-profile-preview-stale', 'scan-profile-record-invalid', 'scan-profile-runtime-unavailable',
     "vault-locked", "vault-authentication-failed", "vault-already-created",
     "vault-not-created", "vault-already-unlocked", "vault-busy",
     "vault-passphrase-invalid", "vault-capacity-limit", "vault-entry-invalid",
@@ -205,11 +208,15 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
             code = getattr(error, "code", None)
             safe_code = code if type(code) is str and code in _SAFE_BACKEND_ERRORS else "request-failed"
             conflict = {
+                'scan-profile-preview-stale',
                 "vault-already-created", "vault-already-unlocked", "vault-busy",
                 "source-not-found", "source-disabled", "source-busy", "job-not-found",
                 "job-busy", "directory-changed", "observation-store-exists", "extension-not-found",
             }
             client = {
+                'scan-profile-invalid', 'scan-profile-component-conflict', 'scan-profile-not-found',
+                'scan-profile-inheritance-cycle', 'scan-profile-pack-not-found', 'scan-profile-capability-unavailable',
+                'scan-profile-policy-limit',
                 "vault-passphrase-invalid", "vault-entry-invalid", "state-query-invalid",
                 "plugin-invalid", "plugin-review-required", "extension-invalid",
                 "extension-conflict", "extension-runtime-inspection-failed",
@@ -218,6 +225,7 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 "page-invalid", "platform-unavailable",
             }
             unavailable = {
+                'scan-profile-record-invalid', 'scan-profile-runtime-unavailable',
                 "vault-crypto-unavailable", "observation-keyring-unavailable",
                 "observation-keyring-not-enabled", "observation-keyring-invalid",
                 "state-checkpoint-failed", "state-capacity-limit",
@@ -302,6 +310,8 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
                 return app.plugins(), 200
             if path == "/api/settings":
                 return app.settings(), 200
+            if path == '/api/scan-profiles':
+                return app.scan_profiles(), 200
             if path == "/api/hooks/status":
                 values = _query(query, {"repository"})
                 if "repository" not in values or not values["repository"] or "\x00" in values["repository"]:
@@ -430,6 +440,14 @@ class BuddyRequestHandler(http.server.BaseHTTPRequestHandler):
         if method == "POST" and path == "/api/settings":
             _keys(body, {"active_profile", "scan_workers", "protection"})
             return app.save_settings(body), 200
+        if method == 'POST' and path in {'/api/scan-profiles/preview', '/api/scan-profiles/apply'}:
+            _keys(body, {'document'} if path.endswith('/preview') else {'document', 'expected_identity'})
+            if type(body.get('document')) is not dict:
+                raise ApiError(400, 'request-invalid')
+            if path.endswith('/preview'):
+                return app.preview_scan_profile(body['document']), 200
+            _text(body, 'expected_identity', 64)
+            return app.apply_scan_profile(body['document'], body['expected_identity']), 200
         raise ApiError(404, "not-found")
 
     def _serve_static(self, name: str, content_type: str) -> None:

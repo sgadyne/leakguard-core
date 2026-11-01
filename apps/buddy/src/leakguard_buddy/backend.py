@@ -14,6 +14,7 @@ from typing import Any
 
 
 _BUDDY_CONFIG_FIELDS = ("detection_profile", "scan_workers")
+_PROFILE_ENGINE_FIELDS = ('plugins', 'extractor_overrides', 'required_formats', 'review_only_rules', 'omissions', 'max_file_bytes')
 _HOOK_ERRORS = {
     "hook-configuration-invalid", "hook-directory-shared", "hook-target-changed",
     "hook-target-nonregular", "hook-write-failed", "hook-import-path-limit",
@@ -103,6 +104,21 @@ class BuddyBackend:
             except (ValueError,TypeError,KeyError):raise RuntimeError('settings-invalid') from None
         self.extension_registry_path = self.state_dir / "extensions"
         self._config_values = dict(defaults)
+        profile_record = self.state_dir / 'scan-profile.json'
+        if profile_record.exists() or profile_record.is_symlink():
+            try:
+                if profile_record.is_symlink() or profile_record.stat().st_size > 1_000_000:
+                    raise ValueError()
+                record = json.loads(profile_record.read_text())
+                from leakguard_host.scan_profiles import validate_document
+                validate_document(record['document'])
+                overlay = record['engine_overrides']
+                if type(overlay) is not dict or set(overlay) != set(_PROFILE_ENGINE_FIELDS):
+                    raise ValueError()
+                ScanConfig.from_mapping({**self._config_values, **overlay})
+                self._config_values.update(overlay)
+            except Exception:
+                raise BuddyOperationError('scan-profile-record-invalid') from None
         # Buddy's selected profile and worker count must not rewrite the shared
         # LeakGuard CLI/Git configuration. Keep its overlay in private state.
         self.config_path = self.state_dir / "buddy-config.json"
@@ -709,6 +725,58 @@ class BuddyBackend:
         }
 
     @_backend_locked
+    def scan_profiles(self):
+        from leakguard_host.scan_profiles import catalog, effective_digest
+        result = catalog()
+        path = self.state_dir / 'scan-profile.json'
+        result['current'] = None
+        if path.exists() or path.is_symlink():
+            try:
+                if path.is_symlink() or path.stat().st_size > 1_000_000:
+                    raise ValueError()
+                record = json.loads(path.read_text())
+                from leakguard_host.scan_profiles import validate_document
+                record['document'] = validate_document(record['document'])
+                record['customized'] = record['effective_digest'] != effective_digest(self._config_values, self._protection)
+                result['current'] = {key: record[key] for key in ('document', 'identity', 'effective_digest', 'customized')}
+            except Exception:
+                result['record_error'] = 'scan-profile-record-invalid'
+        return result
+
+    @_backend_locked
+    def preview_scan_profile(self, document):
+        from leakguard_host.scan_profiles import resolve
+        return resolve(document, base_config=self._config_values, base_protection=self._protection).preview()
+
+    @_backend_locked
+    def apply_scan_profile(self, document, expected_identity):
+        from leakguard_host.scan_profiles import resolve, preflight
+        plan = resolve(document, base_config=self._config_values, base_protection=self._protection)
+        if type(expected_identity) is not str or expected_identity != plan.identity:
+            raise BuddyOperationError('scan-profile-preview-stale')
+        preflight(plan)
+        path = self.state_dir / 'scan-profile.json'
+        if path.is_symlink() or path.exists() and path.stat().st_size > 1_000_000:
+            raise BuddyOperationError('scan-profile-record-invalid')
+        previous = path.read_bytes() if path.exists() else None
+        receipt = plan.preview()
+        record = {'document': plan.document, 'identity': plan.identity, 'effective_digest': receipt['effective_digest'],
+                  'engine_overrides': {key: plan.config[key] for key in _PROFILE_ENGINE_FIELDS}}
+        encoded = json.dumps(record, sort_keys=True, indent=2).encode()
+        if len(encoded) > 1_000_000:
+            raise BuddyOperationError('scan-profile-invalid')
+        _atomic_private_write(path, encoded)
+        try:
+            result = self._save_resolved_settings(plan.config, plan.protection)
+        except BaseException:
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                _atomic_private_write(path, previous)
+            raise
+        return {**result, 'profile': receipt, 'runtime_preflight': 'passed'}
+
+    @_backend_locked
     def save_settings(self, payload: dict[str, Any]):
         from leakguard_host.protection import validate
         protection=validate(payload.get('protection',self._protection))
@@ -721,19 +789,22 @@ class BuddyBackend:
         if type(scan_workers) is not int or scan_workers not in {1, 2}:
             raise ValueError("settings-invalid")
         values["scan_workers"] = scan_workers
+        return self._save_resolved_settings(values, protection)
+
+    def _save_resolved_settings(self, values, protection):
         checked = self._ScanConfig.from_mapping(values)
         previous=self._protection
         self._protection=protection
         try:
             _atomic_private_write(self.protection_config_path,json.dumps(protection,sort_keys=True,indent=2).encode())
-            host_restarted = self._replace_scan_config(values, checked)
+            host_restarted = self._replace_scan_config(values, checked, rollback_protection=previous)
         except BaseException:
             self._protection=previous
             _atomic_private_write(self.protection_config_path,json.dumps(previous,sort_keys=True,indent=2).encode())
             raise
         return {"settings": self.settings(), "observations_locked": False, "host_restarted": host_restarted}
 
-    def _replace_scan_config(self, values: dict[str, Any], checked: object) -> bool:
+    def _replace_scan_config(self, values: dict[str, Any], checked: object, *, rollback_protection=None) -> bool:
         """Swap host configuration while retaining the unlocked encrypted store."""
         old_values, old_config = self._config_values, self._config
         store = self._observation_store
@@ -752,6 +823,8 @@ class BuddyBackend:
             return store is not None
         except BaseException:
             self._config_values, self._config = old_values, old_config
+            if rollback_protection is not None:
+                self._protection = rollback_protection
             try:
                 self._write_config(old_values)
             except Exception:
