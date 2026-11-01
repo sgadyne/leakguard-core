@@ -499,6 +499,42 @@ class RefreshQueueEvidence(unittest.TestCase):
                                                 prefer_priority=False, queue_class='refresh')
         self.assertEqual(fallback[0][0], paths_by_bucket[buckets[0]])
 
+    def test_known_completed_directory_version_change_gets_urgent_refresh(self):
+        bucket, paths = same_bucket_paths(9)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        initial_states = ['enumerated', 'inaccessible', 'enumerated', 'enumerated',
+                          'enumerated', 'enumerated', 'enumerated', 'alias', 'enumerated']
+        inventory.inventory_put([
+            (path, 'one', 'directory', None if i == 8 else 'before', state, 10, 1, 0, None, 'old')
+            for i, (path, state) in enumerate(zip(paths, initial_states))
+        ])
+        inventory.inventory_put([
+            (paths[0], 'one', 'directory', 'after', 'enumerating', 10, 1, 0, None, None),
+            (paths[1], 'one', 'directory', 'after', 'enumerating', 10, 1, 0, None, None),
+            (paths[2], 'one', 'directory', 'before', 'enumerating', 10, 1, 0, None, None),
+            (paths[3], 'two', 'directory', 'after', 'enumerating', 10, 1, 0, None, None),
+            (paths[4], 'one', 'directory', 'after', 'enumerating', 10, 2, 0, None, None),
+            (paths[5], 'one', 'directory', 'after', 'excluded', 10, 1, 0, None, 'operator-exclusion'),
+            (paths[6], 'one', 'directory', 'after', 'protected', 10, 1, 0, None, 'protected'),
+            (paths[7], 'one', 'directory', 'after', 'enumerating', 10, 1, 0, None, None),
+            (paths[8], 'one', 'directory', 'first', 'enumerating', 10, 1, 0, None, None),
+        ])
+        rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
+        version = 'metadata-version-refresh-during-backfill'
+        self.assertEqual([(rows[path][4], rows[path][9]) for path in paths[:2]],
+                         [('enumerating', version), ('enumerating', version)])
+        self.assertEqual(rows[paths[2]][4], 'enumerated')
+        for path in (paths[3], paths[4], paths[7], paths[8]):
+            self.assertIsNone(rows[path][9])
+        self.assertEqual((rows[paths[5]][4], rows[paths[5]][9]), ('excluded', 'operator-exclusion'))
+        self.assertEqual((rows[paths[6]][4], rows[paths[6]][9]), ('protected', 'protected'))
+        self.assertFalse(inventory.inventory_observed(paths[0], 'one', 1, 'directory', 'after', 0))
+        selected, _ = inventory.inventory_page('one', 'directory', 'enumerating', limit=10,
+                                                prefer_priority=False, queue_class='refresh')
+        self.assertCountEqual([row[0] for row in selected], paths[:2])
+        self.assertTrue(all(len(row) == 10 for row in selected))
+
     def test_version_tag_precedes_periodic_in_the_same_bucket(self):
         bucket, paths = same_bucket_paths(3)
         inventory, connection = partitions(bucket)
