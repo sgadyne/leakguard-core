@@ -104,3 +104,11 @@ projection. exception_type:null means a supervised component reported a safe cod
 without exposing its underlying exception. Recovery is conservative: the finite
 source must complete without terminal inspection gaps; successful unrelated work
 does not erase or recover an earlier failure. Source/job IDs are opaque.
+
+
+A replacement source ID cannot inherit an inspected classification from another
+source, even if the metadata signature matches. Regular and saved content
+admission both fence the job's inventory generation. A same-source recurring
+reconciliation may retain the already inspected exact metadata/content version;
+that optimization does not increment a completion counter or supply a fresh
+inspection timestamp in the new generation.

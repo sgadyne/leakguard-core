@@ -18,6 +18,13 @@ PACKAGES = {
     "jose_recognizers": "plugins/jose_recognizers/src/jose_recognizers",
 }
 TESTS = (
+    "tests/test_inspection_diagnostics.py",
+    "tests/test_measure_pipeline_cost.py",
+    "tests/test_overnight_recognition.py",
+    "packages/leakguard_vault/tests/test_inspection_evidence.py",
+    "packages/leakguard_host/tests/test_host_inspection_evidence.py",
+    "packages/leakguard_host/tests/test_remote_inspection_evidence.py",
+    "packages/leakguard_host/tests/test_finite_completion_fairness.py",
     "packages/leakguard_host/tests/test_scan_profiles.py",
     "packages/leakguard_host/tests/test_scan_profiles_runtime.py",
     "apps/buddy/tests/test_profile_settings.py",

@@ -264,6 +264,7 @@ class DiscoveryCoordinator:
         # Local execution acknowledges only the attempted prefix. Other
         # consumers retain the original immediate-admission API contract.
         admission={'admit':False} if source.get('kind')=='local' else {}
+        if 'inventory_generation' in job:admission['generation']=job['inventory_generation']
         if job['slices']%10==5:
             refresh_key='refresh_'+key
             rows,cursor=self.store.inventory_page(source['id'],kind,status,

@@ -11,6 +11,7 @@ from .discovery import _Evidence,_priority,_advance_partitions
 from .errors import HostError
 from .ssh import SSHRunner
 from .protected_paths import protected_store
+from leakguard_core.diagnostics import event,retain
 
 
 def sig(info):return [info[k] for k in ('st_dev','st_ino','st_mode','st_size','st_mtime_ns','st_ctime_ns','st_flags')]
@@ -28,6 +29,11 @@ class RemoteDiscovery:
    if not hasattr(self.owner,'_ssh_directory_sessions'):self.owner._ssh_directory_sessions=DirectorySessions()
    return self.owner._ssh_directory_sessions.request(runner,source['ssh_target'],request,python=python,cancel=cancel)
   return SSHLocations(runner=runner).request(source['ssh_target'],request,python=python,cancel=cancel)
+ def _diagnostic_request(self,job,source,op,**kwargs):
+  try:return self._request(source,op,**kwargs)
+  except Exception as error:
+   retain(job,event('enumerate' if op=='enumerate' else 'acquire',getattr(error,'code',None),error))
+   raise
  def _excluded(self,path,source,settings):
   return any(path==p or path.startswith(p.rstrip('/')+'/') for p in source['exclusions'])
  def tick(self,source,job,settings,*,cancel):
@@ -53,7 +59,7 @@ class RemoteDiscovery:
     if self._excluded(path,source,settings):self.store.inventory_set(path,'excluded',detail='unknown-descendants');job['unknown_descendants']+=1
     else:
      try:
-      result=self._request(source,'enumerate',path=remote_path(source,path),cursor=json.loads(row[8]) if row[8] else None,limit=1000,cancel=cancel)
+      result=self._diagnostic_request(job,source,'enumerate',path=remote_path(source,path),cursor=json.loads(row[8]) if row[8] else None,limit=1000,cancel=cancel)
       job['remote_directory_session_capability']=result.get('session_capability','one-shot-posix')
       info=result['info'];physical=f"{source['id']}:{source['remote_identity']['machine']}:{info['st_dev']}:{info['st_ino']}"
       if not self.store.physical_visit(physical,job['inventory_generation'],path):self.store.inventory_set(path,'alias',detail='physical-directory-already-enumerated')
@@ -94,7 +100,7 @@ class RemoteDiscovery:
     if total+row[7]>32*1024*1024:break
     admitted.append(row);total+=row[7]
    if admitted:
-    fetched=self._request(source,'read',paths=[remote_path(source,r[0]) for r in admitted],max_file_bytes=self.config.to_mapping()['max_file_bytes'],cancel=cancel)
+    fetched=self._diagnostic_request(job,source,'read',paths=[remote_path(source,r[0]) for r in admitted],max_file_bytes=self.config.to_mapping()['max_file_bytes'],cancel=cancel)
     snapshots={};inputs=[]
     for item in fetched['entries']:
      logical=uri(source['ssh_target'],item['path'])
@@ -105,17 +111,21 @@ class RemoteDiscovery:
     if inputs:
      owner=self.store
      class Temporary(MemoryScanStore):
+      def record_diagnostic(self,value):
+       with owner._mutex:retain(job,value)
       def material_snapshot(self,**kwargs):return owner.material_snapshot(**kwargs)
      transient=Temporary(config=self.config.to_mapping());limits=ScanLimits(8,25,max_file_bytes=self.config.to_mapping()['max_file_bytes'],max_report_bytes=4_000_000,detector_timeout_seconds=5)
+     before_diagnostics=list(job.get('diagnostics',[]))
      try:
       with self.owner.scanner_factory(config=self.config,store=transient) as scanner:report=scanner.scan(inputs,policy=ScanPolicy.inventory(),limits=limits,use_cache=False,cancel=cancel)
-     except Exception:
+     except Exception as error:
+      if job.get('diagnostics',[])==before_diagnostics:retain(job,event('unknown',getattr(error,'code',None),error))
       transient.close()
       if cancel():return {'scanned':0,'inventory_complete':False}
       self._record_batch_outcome(job,False)
       self._retry_missing(admitted,set(),job)
       return {'scanned':0,'inventory_complete':False}
-     checked=self._request(source,'check',paths=[remote_path(source,path) for path in snapshots],cancel=cancel) if not cancel() else {'entries':[]}
+     checked=self._diagnostic_request(job,source,'check',paths=[remote_path(source,path) for path in snapshots],cancel=cancel) if not cancel() else {'entries':[]}
      checks={uri(source['ssh_target'],x['path']):x for x in checked['entries']};job['last_slice_issues']=sorted({x.code.value for x in report.issues});job['last_slice_results']=len(report.results)
      observed=set();complete_batch=len(inputs)==len(admitted) and not any(x.required for x in report.issues)
      for original in report.results:
@@ -125,10 +135,15 @@ class RemoteDiscovery:
       identity=replace(original.identity,context_id=hashlib.sha256(json.dumps([original.identity.context_id,source['remote_identity'],snapshot['signature']],sort_keys=True).encode()).hexdigest(),cache_eligible=False)
       findings=tuple(replace(f,source=reference,id=hashlib.sha256(('ssh-snapshot-v1:'+logical+':'+f.id).encode()).hexdigest()) for f in original.findings)
       result=replace(original,source=reference,identity=identity,findings=findings)
-      if not valid:result=replace(result,coverage=CoverageState.INCOMPLETE,last_verified_at=None,issues=(*result.issues,CoverageIssue(ErrorCode.INPUT_CHANGED,reference,required=True)))
+      publication_failed=any(x.required and x.code is ErrorCode.STATE_FAILED for x in report.issues)
+      if not valid or publication_failed:result=replace(result,coverage=CoverageState.INCOMPLETE,last_verified_at=None,issues=(*result.issues,CoverageIssue(ErrorCode.STATE_FAILED if publication_failed else ErrorCode.INPUT_CHANGED,reference,required=True)))
       bucket=self.store._partitions.bucket(logical,'e')
-      with self.store.partition(bucket) as child:
-       view=_Evidence(child,self.store);generation=view.reserve(reference);view.record_result(result,generation=generation);job['new_findings']+=view.new_findings
+      try:
+       with self.store.partition(bucket) as child:
+        view=_Evidence(child,self.store,job);generation=view.reserve(reference);view.record_result(result,generation=generation);job['new_findings']+=view.new_findings
+      except Exception as error:
+       retain(job,event('publish','state-failed',error))
+       raise
       previous=next((row[9] for row in admitted if row[0]==logical),None)
       self._record_inventory_outcome(logical,snapshot,result,valid,job,previous);scanned+=1
      if not cancel():
@@ -141,6 +156,7 @@ class RemoteDiscovery:
   return {'scanned':scanned,'inventory_complete':job.get('inventory_complete',False) and job.get('reconcile_cursor',0)>=256}
 
  def _record_inventory_outcome(self,logical,snapshot,result,valid,job,previous):
+  observed=previous in {'content-version-refresh-during-backfill','content-refresh-during-backfill'} if isinstance(previous,str) else False
   try:previous=json.loads(previous) if previous else {}
   except (ValueError,TypeError):previous={}
   if not isinstance(previous,dict):previous={}
@@ -153,7 +169,7 @@ class RemoteDiscovery:
    # deadline. Retry that version alone before retaining an explicit gap.
    attempts+=1;job['content_batch_limit']=1;job['content_success_streak']=0
    state='pending' if attempts<3 else 'inspection-error'
-  self.store.inventory_set(logical,state,detail=json.dumps({'digest':snapshot['sha256'],'remote_signature':snapshot['signature'],'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({x.code.value for x in result.issues}),'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==snapshot['sha256'] if previous.get('digest') else None,'transport':'ssh','checked_after_scan':bool(valid)}),completion_route=('reserved_oldest' if job['slices']%10==0 else 'ordinary') if 'slices' in job else None)
+  self.store.inventory_set(logical,state,detail=json.dumps({'digest':snapshot['sha256'],'remote_signature':snapshot['signature'],'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({x.code.value for x in result.issues}),'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==snapshot['sha256'] if previous.get('digest') else None,'transport':'ssh','checked_after_scan':bool(valid)}),completion_route=('reserved_oldest' if job['slices']%10==0 else 'observed_change' if observed else 'ordinary') if 'slices' in job else None)
 
  def _retry_missing(self,rows,observed,job):
   missing=[row for row in rows if row[0] not in observed]

@@ -162,3 +162,46 @@ def test_failed_chronology_write_rolls_back_inventory_and_replay_journal(tmp_pat
         assert chronology(store,'/synthetic/pending.txt') == (100,None)
         assert store.inspection_evidence()['completed']['ordinary'] == 0
     finally:store.close()
+
+
+def test_replacement_source_with_identical_signature_cannot_inherit_inspected_state(tmp_path):
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo',PHRASE)
+    try:
+        put(store,entry(location='source-a'),100)
+        with patch('leakguard_vault.inspection.time.time',return_value=200):
+            store.inventory_set('/synthetic/pending.txt','inspected',completion_route='ordinary')
+        put(store,entry(location='source-b',generation=8),500)
+        child=store._partitions.get(EncryptedPartitions.bucket('/synthetic/pending.txt'))
+        assert child.conn.execute('SELECT location,status,generation FROM inventory').fetchone()==('source-b','pending',8)
+        assert chronology(store,'/synthetic/pending.txt')==(500,None)
+        store.checkpoint()
+        evidence=store.inspection_evidence()
+        assert evidence['pending']['with_known_age']==1
+        assert evidence['completed']['ordinary']==1 # historical source-a event only
+    finally:store.close()
+
+
+def test_same_source_exact_version_reconciliation_retains_classification_without_new_inspection_time(tmp_path):
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo',PHRASE)
+    try:
+        put(store,entry(),100)
+        with patch('leakguard_vault.inspection.time.time',return_value=200):
+            store.inventory_set('/synthetic/pending.txt','inspected',completion_route='ordinary')
+        put(store,entry(generation=8),500)
+        child=store._partitions.get(EncryptedPartitions.bucket('/synthetic/pending.txt'))
+        assert child.conn.execute('SELECT status,generation FROM inventory').fetchone()==('inspected',8)
+        assert chronology(store,'/synthetic/pending.txt')==(None,None)
+        store.checkpoint()
+        assert store.inspection_evidence()['completed']['ordinary']==1
+    finally:store.close()
+
+
+def test_regular_inventory_page_fences_generation_without_opening_old_content(tmp_path):
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo',PHRASE)
+    try:
+        put(store,entry(),100)
+        old,_=store.inventory_page('synthetic','file','pending',generation=7)
+        assert len(old)==1
+        new,_=store.inventory_page('synthetic','file','pending',generation=8)
+        assert new==[]
+    finally:store.close()
