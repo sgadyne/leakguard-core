@@ -1,0 +1,82 @@
+{
+  "date": "2026-11-01",
+  "status": "main-candidate-distribution-held",
+  "product_commit": "28eeaeff9d3db432d93250d5e1648a6e0035c972",
+  "runtime_id": "fb54b0af1dfef082c2eb8d956ed1f825209970896092a4629d93668fff62345f",
+  "artifact": "Password-Buddy-Alpha-28eeaef-macos-arm64.zip",
+  "sha256": "ccd3db2924deb40f614176f080193cd8a5151cc89594f888d245a064925a9506",
+  "source_archive": "password-buddy-source-28eeaef.tar.gz",
+  "source_archive_sha256": "9aa883b424881191a123f8d1a70ec49c42c51ddf1dd9c15adb7af925a5efd306",
+  "distribution_approved": false,
+  "changes": [
+    "Trim rolled-back admission statements before encrypted journal replay",
+    "Prioritize observed content-version changes over periodic refresh within existing work bounds",
+    "Show migrated location schedule overrides accurately"
+  ],
+  "installed_tests": {
+    "passed": 213,
+    "subtests_passed": 83,
+    "source_resource_files_matched": 100
+  },
+  "native_isolated_profile": {
+    "backup_files_verified": 663,
+    "vault_ciphertext_and_value_preserved": true,
+    "independent_locks": true,
+    "schedule_and_review_persist_across_restart": true,
+    "stopped_app_new_file_detected_after_scheduled_resume": true,
+    "nested_credential_fields": 7,
+    "declaration_negative_clear": true,
+    "live_profile_modified": false
+  },
+  "private_continuity_replay": {
+    "batches": 14,
+    "matched_current_content_version_controls": 237,
+    "strict_original_metadata_admissions": 0,
+    "required_reports_complete": true,
+    "cold_warm_and_prior_findings_equal_on_matched_versions": true,
+    "qualification": "Device-only metadata differences admitted only with matching content digests and current source fences; historical version gaps retained. This is continuity, not a population recall estimate."
+  },
+  "archive_verification": {
+    "sealed_runtime_manifest_matches": true,
+    "roundtrip_bytes_modes_links_and_signature_match": true
+  },
+  "whole_machine_acceptance": {
+    "mode": "Automatic root and shipped home seeds on an existing encrypted whole-footprint inventory after runtime upgrade; no selected-folder source or injected inventory rows",
+    "active_seconds": 493.945,
+    "completed_control_sequence": false,
+    "coverage_complete": false,
+    "final_counts": {
+      "enumerated": 987,
+      "enumerating": 11108,
+      "pending": 27513,
+      "excluded": 3119,
+      "changed": 10,
+      "inaccessible": 12,
+      "inspected": 1047,
+      "unsupported": 175,
+      "protected": 5,
+      "inspection-error": 23
+    },
+    "fresh_control_inspected": false,
+    "lower_priority_control_inspected": false,
+    "scope": "Bounded qualification window with explicit cloud/browser/live-store/mount exclusions. Known gaps are not clean results.",
+    "open_issue": "Freshness and oldest-work latency under a large backfill remain unqualified; the known changed control was still pending after runtime invalidation."
+  },
+  "next_release_gate": [
+    "Measure discovery, admission and actual inspection latency separately after upgrade and under continuing backfill",
+    "Exercise known findings downgraded by runtime invalidation, genuinely new files, same-size edits, rename/delete, and lower-priority work without selected-folder overrides",
+    "Complete the full automatic control sequence, lock/reopen and stale-path downgrade on the exact packaged runtime before approving unattended corporate use"
+  ],
+  "signing": {
+    "ad_hoc": true,
+    "developer_id": false,
+    "notarized": false
+  },
+  "limitations": [
+    "No exhaustive machine-coverage or native read-access monitoring claim",
+    "No fresh Windows or Linux desktop qualification",
+    "Prior real SSH trials are ancestor evidence; no new remote run performed during this closeout",
+    "Public signing/notarization remains unavailable"
+  ],
+  "published": false
+}

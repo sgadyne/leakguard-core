@@ -34,6 +34,13 @@ The 2026-10-31 Mac alpha is described by `docs/alpha-release-20261031.json`.
 Its app identifies product commit `0c2a394`; later CI/documentation commits do not
 change or relabel that qualified binary.
 
+The 2026-11-01 closeout candidate is recorded in `docs/alpha-closeout-20261101.json`.
+Its product commit is `28eeaef`; a later documentation commit does not relabel the
+binary. Installed, private-continuity, native upgrade/restart and archive checks
+passed. Distribution remains held: the bounded automatic whole-machine run did
+not complete its freshness and lower-priority controls under a large backlog.
+Do not treat successful selected-source GUI checks as whole-machine acceptance.
+
 ## Integrated CLI-first alpha
 
 Use the [CLI kit staging and install guide](docs/CLI-INSTALL.md). Build from a
