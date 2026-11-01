@@ -290,7 +290,7 @@ class DiscoveryCoordinator:
         from .mounted_worker import call
         try:
             result=call({'op':'availability','root':str(root),'paths':sorted(paths),
-                'expected':source.get('active_root_identity')},timeout=2,cancel=cancel)
+                'expected':source.get('active_root_identity') or source.get('root_identity')},timeout=2,cancel=cancel)
             if type(result) is not dict or set(result)!={'capability','entries'}:raise navigation.HostError('source-unavailable')
             capability=result.get('capability')
             job['known_availability_capability']=capability

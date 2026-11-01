@@ -66,13 +66,14 @@ def test_known_missing_observation_downgrades_without_positive_content_revalidat
         requests.append((request,kwargs))
         return {'capability':'descriptor-metadata','entries':[metadata_entry(tmp_path,p,'absent' if p.endswith('/absent') else 'present') for p in request['paths']]}
     monkeypatch.setattr(mounted_worker,'call',call)
-    owner._known_availability({'kind':'local','root':str(tmp_path),'id':'source','exclusions':[]},job,{'exclusions':[]},lambda:False)
+    owner._known_availability({'kind':'local','root':str(tmp_path),'id':'source','root_identity':[1,2],'exclusions':[]},job,{'exclusions':[]},lambda:False)
     assert store.events==[('absent','deleted')]
     assert store.deadlines==[None]
     assert job['known_availability_checked']==2 and job['known_availability_unknown']==1
     assert job['known_availability_cursor']=='synthetic-opaque-cursor'
     assert store.query=={'limit':25,'cursor':None}
     assert requests[0][1]['timeout']==2
+    assert requests[0][0]['expected']==[1,2]
     assert requests[0][0]['paths']==[str(tmp_path/'absent'),str(tmp_path/'present')]
 
 
