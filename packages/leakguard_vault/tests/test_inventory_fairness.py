@@ -99,7 +99,10 @@ def test_fair_admission_survives_encrypted_checkpoint_from_old_base_and_new_jour
     old_schema=module._SCHEMA[:module._SCHEMA.index('CREATE TABLE IF NOT EXISTS inventory_admissions')]
     with patch.object(module,'_SCHEMA',old_schema):
         store=EncryptedScanStore.create(path,phrase)
-        store.inventory_put([(p,'synthetic','directory','sig','enumerating',0,1,0,None,None) for p in (early,late)])
+        old_store = store._partitions.get(bucket)
+        with old_store.conn:
+            old_store.conn.executemany('INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?)',
+                [(p,'synthetic','directory','sig','enumerating',0,1,0,None,None) for p in (early,late)])
         store.checkpoint();base=store._partitions.catalog[bucket]['base'];store.close()
     store=EncryptedScanStore.open(path,phrase)
     page,cursor=store.inventory_page('synthetic','directory','enumerating',limit=1)
@@ -161,11 +164,13 @@ def test_admission_clock_update_rolls_back_if_row_stamp_fails(tmp_path):
         store.inventory_put([(p,'synthetic','file','sig','pending',0,1,1,None,None) for p in paths])
         child=store._partitions.get(bucket)
         child.conn.execute("CREATE TRIGGER reject_admission BEFORE INSERT ON inventory_admissions BEGIN SELECT RAISE(ABORT,'synthetic-admission-failure'); END")
+        clock_before=child.conn.execute('SELECT sequence FROM inventory_admission_clock WHERE id=1').fetchone()[0]
+        admissions_before=child.conn.execute('SELECT path,sequence FROM inventory_admissions ORDER BY path').fetchall()
         try:store.inventory_page('synthetic','file','pending',limit=1)
         except sqlite3.IntegrityError:pass
         else:raise AssertionError('synthetic failure was not raised')
-        assert child.conn.execute('SELECT sequence FROM inventory_admission_clock WHERE id=1').fetchone()[0]==0
-        assert child.conn.execute('SELECT count(*) FROM inventory_admissions').fetchone()[0]==0
+        assert child.conn.execute('SELECT sequence FROM inventory_admission_clock WHERE id=1').fetchone()[0]==clock_before
+        assert child.conn.execute('SELECT path,sequence FROM inventory_admissions ORDER BY path').fetchall()==admissions_before
         assert store.inventory_counts()=={'pending':2}
     finally:store.close()
 
@@ -181,7 +186,10 @@ def test_old_loader_rejects_new_admission_journal_without_reinitializing_store(t
     old_schema=module._SCHEMA[:module._SCHEMA.index('CREATE TABLE IF NOT EXISTS inventory_admissions')]
     with patch.object(module,'_SCHEMA',old_schema):
         store=EncryptedScanStore.create(path,phrase)
-        store.inventory_put([(p,'synthetic','file','sig','pending',0,1,1,None,None) for p in paths])
+        old_store = store._partitions.get(bucket)
+        with old_store.conn:
+            old_store.conn.executemany('INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?)',
+                [(p,'synthetic','file','sig','pending',0,1,1,None,None) for p in paths])
         store.checkpoint();store.close()
     store=EncryptedScanStore.open(path,phrase)
     store.inventory_page('synthetic','file','pending',limit=1);store.checkpoint();store.close()
@@ -198,6 +206,73 @@ def test_old_loader_rejects_new_admission_journal_without_reinitializing_store(t
         page,_=store.inventory_page('synthetic','file','pending',limit=1,prefer_priority=False)
         assert page[0][0]==paths[1]
     finally:store.close()
+
+
+class ArrivalFairnessEvidence(unittest.TestCase):
+    def test_continuous_new_arrivals_cannot_monopolize_an_active_directory(self):
+        for refresh in (False, True):
+            with self.subTest(refresh=refresh):
+                bucket, paths = same_bucket_paths(8)
+                inventory, connection = partitions(bucket)
+                self.addCleanup(connection.close)
+                tag = 'metadata-refresh-during-backfill' if refresh else None
+                def row(path):
+                    return (path, 'one', 'directory', 'sig', 'enumerating', 0, 1, 0, None, tag)
+                inventory.inventory_put([row(paths[0])])
+                page, cursor = inventory.inventory_page('one', 'directory', 'enumerating', limit=1,
+                    prefer_priority=False, queue_class='refresh' if refresh else None)
+                self.assertEqual(page[0][0], paths[0])
+                observed = []
+                for path in paths[1:]:
+                    inventory.inventory_put([row(path)])
+                    page, cursor = inventory.inventory_page('one', 'directory', 'enumerating',
+                        cursor=cursor, limit=1, prefer_priority=False,
+                        queue_class='refresh' if refresh else None)
+                    observed.append(page[0][0])
+                self.assertGreaterEqual(observed.count(paths[0]), 2)
+                self.assertEqual(observed[0], paths[0])
+
+    def test_legacy_unstamped_rediscovery_stays_older_than_new_arrival(self):
+        bucket, (new, old) = same_bucket_paths(2)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        legacy = (old, 'one', 'directory', 'sig', 'enumerating', 0, 1, 0, None, None)
+        connection.execute('INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?)', legacy)
+        connection.commit()
+        inventory.inventory_put([legacy])
+        self.assertEqual(connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0], 0)
+        self.assertEqual(connection.execute('SELECT count(*) FROM inventory_admissions').fetchone()[0], 0)
+        inventory.inventory_put([(new, 'one', 'directory', 'sig', 'enumerating', 0, 1, 0, None, None)])
+        page, _ = inventory.inventory_page('one', 'directory', 'enumerating', limit=1, prefer_priority=False)
+        self.assertEqual(page[0][0], old)
+
+    def test_rediscovery_does_not_advance_existing_stamp_or_clock(self):
+        bucket, paths = same_bucket_paths(2)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        row = (paths[0], 'one', 'directory', 'sig', 'enumerating', 0, 1, 0, None, None)
+        inventory.inventory_put([row])
+        before = connection.execute('SELECT path,sequence FROM inventory_admissions').fetchall()
+        clock = connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0]
+        inventory.inventory_put([row, row])
+        self.assertEqual(connection.execute('SELECT path,sequence FROM inventory_admissions').fetchall(), before)
+        self.assertEqual(connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0], clock)
+
+    def test_arrival_stamp_failure_rolls_back_row_and_clock(self):
+        bucket, paths = same_bucket_paths(2)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        row = lambda path: (path, 'one', 'directory', 'sig', 'enumerating', 0, 1, 0, None, None)
+        inventory.inventory_put([row(paths[0])])
+        clock = connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0]
+        old_stamps = connection.execute('SELECT path,sequence FROM inventory_admissions').fetchall()
+        connection.execute("CREATE TRIGGER reject_arrival BEFORE INSERT ON inventory_admissions BEGIN SELECT RAISE(ABORT,'synthetic-arrival-failure'); END")
+        connection.commit()
+        with self.assertRaises(sqlite3.IntegrityError):
+            inventory.inventory_put([row(paths[1])])
+        self.assertEqual(connection.execute('SELECT path FROM inventory').fetchall(), [(paths[0],)])
+        self.assertEqual(connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0], clock)
+        self.assertEqual(connection.execute('SELECT path,sequence FROM inventory_admissions').fetchall(), old_stamps)
 
 
 class RefreshQueueEvidence(unittest.TestCase):
@@ -413,11 +488,13 @@ class RefreshQueueEvidence(unittest.TestCase):
         inventory, connection = partitions(bucket)
         self.addCleanup(connection.close)
         inventory.inventory_put([(paths[0], 'one', 'file', 'sig', 'pending', 0, 1, 1, None, 'content-refresh-during-backfill')])
+        before_clock = connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0]
+        before_rows = connection.execute('SELECT path,sequence FROM inventory_admissions').fetchall()
         for queue, kind in (('unknown', 'file'), ('', 'file'), (False, 'file'), ('refresh', 'other')):
             with self.subTest(queue=queue, kind=kind), self.assertRaises(StateError):
                 inventory.inventory_page('one', kind, 'pending', queue_class=queue)
-        self.assertEqual(connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0], 0)
-        self.assertEqual(connection.execute('SELECT count(*) FROM inventory_admissions').fetchone()[0], 0)
+        self.assertEqual(connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0], before_clock)
+        self.assertEqual(connection.execute('SELECT path,sequence FROM inventory_admissions').fetchall(), before_rows)
 
 
 def test_refresh_selector_survives_encrypted_checkpoint(tmp_path):
@@ -438,5 +515,74 @@ def test_refresh_selector_survives_encrypted_checkpoint(tmp_path):
                                        prefer_priority=False, queue_class='refresh')
         assert len(rows) == 1 and len(rows[0]) == 10 and rows[0][0] == fresh
         assert store.inventory_counts('one') == {'pending': 2}
+    finally:
+        store.close()
+
+
+def test_arrival_sequence_survives_encrypted_checkpoint_and_reopen(tmp_path):
+    from leakguard_vault import EncryptedScanStore
+    path = tmp_path / 'arrival.lgo'
+    phrase = 'synthetic-arrival-checkpoint'
+    _, (new, old) = same_bucket_paths(2)
+    def row(name):
+        return (name, 'one', 'directory', 'sig', 'enumerating', 0, 1, 0, None, None)
+    store = EncryptedScanStore.create(path, phrase)
+    try:
+        store.inventory_put([row(old)])
+        page, _ = store.inventory_page('one', 'directory', 'enumerating', limit=1, prefer_priority=False)
+        assert page[0][0] == old
+        store.checkpoint()
+    finally:
+        store.close()
+    store = EncryptedScanStore.open(path, phrase)
+    try:
+        store.inventory_put([row(new)])
+        store.checkpoint()
+    finally:
+        store.close()
+    store = EncryptedScanStore.open(path, phrase)
+    try:
+        page, cursor = store.inventory_page('one', 'directory', 'enumerating', limit=1, prefer_priority=False)
+        assert page[0][0] == old and len(page[0]) == 10
+        page, _ = store.inventory_page('one', 'directory', 'enumerating', cursor=cursor, limit=1, prefer_priority=False)
+        assert page[0][0] == new and len(page[0]) == 10
+        assert store.inventory_counts('one') == {'enumerating': 2}
+    finally:
+        store.close()
+
+
+def test_failed_arrival_journal_replays_without_row_or_clock_change(tmp_path):
+    from leakguard_vault import EncryptedScanStore
+    path = tmp_path / 'arrival-rollback.lgo'
+    phrase = 'synthetic-arrival-rollback'
+    bucket, (old, new) = same_bucket_paths(2)
+    def row(name):
+        return (name, 'one', 'directory', 'sig', 'enumerating', 0, 1, 0, None, None)
+    store = EncryptedScanStore.create(path, phrase)
+    store.inventory_put([row(old)])
+    store.checkpoint()
+    child = store._partitions.get(bucket)
+    before = child.conn.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0]
+    child.conn.execute("CREATE TRIGGER reject_arrival BEFORE INSERT ON inventory_admissions BEGIN SELECT RAISE(ABORT,'synthetic-arrival-failure'); END")
+    child.conn.commit()
+    try:
+        try:
+            store.inventory_put([row(new)])
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError('synthetic failure not raised')
+        child.conn.execute('DROP TRIGGER reject_arrival')
+        child.conn.commit()
+        store.checkpoint()
+        assert store._partitions.catalog[bucket]['logs'], 'exercise replay, not only a new base'
+    finally:
+        store.close()
+    store = EncryptedScanStore.open(path, phrase)
+    try:
+        child = store._partitions.get(bucket)
+        assert child.conn.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0] == before
+        assert child.conn.execute('SELECT path FROM inventory').fetchall() == [(old,)]
+        assert child.conn.execute('SELECT path,sequence FROM inventory_admissions').fetchall() == [(old, before)]
     finally:
         store.close()
