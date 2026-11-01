@@ -18,7 +18,7 @@ def main():
  config=work/"config.json";config.write_text(json.dumps({"worker_policy":"supervised-alpha","gitleaks_executable":str(args.gitleaks.absolute()),"scan_workers":2,"max_file_bytes":20971520}))
  source=work/"synthetic-source";source.mkdir()
  (source/"operator.env").write_text('corpPassword="profile-synthetic-positive-139"\nteamToken="profile-synthetic-session-271"\n'+"".join('corpPassword="profile-synthetic-positive-%03d"\n'%i for i in range(104)))
- (source/"negative.env").write_text("myCorpPasswordSuffix="profile-synthetic-negative-911"\ncorpPassword=$ENV_REFERENCE\n")
+ (source/"negative.env").write_text('myCorpPasswordSuffix="profile-synthetic-negative-911"\ncorpPassword=$ENV_REFERENCE\n')
  obs="Synthetic scan phrase "+uuid.uuid4().hex;vault="Synthetic vault phrase "+uuid.uuid4().hex
  result={"source_commit":subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT,text=True).strip(),"scope":"real authenticated loopback backend + Chromium; synthetic owned profile; supervised-alpha Linux policy; no Mac native certification","automatic_local_discovery":False,"source_dirty":bool(subprocess.check_output(["git","status","--porcelain"],cwd=ROOT,text=True)),"phases":[],"passed":False}
  child=None
