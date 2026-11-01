@@ -2,6 +2,7 @@
 """Measure a paired synthetic scan using the installed LeakGuard runtime.
 
 Fixture JSON: {"synthetic_only": true, "files": [{"name": "a.txt", "text": "..."}]}
+A file may instead contain bounded strict base64 in a "base64" field for binary formats.
 Names are single path components; input is explicitly attested synthetic by its
 creator. Files are staged into a private temporary directory in manifest order.
 Use the same fixture, config, arguments, interpreter and backend for comparisons.
@@ -10,11 +11,15 @@ This command runs local scans only. It does not access SSH or a user's profile.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+from dataclasses import asdict
 from collections import Counter, defaultdict
 from contextlib import ExitStack, contextmanager
 import functools
 import hashlib
 import inspect
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -67,13 +72,21 @@ def fixture(path):
         raise ValueError('fixture must contain 1 to 256 files')
     names = set()
     for entry in files:
-        if type(entry) is not dict or set(entry) != {'name', 'text'}:
+        if type(entry) is not dict or set(entry) not in ({'name', 'text'}, {'name', 'base64'}):
             raise ValueError('invalid fixture entry')
-        name, content = entry['name'], entry['text']
+        name = entry['name']
+        content = entry.get('text', entry.get('base64'))
         if (type(name) is not str or not name or name in {'.', '..'} or '/' in name
                 or '\\' in name or '\x00' in name or name in names or len(name) > 200
-                or type(content) is not str or len(content.encode('utf-8')) > 1_000_000):
+                or type(content) is not str):
             raise ValueError('invalid fixture file')
+        try:
+            payload = content.encode('utf-8') if 'text' in entry else base64.b64decode(content, validate=True)
+        except (ValueError, UnicodeError, binascii.Error):
+            raise ValueError('invalid fixture encoding') from None
+        if len(payload) > 1_000_000:
+            raise ValueError('invalid fixture file')
+        entry['payload'] = payload
         names.add(name)
     return files, digest(raw)
 
@@ -276,8 +289,9 @@ def instrumentation(meter):
         for cls in (scan_store.MemoryScanStore, scan_store.SQLiteScanStore):
             wrap(cls, 'record_result', 'publication')
         # Imported aliases are intentional: both call sites must be wrapped.
-        for module in (backends, plugins):
+        for module in (backends, plugins, extraction):
             wrap(module, 'run_worker', 'worker_run', 'worker_run_attempts')
+        wrap(extraction, 'run_worker', 'parser_worker', 'parser_worker_attempts')
         wrap(_session.FramedWorker, '__init__', 'session_start', 'session_start_attempts')
         for module, category in ((_supervision, 'worker'), (_session, 'session'), (navigation, 'navigation_helper')):
             stack.enter_context(patch.object(module, 'subprocess', _SubprocessProxy(meter, category)))
@@ -289,11 +303,24 @@ def signature(report, root):
     for result in report.results:
         relative = str(Path(result.source.path).relative_to(root))
         findings = sorted((f.part_id, f.rule, f.detector_severity.value, f.severity.value,
-                           f.start_line, f.end_line, f.classification.value) for f in result.findings)
-        issues = sorted((i.code.value, i.required, i.omission_id or '') for i in result.issues)
-        rows.append((relative, result.coverage.value, findings, issues))
-    issues = sorted((i.code.value, i.required, i.omission_id or '') for i in report.issues)
+                           f.start_line, f.end_line, f.classification.value, f.detector_id,
+                           json_digest(asdict(f.analysis)) if f.analysis else '') for f in result.findings)
+        issues = sorted((i.code.value, i.required, i.omission_id or '', i.part_id or '') for i in result.issues)
+        rows.append((relative, result.coverage.value, result.content.digest if result.content else '',
+                     result.identity.policy_id, result.identity.runtime_id, result.identity.context_id, findings, issues))
+    def issue_source(i):
+        if i.source is None:
+            return ''
+        try:
+            return str(Path(i.source.path).relative_to(root))
+        except ValueError:
+            return '<outside-fixture>'
+    issues = sorted((i.code.value, i.required, i.omission_id or '', i.part_id or '', issue_source(i)) for i in report.issues)
     value = {'results': sorted(rows), 'issues': issues,
+             'omission_count': report.coverage.omission_count,
+             'pending_files': report.coverage.pending_files,
+             'pending_directories': report.coverage.pending_directories,
+             'reason_codes': sorted(code.value for code in report.decision.reason_codes),
              'enumeration_complete': report.coverage.enumeration_complete,
              'required_complete': report.coverage.required_complete,
              'decision': report.decision.verdict.value}
@@ -327,22 +354,29 @@ def main():
     for path in sorted(source_root.rglob('*.py')):
         if path.is_file() and not path.is_symlink():
             runtime_files.append((str(path.relative_to(source_root)), digest(read_bounded(path, 8_000_000))))
+    versions = {}
+    for package in ('pypdf', 'olefile', 'packaging', 'psutil', 'cachetools'):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
     meter = Meter()
     receipt = {'schema_version': 1, 'synthetic_only': True,
         'identity': {'fixture_json_sha256': fixture_digest, 'config_raw_sha256': digest(read_bounded(args.config, 1_000_000)),
                      'effective_config_sha256': json_digest(config.to_mapping()), 'backend_sha256': digest(read_bounded(args.backend, 512 * 1024 * 1024)),
-                     'runtime_python_tree_sha256': json_digest(runtime_files), 'interpreter': platform.python_version(),
+                     'runtime_python_tree_sha256': json_digest(runtime_files), 'measurement_tool_sha256': digest(read_bounded(Path(__file__), 1_000_000)),
+                     'dependencies': versions, 'interpreter': platform.python_version(),
                      'platform': platform.platform(), 'limits': {'deadline_seconds': args.deadline, 'max_files': len(files),
                          'max_file_bytes': args.max_file_bytes, 'max_directory_entries': args.max_directory_entries}, 'use_cache': not args.no_cache},
-        'fixture': {'file_count': len(files), 'declared_input_bytes': sum(len(f['text'].encode('utf-8')) for f in files),
-                    'manifest_order_sha256': json_digest([(f['name'], digest(f['text'].encode('utf-8'))) for f in files])},
+        'fixture': {'file_count': len(files), 'declared_input_bytes': sum(len(f['payload']) for f in files),
+                    'manifest_order_sha256': json_digest([(f['name'], digest(f['payload'])) for f in files])},
         'timing_accounting': 'Nanoseconds, summed per call. Exclusive subtracts directly nested instrumented spans on the same thread. Worker threads overlap each other and the main scan; sums are not a wall-time decomposition. Navigation measures listing open/close, next and directory signature calls, not all walk overhead. Source bounded-read bytes count returned data from successful reads, including source acquisition, proof/context reads and final validation, not failed or non-file reads. Generator timing calls count resume/close operations; plugin_detect_calls counts generator creation. Popen success counts report process starts; call attempts are separate. Runtime stream bytes count reads in scan_policy file identity only; admitted bytes are declared stat sizes, including rejected admissions. SSH RPC bytes are not measured.',
         'runs': []}
     with tempfile.TemporaryDirectory(prefix='leakguard-synthetic-cost-') as temporary:
         root = Path(temporary) / 'fixture'
         root.mkdir()
         for item in files:
-            (root / item['name']).write_text(item['text'], encoding='utf-8')
+            (root / item['name']).write_bytes(item['payload'])
         with instrumentation(meter):
             before = meter.snapshot()
             wall = time.perf_counter_ns()
