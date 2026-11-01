@@ -250,6 +250,36 @@ class RefreshQueueEvidence(unittest.TestCase):
         self.assertEqual(values[paths[0]], ('new-source', 'pending', 'content-refresh-during-backfill'))
         self.assertEqual(values[paths[1]], ('one', 'pending', 'ordinary-rediscovery'))
 
+    def test_active_directory_refresh_tag_survives_only_matching_rediscovery(self):
+        bucket, paths = same_bucket_paths(8)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        tag = 'metadata-refresh-during-backfill'
+        inventory.inventory_put([
+            (path, 'one', 'directory', 'same', 'enumerating', 10, 1, 0, 'cursor',
+             'ordinary' if i == 6 else tag)
+            for i, path in enumerate(paths)
+        ])
+        inventory.inventory_put([
+            (paths[0], 'one', 'directory', 'same', 'enumerating', 10, 1, 0, None, None),
+            (paths[1], 'one', 'directory', 'changed', 'enumerating', 10, 1, 0, None, None),
+            (paths[2], 'two', 'directory', 'same', 'enumerating', 10, 1, 0, None, None),
+            (paths[3], 'one', 'directory', 'same', 'enumerating', 10, 2, 0, None, None),
+            (paths[4], 'one', 'directory', 'same', 'enumerating', 10, 1, 0, None, 'new-detail'),
+            (paths[5], 'one', 'directory', 'same', 'enumerated', 10, 1, 0, None, None),
+            (paths[6], 'one', 'directory', 'same', 'enumerating', 10, 1, 0, None, None),
+            (paths[7], 'one', 'file', 'same', 'enumerating', 10, 1, 0, None, None),
+        ])
+        rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
+        self.assertEqual((rows[paths[0]][8], rows[paths[0]][9]), ('cursor', tag))
+        for path in (paths[1], paths[2], paths[3], paths[5], paths[6], paths[7]):
+            self.assertIsNone(rows[path][9])
+        self.assertEqual(rows[paths[4]][9], 'new-detail')
+        self.assertIsNone(rows[paths[3]][8])  # New generation cannot inherit cursor.
+        filtered, _ = inventory.inventory_page('one', 'directory', 'enumerating',
+                                                limit=10, queue_class='refresh')
+        self.assertEqual([row[0] for row in filtered], [paths[0]])
+
     def test_refresh_filter_is_exact_and_scoped_by_source_kind_and_state(self):
         bucket, paths = same_bucket_paths(7)
         inventory, connection = partitions(bucket)
