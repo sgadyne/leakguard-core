@@ -1,7 +1,7 @@
 import { Alert, Box, Divider, Stack, Typography } from "@mui/material";
 import { Surface } from "./workbench";
 
-type Diagnostic={code:string;stage:string;exception_type?:string;at:number|null;retry_count:number;recovered?:boolean;source_id?:string;job_id?:string};
+type Diagnostic={code:string;stage:string;exception_type?:string|null;at:number|null;retry_count:number;recovered?:boolean;source_id?:string;job_id?:string};
 export type InspectionEvidence={schema_version:1;measured_at:number|null;observation_started_at:number|null;last_complete_inspection_at:number|null;pending?:{with_known_age?:number;with_unknown_age?:number;oldest_observed_pending_at?:number|null;age_buckets?:Record<string,number>};completed?:{observed_change?:number;ordinary?:number;reserved_oldest?:number;oldest_observed_wait_seconds?:number|null};diagnostics?:Diagnostic[]};
 const number=(v:unknown):v is number=>typeof v==="number"&&Number.isFinite(v)&&v>=0;
 export const recordedTime=(v:unknown)=>number(v)?new Date(v*1000).toLocaleString():"Not measured";

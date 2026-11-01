@@ -101,7 +101,8 @@ export async function request<T = any>(path: string, method = "GET", body?: unkn
     const code = /^[a-z0-9-]{1,80}$/.test(rawCode) ? rawCode : "request-failed";
     const error = new Error((messages[code] || navigationStatusLabels[code] || "The local request failed. Check the details and try again.") + "\nDetails: " + code) as ApiError;
     error.code = code; error.status = response.status;
-    if (response.status >= 500) onDisconnect?.();
+    // An authenticated HTTP error is recoverable service state, not a lost connection.
+    // Preserve the current editor so a failed preflight or write can be corrected.
     throw error;
   }
   onReconnect?.();
