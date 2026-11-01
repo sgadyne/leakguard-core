@@ -44,7 +44,7 @@ def test_refresh_slot_falls_back_without_skipping_regular_cursor():
     assert store.calls[0][1]['cursor']==0 and store.calls[0][1]['queue_class']=='refresh'
     assert store.calls[1][1]['cursor']==0 and store.calls[1][1]['prefer_priority'] is False
     assert job['refresh_inventory_cursor']==8 and job['fair_inventory_cursor']==17 and job['inventory_cursor']==9
-    assert job['navigation_profile']['version']=='bounded-observed-refresh-v5'
+    assert job['navigation_profile']['version']=='bounded-observed-refresh-v6'
     job['slices']=6;store.calls.clear()
     owner.inventory_page({'id':'source'},job,'file',('pending','changed'),limit=25)
     assert len(store.calls)==1 and store.calls[0][1]['prefer_priority'] is True
@@ -129,7 +129,7 @@ def test_interrupted_observed_directory_page_resumes_after_encrypted_reopen(tmp_
     clock=[0.];monkeypatch.setattr('leakguard_host.discovery.time.monotonic',lambda:clock[0])
     original=store.inventory_put
     def publish_then_expire(rows):
-        original(rows);clock[0]=3.
+        versions=original(rows);clock[0]=3.;return versions
     store.inventory_put=publish_then_expire
     try:
         owner._enumerate(source,job,{'exclusions':[]},lambda:False,2,observed=[(str(root),'directory')],content_followup=[])
@@ -293,6 +293,7 @@ def test_observed_parent_change_executes_bounded_followup_before_unrelated_backf
                          (str(negative),'source','file',_sig(negative.stat()),'pending',200,1,negative.stat().st_size,None,None),
                          (str(oldest),'source','file',_sig(oldest.stat()),'pending',200,1,oldest.stat().st_size,None,None)])
     new=root/'genuinely-new.env';new.write_text('ordinary synthetic new-version control')
+    negative.unlink();negative.write_text('ordinary synthetic newly replaced negative')
     owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}))
     # Model a large unrelated backlog whose ordinary page cannot reach this
     # parent's shard in this slice. The metadata worker and scanner stay real.
@@ -435,7 +436,7 @@ def test_deferred_observed_version_keeps_fifo_execution_under_new_events(tmp_pat
     from leakguard_host.protection import defaults
     store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-observed-event-fifo')
     backlog=[tmp_path/f'old-{i:03}.txt' for i in range(100)]
-    events=[tmp_path/f'new-{i:03}.env' for i in range(3)]
+    events=[tmp_path/f'new-{i:03}.env' for i in range(5)]
     for path in [*backlog,*events]:path.write_text('ordinary synthetic event fairness control')
     def row(path):return (str(path),'source','file',_sig(path.stat()),'pending',0,1,path.stat().st_size,None,None)
     store.inventory_put([row(path) for path in [*backlog,*events]])
@@ -459,12 +460,14 @@ def test_deferred_observed_version_keeps_fifo_execution_under_new_events(tmp_pat
         # Budget-truncated event admission survives a serialized scheduler
         # checkpoint; subsequent events cannot repeatedly overtake it.
         job=__import__('json').loads(__import__('json').dumps(job));owner.scanner=original
-        for step in (1,2):
+        for step in range(1,5):
             clock[0]=0.;job['slices']=step+1
             owner._known_availability=lambda *a,**k:[(str(events[step]),'file')]
             owner.tick(source,job,defaults(),cancel=lambda:False)
-            child=store._partitions.get(store._partitions.bucket(str(events[step-1])))
-            assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(events[step-1]),)).fetchone()[0]=='inspected', 'new events overtook an unexecuted observed version'
+            if step%2==0:
+                expected=events[step//2-1]
+                child=store._partitions.get(store._partitions.bucket(str(expected)))
+                assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(expected),)).fetchone()[0]=='inspected', 'new events overtook an unexecuted observed version'
             assert len(job['content_remainder'])<=100
     finally:owner.close();store.close()
 
@@ -483,4 +486,73 @@ def test_later_metadata_pages_do_not_overtake_an_earlier_changed_version(tmp_pat
     try:
         owner._enumerate(source,job,{'exclusions':[]},lambda:False,time.monotonic()+2,observed=[(str(path),'directory') for path in (first,later)],content_followup=followup)
         assert len(followup)==25 and followup[0]==str(initial), 'later metadata pages replaced an unexecuted changed version'
+    finally:owner.close();store.close()
+
+
+def test_observed_parent_does_not_promote_unchanged_pending_subtree(tmp_path):
+    import time
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    root=tmp_path/'inputs';root.mkdir();old=root/'old-pending';old.mkdir()
+    unseen=old/'ordinary.txt';unseen.write_text('ordinary synthetic preexisting backfill')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-unchanged-subtree')
+    source={'id':'source','root':str(root),'kind':'local','exclusions':[]}
+    store.inventory_put([(str(path),'source','directory',_sig(path.stat()),'enumerating',20,1,0,None,None) for path in (root,old)])
+    new=root/'new.env';new.write_text('ordinary synthetic genuinely new child')
+    child=store._partitions.get(store._partitions.bucket(str(old)))
+    age=child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(old),)).fetchone()[0]
+    owner=DiscoveryCoordinator(store,None);owner.inventory_page=lambda *a,**k:[];followup=[]
+    job={'inventory_generation':1,'slices':1,'metadata_enumerated':0,'unknown_descendants':0}
+    try:
+        owner._enumerate(source,job,{'exclusions':[]},lambda:False,time.monotonic()+2,observed=[(str(root),'directory')],content_followup=followup)
+        child=store._partitions.get(store._partitions.bucket(str(old)))
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(old),)).fetchone()[0]=='enumerating', 'an unchanged old subtree consumed observed-change navigation'
+        assert child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(old),)).fetchone()[0]==age
+        assert followup==[str(new)]
+    finally:owner.close();store.close()
+
+
+def test_saved_ordinary_page_gets_execution_under_continuous_observed_events(tmp_path,monkeypatch):
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    from leakguard_core.api import ScanConfig
+    from leakguard_core import backends
+    from leakguard_host.protection import defaults
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-saved-page-execution')
+    old=[tmp_path/f'old-{i:03}.txt' for i in range(100)];hot=[tmp_path/f'new-{i}.env' for i in range(5)]
+    for path in [*old,*hot]:path.write_text('ordinary synthetic sustained admission')
+    def row(path):return (str(path),'source','file',_sig(path.stat()),'pending',200 if path in old else 0,1,path.stat().st_size,None,None)
+    store.inventory_put([row(path) for path in [*old,*hot]])
+    source={'id':'source','root':str(tmp_path),'kind':'local','exclusions':[]}
+    job={'inventory_generation':1,'inventory_complete':True,'content_remainder':[str(path) for path in old],'content_batch':1,'files_scanned':0,'new_findings':0,'reconcile_cursor':256}
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}));owner.inventory_page=lambda *a,**k:[]
+    monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',lambda *a,**k:('synthetic-runtime',True));monkeypatch.setattr(backends,'detect',lambda *a,**k:())
+    try:
+        for step in range(1,5):
+            job['slices']=step;job['content_batch']=1
+            owner._known_availability=lambda *a,**k:[(str(hot[step]),'file')]
+            owner.tick(source,job,defaults(),cancel=lambda:False)
+            assert len(job['content_remainder'])<=100
+        for path in old[:2]:
+            child=store._partitions.get(store._partitions.bucket(str(path)))
+            assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(path),)).fetchone()[0]=='inspected', 'saved ordinary work was never actually executed under observed arrivals'
+    finally:owner.close();store.close()
+
+
+def test_full_observed_page_reconsiders_incoming_version_after_execution_frees_credit(tmp_path,monkeypatch):
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    from leakguard_core.api import ScanConfig
+    from leakguard_core import backends
+    from leakguard_host.protection import defaults
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-full-observed-page')
+    old=[tmp_path/f'old-{i:03}.env' for i in range(100)];new=tmp_path/'new.env'
+    for path in [*old,new]:path.write_text('ordinary synthetic observed credit')
+    store.inventory_put([(str(path),'source','file',_sig(path.stat()),'pending',0,1,path.stat().st_size,None,None) for path in [*old,new]])
+    source={'id':'source','root':str(tmp_path),'kind':'local','exclusions':[]}
+    job={'inventory_generation':1,'inventory_complete':True,'slices':1,'content_remainder':[str(path) for path in old],'observed_content_remainder':[str(path) for path in old],'content_batch':1,'files_scanned':0,'new_findings':0,'reconcile_cursor':256}
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}));owner.inventory_page=lambda *a,**k:[];owner._known_availability=lambda *a,**k:[(str(new),'file')]
+    monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',lambda *a,**k:('synthetic-runtime',True));monkeypatch.setattr(backends,'detect',lambda *a,**k:())
+    try:
+        owner.tick(source,job,defaults(),cancel=lambda:False)
+        assert job['files_scanned']==1
+        assert str(new) in job['observed_content_remainder'], 'a full page lost an incoming observation despite execution freeing credit'
+        assert len(job['content_remainder'])<=100 and set(job['observed_content_remainder'])<=set(job['content_remainder'])
     finally:owner.close();store.close()

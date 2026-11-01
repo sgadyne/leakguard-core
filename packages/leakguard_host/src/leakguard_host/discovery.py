@@ -246,7 +246,7 @@ class DiscoveryCoordinator:
         runtime and publication checks still authorize every admitted version.
         A filtered empty page never proves inventory completion.
         """
-        job['navigation_profile']={'version':'bounded-observed-refresh-v5','cycle':10,
+        job['navigation_profile']={'version':'bounded-observed-refresh-v6','cycle':10,
             'oldest_slot':0,'refresh_slot':5,'metadata_seconds':2,
             'slice_seconds':10,'max_metadata_entries':5000,
             'filtered_fallback_queries':1,'new_arrivals':'monotonic-clock',
@@ -254,7 +254,8 @@ class DiscoveryCoordinator:
             'known_availability_page_queries':8,
             'observed_followup_files':25,'observed_directory_hints':100,
             'observed_content_share':'half-batch-outside-oldest-slot',
-            'interrupted_content_page_paths':100,'content_age':'returned-results'}
+            'interrupted_content_page_paths':100,'ordinary_page_reservation':50,
+            'content_first_lane':'alternating-observed-ordinary','content_age':'returned-results'}
         key='inventory_cursor' if kind=='directory' else 'content_cursor'
         # Local execution acknowledges only the attempted prefix. Other
         # consumers retain the original immediate-admission API contract.
@@ -455,8 +456,9 @@ class DiscoveryCoordinator:
                     # Follow only descriptor-observed changes and their bounded
                     # metadata page, using the same ancestry, time and entry
                     # limits. Reserve a hint slot for an interrupted parent.
+                    versioned={path for path,kind in versions}
                     for entry in entries:
-                        if entry[2]=='directory' and entry[4]=='enumerating' and len(hints)<99 and entry[0] not in hints:hints.append(entry[0])
+                        if entry[2]=='directory' and entry[4]=='enumerating' and entry[0] in versioned and len(hints)<99 and entry[0] not in hints:hints.append(entry[0])
                     if content_followup is not None:
                         # Publication distinguishes new/changed versions from
                         # unchanged completed siblings. Reload actual pending
@@ -546,13 +548,23 @@ class DiscoveryCoordinator:
                 observed_rows=self.store.inventory_selected(source['id'],'file',('pending','changed'),observed_paths,job['inventory_generation'])
                 if job['slices']%10!=0:
                     fresh=observed_rows[:min(25,max(1,batch//2))]
-                    candidates=[*fresh,*(row for row in saved if retry(row)),*saved]
+                    observed_set={row[0] for row in observed_rows}
+                    ordinary=[row for row in saved if row[0] not in observed_set]
+                    # Either lane can consume the deadline after one file.
+                    # Alternate the first execution credit, then interleave;
+                    # saved ordinary work must execute, not merely be admitted.
+                    first,second=(fresh,ordinary) if job['slices']%2 else (ordinary,fresh)
+                    interleaved=[]
+                    for index in range(max(len(first),len(second))):
+                        if index<len(first):interleaved.append(first[index])
+                        if index<len(second):interleaved.append(second[index])
+                    candidates=[*interleaved,*(row for row in saved if retry(row)),*saved]
                     rows=list({row[0]:row for row in candidates}.values())[:100]
                 elif rows:
                     # A stream of observed arrivals can replenish this tail
                     # indefinitely. Preserve one actual oldest-work credit;
                     # any overflow stays pending with its inventory age intact.
-                    oldest=self.inventory_page(source,job,'file',('pending','changed'),limit=1)
+                    oldest=self.inventory_page(source,job,'file',('pending','changed'),limit=min(50,batch))
                     selected={row[0] for row in oldest}
                     rows=(*oldest,*(row for row in rows if row[0] not in selected))[:100]
             if not saved:
@@ -643,10 +655,16 @@ class DiscoveryCoordinator:
                 # observation. Keep its still-pending versions in the existing
                 # bounded page; reload all fences before executing next slice.
                 deferred=self.store.inventory_selected(source['id'],'file',('pending','changed'),observed_paths,job['inventory_generation'])
+                incoming=self.store.inventory_selected(source['id'],'file',('pending','changed'),list(dict.fromkeys(followup))[:25],job['inventory_generation'])
                 saved=self.store.inventory_selected(source['id'],'file',('pending','changed'),remaining,job['inventory_generation'])
                 retries=[row[0] for row in saved if retry(row)]
-                observed_pending=[row[0] for row in deferred]
-                job['content_remainder']=list(dict.fromkeys([*observed_pending,*retries,*remaining]))[:100]
+                # Reconsider incoming versions after actual execution frees
+                # credit. Reserve room for the interrupted ordinary prefix;
+                # overflow remains globally pending with its age unchanged.
+                observed_pending=list(dict.fromkeys([*(row[0] for row in deferred),*(row[0] for row in incoming)]))
+                observed_set=set(observed_pending)
+                ordinary=[row[0] for row in saved if row[0] not in observed_set]
+                job['content_remainder']=list(dict.fromkeys([*ordinary[:50],*observed_pending,*retries,*remaining]))[:100]
                 job['observed_content_remainder']=[path for path in observed_pending if path in job['content_remainder']]
         if job.get('inventory_complete') and job.get('reconcile_cursor',0)<256:
             job['reconcile_cursor']=_advance_partitions(job.get('reconcile_cursor',0),lambda index:self.store.reconcile_location(source,job['inventory_generation'],index))
