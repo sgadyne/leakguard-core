@@ -355,9 +355,10 @@ class DiscoveryCoordinator:
 
     def _enumerate(self,source,job,settings,cancel,deadline,*,observed=(),content_followup=None):
         generation=job['inventory_generation'];seen=0
-        hints=[path for path,kind in observed if kind=='directory']
+        hints=list(dict.fromkeys([*job.get('metadata_remainder',[]),*[path for path,kind in observed if kind=='directory']]))[:100]
+        job['metadata_remainder']=hints
         while seen<5000 and time.monotonic()<deadline and not cancel():
-            hinted=bool(hints)
+            hinted=bool(hints) and job['slices']%10!=0
             if hinted:
                 rows=self.store.inventory_selected(source['id'],'directory','enumerating',[hints.pop(0)],generation)
                 if not rows:continue
@@ -365,7 +366,7 @@ class DiscoveryCoordinator:
             if not rows:
                 job['empty_directory_pages']=job.get('empty_directory_pages',0)+1
                 if job['empty_directory_pages']>=32:
-                    if job.get('refresh_cursor',256)>=256 and job.get('backfill_refresh_cursor',256)>=256:job['inventory_complete']=True
+                    if not hints and job.get('refresh_cursor',256)>=256 and job.get('backfill_refresh_cursor',256)>=256:job['inventory_complete']=True
                     return
                 continue
             job['empty_directory_pages']=0
@@ -439,9 +440,9 @@ class DiscoveryCoordinator:
                 if hinted:
                     # Follow only descriptor-observed changes and their bounded
                     # metadata page, using the same ancestry, time and entry
-                    # limits. These hints never create another durable queue.
+                    # limits. Reserve a hint slot for an interrupted parent.
                     for entry in entries:
-                        if entry[2]=='directory' and entry[4]=='enumerating' and len(hints)<100:hints.append(entry[0])
+                        if entry[2]=='directory' and entry[4]=='enumerating' and len(hints)<99 and entry[0] not in hints:hints.append(entry[0])
                         elif entry[2]=='file' and entry[4]=='pending' and content_followup is not None and len(content_followup)<25:content_followup.append(entry[0])
                 if mounted is not None:
                     exhausted=mounted['complete'];position=mounted['position']
@@ -469,6 +470,9 @@ class DiscoveryCoordinator:
             except (OSError,navigation.HostError):
                 self._discard_stream(stream_key)
                 self.store.inventory_set(str(path),'inaccessible',detail='unknown-descendants-unreadable');job['unknown_descendants']+=1
+            finally:
+                if hinted and len(hints)<100 and row[0] not in hints:
+                    if self.store.inventory_selected(source['id'],'directory','enumerating',[row[0]],generation):hints.append(row[0])
 
     def tick(self,source,job,settings,*,cancel):
         if source['kind']=='ssh':
@@ -491,7 +495,7 @@ class DiscoveryCoordinator:
         deadline=time.monotonic()+10
         observed=self._known_availability(source,job,settings,cancel) or []
         followup=[path for path,kind in observed if kind=='file']
-        if any(kind=='directory' for path,kind in observed):job.update(inventory_complete=False,empty_directory_pages=0)
+        if job.get('metadata_remainder') or any(kind=='directory' for path,kind in observed):job.update(inventory_complete=False,empty_directory_pages=0)
         if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2),observed=observed,content_followup=followup)
         scanned=0
         if settings['new_content']=='inspect' and not cancel():
@@ -586,7 +590,14 @@ class DiscoveryCoordinator:
                             detail=json.dumps({'digest':result.content.digest if result.content else None,'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({i.code.value for i in result.issues}),'omissions':omitted,'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==result.content.digest if previous.get('digest') and result.content else None})
                             self.store.inventory_set(path,state,detail=detail);scanned+=1
                         job['new_findings']+=view.new_findings
-            if source['kind']=='local':job['content_remainder']=remaining
+            if source['kind']=='local':
+                # The oldest slot, byte cap or deadline can defer a one-shot
+                # observation. Keep its still-pending versions in the existing
+                # bounded page; reload all fences before executing next slice.
+                deferred=self.store.inventory_selected(source['id'],'file',('pending','changed'),list(dict.fromkeys(followup))[:25],job['inventory_generation'])
+                for row in deferred:
+                    if len(remaining)<100 and row[0] not in remaining:remaining.append(row[0])
+                job['content_remainder']=remaining
         if job.get('inventory_complete') and job.get('reconcile_cursor',0)<256:
             job['reconcile_cursor']=_advance_partitions(job.get('reconcile_cursor',0),lambda index:self.store.reconcile_location(source,job['inventory_generation'],index))
         job['files_scanned']+=scanned

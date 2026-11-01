@@ -115,6 +115,35 @@ def test_nested_create_and_unstable_local_refresh_keep_reserved_admission(tmp_pa
     finally:owner.close();store.close()
 
 
+def test_interrupted_observed_directory_page_resumes_after_encrypted_reopen(tmp_path,monkeypatch):
+    import json
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    root=tmp_path/'inputs';nested=root/'nested';nested.mkdir(parents=True)
+    file=nested/'ordinary.txt';file.write_text('ordinary synthetic deferred metadata')
+    path=tmp_path/'observations.lgo';phrase='synthetic-deferred-directory'
+    store=EncryptedScanStore.create(path,phrase)
+    source={'id':'source','kind':'local','root':str(root),'exclusions':[]}
+    store.inventory_put([(str(root),'source','directory',_sig(root.stat()),'enumerating',20,1,0,None,None)])
+    job={'inventory_generation':1,'inventory_complete':False,'slices':1,'metadata_enumerated':0,'unknown_descendants':0}
+    owner=DiscoveryCoordinator(store,None);owner.inventory_page=lambda *a,**k:[]
+    clock=[0.];monkeypatch.setattr('leakguard_host.discovery.time.monotonic',lambda:clock[0])
+    original=store.inventory_put
+    def publish_then_expire(rows):
+        original(rows);clock[0]=3.
+    store.inventory_put=publish_then_expire
+    try:
+        owner._enumerate(source,job,{'exclusions':[]},lambda:False,2,observed=[(str(root),'directory')],content_followup=[])
+        assert job.get('metadata_remainder')==[str(nested)]
+        store.save_host_state({'job':job});store.checkpoint();owner.close();store.close()
+        store=EncryptedScanStore.open(path,phrase);job=store.load_host_state()['job']
+        owner=DiscoveryCoordinator(store,None);owner.inventory_page=lambda *a,**k:[];clock[0]=0.
+        owner._enumerate(source,job,{'exclusions':[]},lambda:False,2)
+        child=store._partitions.get(store._partitions.bucket(str(file)))
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(file),)).fetchone()[0]=='pending'
+        assert not job['metadata_remainder']
+    finally:owner.close();store.close()
+
+
 def test_unstable_remote_refresh_retains_slot_and_tags_nested_directory(tmp_path):
     from leakguard_host.discovery import DiscoveryCoordinator
     from leakguard_host.discovery_remote import RemoteDiscovery
@@ -279,8 +308,15 @@ def test_observed_parent_change_executes_bounded_followup_before_unrelated_backf
         for path in (new,negative):
             child=store._partitions.get(store._partitions.bucket(str(path)))
             row=child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(path),)).fetchone()
-            assert row and row[0]==('pending' if slot==0 else 'inspected'), 'observed changes must progress without consuming the oldest slot'
+            assert (not row or row[0]!='inspected') if slot==0 else (row and row[0]=='inspected'), 'observed changes must progress without consuming the oldest slot'
         child=store._partitions.get(store._partitions.bucket(str(oldest)))
         assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(oldest),)).fetchone()[0]=='inspected'
         assert job['files_scanned']==(1 if slot==0 else 3)
+        if slot==0:
+            job['slices']=1
+            owner.tick(source,job,defaults(),cancel=lambda:False)
+            for path in (new,negative):
+                child=store._partitions.get(store._partitions.bucket(str(path)))
+                assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(path),)).fetchone()[0]=='inspected', 'a deferred metadata event was lost between slices'
+            assert job['files_scanned']==3
     finally:owner.close();store.close()
