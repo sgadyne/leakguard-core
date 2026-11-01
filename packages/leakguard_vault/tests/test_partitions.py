@@ -56,3 +56,22 @@ def test_control_checkpoint_never_publishes_half_a_partition_transaction(tmp_pat
  assert s.load_host_state()=={'control':'paused'}
  assert sum(s.inventory_counts().values())==100
  s.close()
+
+
+def test_json_encoded_journal_overhead_compacts_without_false_capacity_failure(tmp_path):
+ from leakguard_vault import partitions as module
+ p=tmp_path/'s.lgo';s=EncryptedScanStore.create(p,PASS);r=rows(1)[0];s.inventory_put([r]);s.checkpoint()
+ bucket=s._partitions.bucket(r[0]);old_base=s._partitions.catalog[bucket]['base'];child=s._partitions.get(bucket);journal=s._partitions.cache[bucket][1];size=s._partitions.cache[bucket][2]
+ count=0
+ with child.conn:
+  while size[0]<module._MAX_JOURNAL-512:
+   child.conn.execute('INSERT INTO physical VALUES(?,?,?)',('synthetic-escaping-'+str(count),1,'\\'*100));count+=1
+ assert size[0]<module._MAX_JOURNAL
+ assert len(module.envelope.canonical(journal))>module._MAX_JOURNAL
+ s.checkpoint()
+ assert s._partitions.catalog[bucket]['base']!=old_base
+ assert not s._partitions.catalog[bucket]['logs']
+ s.close();s=EncryptedScanStore.open(p,PASS)
+ assert s._partitions.get(bucket).conn.execute("SELECT count(*) FROM physical WHERE identity LIKE 'synthetic-escaping-%'").fetchone()[0]==count
+ assert s.inventory_counts()=={'pending':1}
+ s.close()

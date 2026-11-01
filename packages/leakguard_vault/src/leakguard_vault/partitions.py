@@ -143,8 +143,12 @@ class EncryptedPartitions:
         elif journal:
             encoded = envelope.canonical(journal)
             if len(encoded) > _MAX_JOURNAL:
-                raise StateError('state-capacity-limit')
-            item = {**item, 'logs':[*item['logs'], self._write(encoded)], 'bytes':item['bytes'] + len(encoded)}
+                # JSON escaping/framing can exceed the raw SQL byte count.
+                # Keep the journal bound by compacting the valid SQLite state;
+                # this is not an exhausted profile or permission to drop work.
+                item = {**item, 'base':self._write(store.serialize()), 'logs':[], 'bytes':0}
+            else:
+                item = {**item, 'logs':[*item['logs'], self._write(encoded)], 'bytes':item['bytes'] + len(encoded)}
         aggregate=store.conn.execute('SELECT location,kind,status,count(*),min(priority) FROM inventory GROUP BY location,kind,status').fetchall()
         item['counts']={envelope.canonical([loc,kind,state]).decode():count for loc,kind,state,count,priority in aggregate}
         item['priorities']={envelope.canonical([loc,kind,state]).decode():priority for loc,kind,state,count,priority in aggregate}
