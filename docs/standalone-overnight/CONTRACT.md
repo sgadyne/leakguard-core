@@ -65,3 +65,14 @@ Before UI consumes the additions, engine supplies one synthetic available fixtur
 one historical/unknown-age fixture and one locked/unavailable case. UI supplies
 render checks for those exact cases. These fixtures are test-only and never used
 as production fallback responses.
+
+
+## Implemented safe profile comparison
+
+Profile preview includes changes, a list of {field, prior, effective, provenance}
+for changed inspection.mode, inspection.recognizers, inspection.max_file_bytes,
+inspection.scan_workers and jobs.reconcile fields. Unsupported jobs remain the
+fixed existing polling/off modes. Values come from the resolver's actual current
+config/protection input. Plugin option values, paths and aliases are excluded.
+An empty list means the compared safe fields are unchanged; it does not waive
+runtime preflight or prove arbitrary plugin options unchanged.

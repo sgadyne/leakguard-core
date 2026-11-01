@@ -129,3 +129,25 @@ def test_corrupt_profile_overlay_fails_closed_on_restart(tmp_path, broken):
     if broken == 'dangling-link': path.symlink_to(tmp_path / 'absent')
     else: path.write_text(json.dumps({'document':document()}))
     with pytest.raises(BuddyOperationError, match='scan-profile-record-invalid'): backend(tmp_path)
+
+
+def test_preview_changes_compare_actual_current_safe_values_and_provenance(tmp_path):
+    b = backend(tmp_path)
+    try:
+        before = b.settings()
+        preview = b.preview_scan_profile(document())
+        changes = {row['field']: row for row in preview['changes']}
+        assert changes['inspection.max_file_bytes'] == {
+            'field':'inspection.max_file_bytes', 'prior':before['max_file_bytes'],
+            'effective':4096, 'provenance':'overrides'}
+        assert changes['jobs.reconcile']['prior'] == before['protection']['schedule']
+        assert changes['jobs.reconcile']['effective']['interval_seconds'] == 300
+        assert changes['inspection.mode']['effective'] == 'inventory'
+        assert all(set(row) == {'field','prior','effective','provenance'} for row in preview['changes'])
+        assert set(changes) <= {'inspection.mode','inspection.recognizers','inspection.max_file_bytes',
+                                'inspection.scan_workers','jobs.reconcile','jobs.changes','jobs.deep','jobs.access'}
+        assert b.settings() == before
+        b.apply_scan_profile(document(), preview['identity'])
+        assert b.preview_scan_profile(document())['changes'] == []
+    finally:
+        b.close()

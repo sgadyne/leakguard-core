@@ -163,6 +163,16 @@ def catalog():
             'job_executor': 'existing-host-scheduler', 'plugin_installation': 'explicit-only'}
 
 
+def _safe_values(config, protection):
+    # Deliberately excludes paths, plugin options, aliases and credential material.
+    return {'inspection.mode': protection['new_content'],
+            'inspection.recognizers': config['detection_profile'],
+            'inspection.max_file_bytes': config['max_file_bytes'],
+            'inspection.scan_workers': config['scan_workers'],
+            'jobs.reconcile': deepcopy(protection['schedule']),
+            'jobs.changes': 'polling', 'jobs.deep': 'off', 'jobs.access': 'off'}
+
+
 @dataclass(frozen=True)
 class ResolvedProfile:
     document: dict
@@ -170,10 +180,15 @@ class ResolvedProfile:
     protection: dict
     provenance: dict
     identity: str
+    prior: dict
 
     def preview(self):
         """No plugin option values, paths, source bytes or credential material."""
-        return {'preset': self.document['preset'], 'identity': self.identity,
+        effective = _safe_values(self.config, self.protection)
+        changes = [{'field': key, 'prior': deepcopy(self.prior[key]),
+                    'effective': deepcopy(value), 'provenance': self.provenance[key]}
+                   for key, value in effective.items() if self.prior[key] != value]
+        return {'changes': changes, 'preset': self.document['preset'], 'identity': self.identity,
                 'effective_digest': effective_digest(self.config, self.protection),
                 'inspection': {'mode': self.protection['new_content'], 'recognizers': self.config['detection_profile'],
                                'max_file_bytes': self.config['max_file_bytes'], 'scan_workers': self.config['scan_workers']},
@@ -196,6 +211,7 @@ def resolve(document, *, base_config=None, base_protection=None, ceilings=None):
     doc = validate_document(document)
     config = settings.validate({} if base_config is None else base_config)
     protection = validate_protection({} if base_protection is None else deepcopy(base_protection))
+    prior = _safe_values(config, protection)
     presets = {**deepcopy(_BUILTINS), **{x['id']: x for x in doc['presets']}}
     packs = {x['id']: x for x in doc['packs']}
     layers = []
@@ -302,7 +318,7 @@ def resolve(document, *, base_config=None, base_protection=None, ceilings=None):
         _fail()
     digest = effective_digest(config, protection)
     identity = hashlib.sha256(json.dumps([doc, digest], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    return ResolvedProfile(doc, config, protection, provenance, identity)
+    return ResolvedProfile(doc, config, protection, provenance, identity, prior)
 
 
 def preflight(plan):
