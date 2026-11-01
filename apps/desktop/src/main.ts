@@ -358,7 +358,8 @@ async function main(){
   await app.whenReady();
   app.setAboutPanelOptions({applicationName:'Password Buddy',applicationVersion:app.getVersion(),version:'LeakGuard engine',
     copyright:'Local desktop workspace'});
-  const image=nativeImage.createFromPath(asset('tray.png')).resize({width:20,height:20});
+  // Preserve the template's native 1x/2x representations and optical small-size geometry.
+  const image=nativeImage.createFromPath(asset(process.platform==='darwin'?'trayTemplate.png':'tray.png'));
   if(process.platform==='darwin')image.setTemplateImage(true);
   tray=new Tray(image);tray.on('click',()=>show());updateMenus();
   await readPreferences();registerIPC();

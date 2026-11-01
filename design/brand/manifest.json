@@ -1,0 +1,58 @@
+{
+  "generator": "tools/brand/build.mjs",
+  "renderer": "@resvg/resvg-js@2.6.2",
+  "files": [
+    {
+      "path": "design/brand/app-icon.svg",
+      "sha256": "462655355a6ba5581db6bd65a366c5c9960ff5dc5e9d54fddfbb1ea05520f981"
+    },
+    {
+      "path": "design/brand/mark.svg",
+      "sha256": "b4e56a50be1bf4dc6eccc0219546e614c29b97b99397487cf30e69836226afea"
+    },
+    {
+      "path": "design/brand/mark-color.svg",
+      "sha256": "23c862f78dff01bd5975ec06d13967078345d067809b644feb318fcf78025796"
+    },
+    {
+      "path": "design/brand/menu-bar.svg",
+      "sha256": "ae27492d5de5d10e2e4d5909c9cea02ab7cfad3cc20fa061ecebc993dc118e15"
+    },
+    {
+      "path": "apps/desktop/assets/icon.png",
+      "sha256": "94725da849dbe5459454fe03510b1fa43e587380286d961679e0be8190338864"
+    },
+    {
+      "path": "apps/desktop/assets/tray.png",
+      "sha256": "6eaa0491f177b709e508b74f473ab90196249454f6d42c4340833377885a2ee8"
+    },
+    {
+      "path": "apps/desktop/assets/trayTemplate.png",
+      "sha256": "dc66b6b89488ae5e796e1484e15f958ab549819fba35152cb3221eef7f2b927d"
+    },
+    {
+      "path": "apps/desktop/assets/trayTemplate@2x.png",
+      "sha256": "f92abb4b06fac831ac365e0794f5da5c48dabd4997e97d0765bb236883740d17"
+    },
+    {
+      "path": "apps/desktop/assets/icon.ico",
+      "sha256": "b6a5dc62415faed15608bc18d5523abe603feaf90c8e8c93e92147e8d5a582d6"
+    },
+    {
+      "path": "apps/desktop/assets/icon.icns",
+      "sha256": "743d53e45e8018b8f683f53d07636120bf2bd9f1d984502b02b4cfbb3bc0a38a"
+    },
+    {
+      "path": "apps/buddy-ui/src/BrandMark.tsx",
+      "sha256": "b816f24d90b9ded069bd60a4d890f5b595cce2b329477ac7619d2d9611d36985"
+    },
+    {
+      "path": "design/brand/preview.svg",
+      "sha256": "57fec6f8a87a85cd13d004f92bc1a410d66e7aac8222a70006ad2754cb7671e6"
+    },
+    {
+      "path": "design/brand/preview.png",
+      "sha256": "ce7719bf191bc1a803f1d93b7eaea5e7fe2cc365878ed4ffc9015cb75d98560f"
+    }
+  ]
+}

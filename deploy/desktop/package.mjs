@@ -29,8 +29,11 @@ try {
     main: 'dist/main.cjs', author: 'LeakGuard', description: 'Password Buddy desktop workbench',
   }, null, 2) + '\n');
   const [platform, arch] = targets[values.target];
+  const icon = path.join(source, 'assets', platform === 'darwin' ? 'icon.icns' : platform === 'win32' ? 'icon.ico' : 'icon.png');
+  await access(icon);
   const paths = await packager({
     dir: staging, name: 'Password Buddy', executableName: 'Password Buddy', platform, arch,
+    icon,
     electronVersion: '45.0.0', appVersion: '0.1.0-alpha.1', appBundleId: values['local-beta']?'org.leakguard.passwordbuddy.beta':'org.leakguard.passwordbuddy',
     extendInfo: values['local-beta']?{CFBundleDisplayName:'Password Buddy Beta',CFBundleName:'Password Buddy Beta'}:undefined,
     out: path.resolve(values.output), asar: true, prune: true, overwrite: false,

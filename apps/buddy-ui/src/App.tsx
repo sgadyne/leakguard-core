@@ -4,7 +4,8 @@ import {
   Divider, Drawer, FormControl, FormControlLabel, IconButton, InputLabel, LinearProgress, MenuItem, Paper, Select,
   Snackbar, Stack as MuiStack, Switch, Tab, Tabs, TextField as MuiTextField, ThemeProvider, Toolbar, Typography as MuiTypography, createTheme
 } from "@mui/material";
-import { Add, Key, Lock, FolderOpen, Dashboard, Search, VpnKey, Extension, Settings as SettingsIcon, Refresh, Close, ChevronRight, ArrowUpward, PlayArrow, Pause, Stop, DeleteOutlined, Tune } from "@mui/icons-material";
+import { Add, Lock, FolderOpen, Dashboard, Search, VpnKey, Extension, Settings as SettingsIcon, Refresh, Close, ChevronRight, ArrowUpward, PlayArrow, Pause, Stop, DeleteOutlined, Tune } from "@mui/icons-material";
+import BrandMark from './BrandMark';
 import { AgGridReact } from "ag-grid-react";
 import { AllCommunityModule, ModuleRegistry, themeQuartz } from "ag-grid-community";
 import { initializeSession, request, setConnectionHandlers } from "./api";
@@ -189,7 +190,7 @@ export default function App() {
   const scanStorageIssue=status?.observations?.healthy===false||Boolean(status?.host?.storage_error);
   const sourceRows = sources;
   const drawer = <Box sx={{width:208,height:"100%",display:"flex",flexDirection:"column",bgcolor:"background.paper",borderRight:"1px solid",borderColor:"divider"}}>
-    <Box sx={{px:2.5,py:2.3,display:"flex",alignItems:"center",gap:1.25}}><Box sx={{width:30,height:30,borderRadius:1.5,bgcolor:"primary.main",color:"primary.contrastText",display:"grid",placeItems:"center"}}><Key fontSize="small"/></Box><Box><Typography fontWeight={700} fontSize={14}>Password Buddy</Typography></Box></Box>
+    <Box sx={{px:2.5,py:2.3,display:"flex",alignItems:"center",gap:1.25}}><BrandMark size={36}/><Box><Typography fontWeight={700} fontSize={14}>Password Buddy</Typography></Box></Box>
     <Divider/>
     <Box component="nav" aria-label="Main navigation" sx={{p:1.25,display:"grid",gap:.5}}>{nav.map(item=><Button key={item.id} onClick={()=>navigate(item.id)} startIcon={item.icon} fullWidth sx={{justifyContent:"flex-start",height:38,color:page===item.id?"primary.main":"text.secondary",bgcolor:page===item.id?"action.selected":"transparent"}}>{item.label}</Button>)}</Box>
     <Box sx={{mt:"auto",p:2,borderTop:"1px solid",borderColor:"divider"}}><Typography variant="caption" color="text.secondary">Private to this device</Typography><Typography variant="caption" display="block" color={connected?"success.main":"text.secondary"}>{connected?"Loopback connection":"Connection unavailable"}</Typography><Typography variant="caption" display="block" color="text.secondary">Scan storage: {status?.observations?.unlocked?"Unlocked":status?.observations?.created?"Locked":status?"Not created":"Unknown"}</Typography><Typography variant="caption" display="block" color="text.secondary">Credential vault: {status?.vault?.unlocked?"Unlocked":status?.vault?.created?"Locked":status?"Not created":"Unknown"}</Typography></Box>

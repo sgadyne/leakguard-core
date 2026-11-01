@@ -1,0 +1,7 @@
+{
+  "name": "password-buddy-brand-tools",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs" },
+  "devDependencies": { "@resvg/resvg-js": "2.6.2" }
+}
