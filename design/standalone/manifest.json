@@ -1,0 +1,221 @@
+{
+  "version": 1,
+  "syntheticOnly": true,
+  "generator": "tools/brand/standalone.mjs",
+  "screens": [
+    {
+      "id": "01-overview",
+      "title": "Overview"
+    },
+    {
+      "id": "02-findings",
+      "title": "Findings"
+    },
+    {
+      "id": "03-sources",
+      "title": "Sources"
+    },
+    {
+      "id": "04-settings",
+      "title": "Settings"
+    },
+    {
+      "id": "05-vault",
+      "title": "Vault"
+    },
+    {
+      "id": "06-activity",
+      "title": "Activity"
+    },
+    {
+      "id": "07-add-location",
+      "title": "Add location"
+    },
+    {
+      "id": "08-state-patterns",
+      "title": "States"
+    },
+    {
+      "id": "09-plugins",
+      "title": "Plugins"
+    },
+    {
+      "id": "10-overview-dark",
+      "title": "Dark overview"
+    }
+  ],
+  "files": [
+    {
+      "path": "01-overview.svg",
+      "sha256": "334a9be992d74d4d6f67784ee34eea3050b30b7dc8bc9bd820799198c04f2b33"
+    },
+    {
+      "path": "01-overview.png",
+      "sha256": "affc96427a1e474ee9c4c807257cca5458c07c09719c55015584e366fd64cbe0"
+    },
+    {
+      "path": "02-findings.svg",
+      "sha256": "3c46a24229b76fadfcf031b2674c32d81e55812b305b991f36bd61f97f1debcb"
+    },
+    {
+      "path": "02-findings.png",
+      "sha256": "0df6f317e4a2b67cd6142fc9b6d394340b8676ae1d367e0afeecb306c1f9ad3f"
+    },
+    {
+      "path": "03-sources.svg",
+      "sha256": "3cfd48a1a8499648cfeb0e16bc52b40e0f2a06362451837e5fbf128e3bdb92c5"
+    },
+    {
+      "path": "03-sources.png",
+      "sha256": "76a32b26391faf5fd17a9ec9cc294cd5db88159879c87a321c188c5b6146fbb0"
+    },
+    {
+      "path": "04-settings.svg",
+      "sha256": "bd05c3170061d0e594303666ba788bd36e7477ac38766fd2bbdd8af62e8c1441"
+    },
+    {
+      "path": "04-settings.png",
+      "sha256": "dad750cc205e573f7cea36e8613aab817ed72b7e44a04e79205bd27e4f24a1e2"
+    },
+    {
+      "path": "05-vault.svg",
+      "sha256": "d7c89e12346c8a46f91eeed904ff6d66ef5fbcaabc7e9840d8d039c622c1add7"
+    },
+    {
+      "path": "05-vault.png",
+      "sha256": "33181c556ff1c65be560060b83961bdd3c18e49b3c6e2de1edf6c3d3b2b7c26e"
+    },
+    {
+      "path": "06-activity.svg",
+      "sha256": "597cacb1e3e51ce241af0a432931a62b924645b0cf6f88e6705ed6020d2eb2b6"
+    },
+    {
+      "path": "06-activity.png",
+      "sha256": "7d72cea0543eef57ecc22358455de515f6cb82bf53046772504cc6c59e66682c"
+    },
+    {
+      "path": "07-add-location.svg",
+      "sha256": "8a6a3a25593bb76e0451de75acf3cc8500801f22ae26c2b9af55394547d33c19"
+    },
+    {
+      "path": "07-add-location.png",
+      "sha256": "3ff0efef843e774535ac233107a816a936d5edf538c75ff9166e946c6d7ee755"
+    },
+    {
+      "path": "08-state-patterns.svg",
+      "sha256": "e3c2eb997c0a6d8200d013aa536e5ea2dcdaf6a2391e98df1be8adb9876316b2"
+    },
+    {
+      "path": "08-state-patterns.png",
+      "sha256": "7936a73d80f2ab3b24fbde5b84d8e780b6df6f371d621667a1aa9382d5eff58e"
+    },
+    {
+      "path": "09-plugins.svg",
+      "sha256": "6bdde86f90b22d9ff9a36481bbe32ef338005ac1a584ca172a1c4fde82e4cab5"
+    },
+    {
+      "path": "09-plugins.png",
+      "sha256": "b0415d92c5e992d94ddd45647fb5d6f1b8d007942a1170ba848aacfe0b835e43"
+    },
+    {
+      "path": "10-overview-dark.svg",
+      "sha256": "fbd7a6cf5a1fb0dd3e521b441ebcd5357a18305a592a6b33925b742f33bc3ea9"
+    },
+    {
+      "path": "10-overview-dark.png",
+      "sha256": "597be5bbd9c13faaf8b7e93d90e3541a6f023007758054780c96eaefc97dd882"
+    },
+    {
+      "path": "icons/overview.svg",
+      "sha256": "cd3bbc61e78311d30d33a6fff4f21a5d698818cb07d4e462523cb726bb89c0fd"
+    },
+    {
+      "path": "icons/findings.svg",
+      "sha256": "f769dfc90768ec3c37cde1183aa2e97d180125bba0ae57d3b0276ce1a305b4e2"
+    },
+    {
+      "path": "icons/sources.svg",
+      "sha256": "e50f26dc8f36795d9d8fc5d1bf6797702faedddcab6d7a38876d9ee80f87e117"
+    },
+    {
+      "path": "icons/activity.svg",
+      "sha256": "43683d14857fb4b713bdddf468f323af326f2451fa7ff75211a9ef90fe19c82e"
+    },
+    {
+      "path": "icons/vault.svg",
+      "sha256": "f58ed85013e4057715198d15d5d137a13dc9e1f20dd6f5c04a71729677af0ab8"
+    },
+    {
+      "path": "icons/settings.svg",
+      "sha256": "7503096d6be31af92c947249da6181def08e93aad33fca341c8e01240043fcb8"
+    },
+    {
+      "path": "icons/plugins.svg",
+      "sha256": "2c10131082e0949ffb4b0e5000a684bfefb226d633efe72b8c653246f30b60da"
+    },
+    {
+      "path": "icons/lock.svg",
+      "sha256": "629abf91b0a64c5f10ffc768cc436a0c7d0253850f07026f0b09126b51009fb9"
+    },
+    {
+      "path": "icons/check.svg",
+      "sha256": "f713e81b008583874c5225a168b04d9ea6c0383ea23c7acd4b1736d15a65b13a"
+    },
+    {
+      "path": "icons/gap.svg",
+      "sha256": "5a2c7b1d782aca7bac1b346eb71f092e71c9359d7586e908fb7d3b16bd955b34"
+    },
+    {
+      "path": "icons/queued.svg",
+      "sha256": "7c5f42cb2deaea3c322e6141a5657f9f68c545a67860579077400587189e0a4c"
+    },
+    {
+      "path": "icons/disconnected.svg",
+      "sha256": "a97548dc4dde383bdba1d461febac144417fdacaaffc111565ad86497e9576e7"
+    },
+    {
+      "path": "icons/arrow.svg",
+      "sha256": "d3d4ae99e77ae59fff0d42b0215a791937cb772099ab8b2274e88faca08ecf7e"
+    },
+    {
+      "path": "icons/folder.svg",
+      "sha256": "1e75667ad51034787d4c7e92dbf9ab65f8c39e9f87fa80017bb860c19d2d0d78"
+    },
+    {
+      "path": "icons/pause.svg",
+      "sha256": "fd42b359169592862063a8f3afad430b05c17de74d255bac7eac4e1e93431a8e"
+    },
+    {
+      "path": "icons/search.svg",
+      "sha256": "13f3010eb7bd2d07eeca502c0c04de7905c3677e601c5dd8ec3d86b135901973"
+    },
+    {
+      "path": "illustrations/lock.svg",
+      "sha256": "48a3609467a0a81d270a178d662ad63604a3de653707b9ba975db751ff355de4"
+    },
+    {
+      "path": "illustrations/disconnected.svg",
+      "sha256": "a7bd12764037c333d9bdfa44c93310e0aee8ebb76d10eebd8f7498ee81f7e32c"
+    },
+    {
+      "path": "illustrations/search.svg",
+      "sha256": "8515e55606a75a3485e87cc19ecdbd9ab8cc52a187683a0943f8566c7683be35"
+    },
+    {
+      "path": "illustrations/folder.svg",
+      "sha256": "86fc522451e5790e08330c16ef289d1600a26527cfb266702b211fb7ab086b29"
+    },
+    {
+      "path": "tokens.json",
+      "sha256": "dca533f25e55400eef500c8a72333bc63a5a7ba819796e91a05e02093b3fa723"
+    },
+    {
+      "path": "tokens.css",
+      "sha256": "1e589a2c75da324dfa5594a6feb1363ea2545416c2ba09b80d6f98c4fd4de5b5"
+    },
+    {
+      "path": "preview.html",
+      "sha256": "1e9560bb800d533c6e0168720b675eaacc75d34f186ca9b1f0a6f278f9df30b6"
+    }
+  ]
+}

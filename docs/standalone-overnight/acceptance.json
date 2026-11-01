@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "deadline": "2026-11-02T11:00:00Z",
+  "timezone": "America/New_York",
+  "sampo_in_scope": false,
+  "statuses": ["pass", "fail", "not-run", "platform-unavailable"],
+  "required_receipt_fields": ["id", "status", "source_commit", "command", "evidence", "limitations"],
+  "gates": [
+    {"id":"U-build","owner":"ui","check":"Pinned UI/shell typecheck and production build; shipped static bytes match"},
+    {"id":"U-visual","owner":"ui","check":"Real screenshots: 1440x930, 1280x820, 1000x680; light/dark; no clipped controls or mock production facts"},
+    {"id":"U-accessibility","owner":"ui","check":"Keyboard navigation/drawer focus/escape, contrast, status labels, reduced motion"},
+    {"id":"U-profile","owner":"ui","check":"Real-backend preview/apply/persist; stale/invalid/unavailable rejection; rollback and overrides preserved"},
+    {"id":"U-review-vault","owner":"ui","check":"Synthetic positive/negative, cursor paging, annotation persistence, cancel/save/verify, independent locks"},
+    {"id":"U-state-truth","owner":"ui","check":"Locked/offline/paused/incomplete/unknown versus empty/zero; no relabelled timestamps or global page totals"},
+    {"id":"E-chronology","owner":"engine","check":"Version/generation-aware pending ages; old unknown ages; unchanged rediscovery; encrypted migration/replay"},
+    {"id":"E-fairness","owner":"engine","check":"Actual complete old-content results under sustained arrivals, finite bounded workload, restart/deferral/source-change controls"},
+    {"id":"E-diagnostics","owner":"engine","check":"Injected stage failures with bounded safe codes/classes; redaction; recovery retains truthful history"},
+    {"id":"E-projection","owner":"engine","check":"Bounded query cost and schema semantics; available/historical/locked contract fixtures"},
+    {"id":"T-paired-cost","owner":"terra","check":"Cold/warm and mutation/invalidation cases with exact fixture/config/runtime identity, output equality, repeated timing counters"},
+    {"id":"T-recognition","owner":"terra","check":"Labelled JOSE/encoded artifact close positive/negative cases; unchanged findings preserved; uncertain review retained"},
+    {"id":"I-installed","owner":"engine","check":"Fresh changed wheels installed outside checkout; source match; applicable installed regressions; exact platform exclusions"},
+    {"id":"I-browser","owner":"engine+ui","check":"Integrated real authenticated backend with synthetic state; final UI workflow smoke, no console/network errors"},
+    {"id":"I-independent","owner":"terra","check":"Independent candidate audit of output equality, metric semantics, redaction and evidence identity"},
+    {"id":"I-handoff","owner":"engine","check":"Clean integrated branch/bundle, final acceptance matrix/report and owned-process cleanup before lease end"},
+    {"id":"M-native","owner":"root-morning","check":"Exact new Mac build: icon/tray, migration/locks/review/profile/restart, signatures/archive identity; not certified by Linux/browser work"},
+    {"id":"M-private-replay","owner":"root-morning","check":"Authorized local version-matched baseline replay and bounded automatic footprint controls; no private data sent remotely"}
+  ]
+}
