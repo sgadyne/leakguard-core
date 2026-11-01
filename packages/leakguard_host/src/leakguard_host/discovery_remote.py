@@ -45,11 +45,11 @@ class RemoteDiscovery:
    job['priority_cursor']=_advance_partitions(job['priority_cursor'],lambda index:self.store.reprioritize_location(source,index,_priority));return {'scanned':0,'inventory_complete':False}
   self.owner._refresh_metadata(source,job)
   if not job.get('inventory_complete') and not cancel():
-   rows,cursor=self.store.inventory_page(source['id'],'directory','enumerating',cursor=job['inventory_cursor'],limit=1,prefer_priority=job['slices']%10!=0);job['inventory_cursor']=cursor
+   rows=self.owner.inventory_page(source,job,'directory','enumerating',limit=1)
    if not rows:
     if job.get('refresh_cursor',256)>=256 and job.get('backfill_refresh_cursor',256)>=256:job['inventory_complete']=True
    else:
-    row=rows[0];path=row[0]
+    row=rows[0];path=row[0];refresh=row[9]=='metadata-refresh-during-backfill'
     if self._excluded(path,source,settings):self.store.inventory_set(path,'excluded',detail='unknown-descendants');job['unknown_descendants']+=1
     else:
      try:
@@ -72,17 +72,18 @@ class RemoteDiscovery:
          elif kind=='file' and value['st_dev']!=source['remote_identity']['device']:state='unsupported';detail='mount-boundary'
          elif kind=='file' and (value['st_flags']&0x40000000 or actual.name.endswith('.icloud')):state='remote-only';detail='placeholder-not-hydrated'
          elif kind=='file' and protected_store(actual,remote=True):state='protected';detail='protected-store-inventory-only'
+         elif refresh and kind=='file':detail='content-refresh-during-backfill'
         entries.append((child,source['id'],kind,json.dumps(sig(value)) if value else None,state,_priority(PurePosixPath(child)),job['inventory_generation'],value['st_size'] if value else 0,None,detail))
        self.store.inventory_put(entries);job['metadata_enumerated']+=len(entries)
        if not result['stable']:self.store.inventory_set(path,'enumerating',detail='changed-during-enumeration')
        elif result['complete']:self.store.inventory_set(path,'enumerated',detail='remote-metadata-only',signature=json.dumps(sig(info)))
-       else:self.store.inventory_set(path,'enumerating',cursor=json.dumps({'signature':sig(info),'entries':result['position'],'prefix':result['prefix']}),signature=json.dumps(sig(info)))
+       else:self.store.inventory_set(path,'enumerating',cursor=json.dumps({'signature':sig(info),'entries':result['position'],'prefix':result['prefix']}),signature=json.dumps(sig(info)),detail='metadata-refresh-during-backfill' if refresh else None)
      except HostError as error:
       if error.code in {'permission-denied','source-unavailable'}:self.store.inventory_set(path,'inaccessible',detail='unknown-descendants');job['unknown_descendants']+=1
       else:raise
   scanned=0
   if settings['new_content']=='inspect' and not cancel():
-   rows,cursor=self.store.inventory_page(source['id'],'file',('pending','changed'),cursor=job['content_cursor'],limit=job.get('content_batch_limit',25),prefer_priority=job['slices']%10!=0);job['content_cursor']=cursor
+   rows=self.owner.inventory_page(source,job,'file',('pending','changed'),limit=job.get('content_batch_limit',25))
    admitted=[];total=0
    for row in rows:
     if self._excluded(row[0],source,settings):self.store.inventory_set(row[0],'excluded',detail='operator-exclusion');continue

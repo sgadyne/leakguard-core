@@ -239,11 +239,34 @@ class DiscoveryCoordinator:
         self._iterators[key] = stream
         return stream
 
+    def inventory_page(self,source,job,kind,status,*,limit):
+        """Reserve bounded admission for refresh and oldest backlog separately.
+
+        This diagnostic profile changes selection only; source, ancestry,
+        runtime and publication checks still authorize every admitted version.
+        A filtered empty page never proves inventory completion.
+        """
+        job['navigation_profile']={'version':'bounded-refresh-v1','cycle':10,
+            'oldest_slot':0,'refresh_slot':5,'metadata_seconds':2,
+            'slice_seconds':10,'max_metadata_entries':5000,
+            'filtered_fallback_queries':1}
+        key='inventory_cursor' if kind=='directory' else 'content_cursor'
+        if job['slices']%10==5:
+            refresh_key='refresh_'+key
+            rows,cursor=self.store.inventory_page(source['id'],kind,status,
+                cursor=job.get(refresh_key,0),limit=limit,prefer_priority=False,
+                queue_class='refresh')
+            job[refresh_key]=cursor
+            if rows:return rows
+        rows,cursor=self.store.inventory_page(source['id'],kind,status,
+            cursor=job[key],limit=limit,prefer_priority=job['slices']%10 not in {0,5})
+        job[key]=cursor
+        return rows
+
     def _enumerate(self,source,job,settings,cancel,deadline):
         generation=job['inventory_generation'];seen=0
         while seen<5000 and time.monotonic()<deadline and not cancel():
-            rows,cursor=self.store.inventory_page(source['id'],'directory','enumerating',cursor=job['inventory_cursor'],limit=1,prefer_priority=job['slices']%10!=0)
-            job['inventory_cursor']=cursor
+            rows=self.inventory_page(source,job,'directory','enumerating',limit=1)
             if not rows:
                 job['empty_directory_pages']=job.get('empty_directory_pages',0)+1
                 if job['empty_directory_pages']>=32:
@@ -252,6 +275,7 @@ class DiscoveryCoordinator:
                 continue
             job['empty_directory_pages']=0
             row=rows[0];path=Path(row[0]);old_cursor=json.loads(row[8]) if row[8] else None
+            refresh=row[9]=='metadata-refresh-during-backfill'
             stream_key=(source['id'],str(path))
             if self._excluded(path,source,settings):
                 self._discard_stream(stream_key)
@@ -311,6 +335,7 @@ class DiscoveryCoordinator:
                         elif source.get('automatic') and kind=='directory' and value.st_dev not in source.get('local_devices',[info.st_dev]):state='excluded';detail='mount-boundary-unknown-descendants'
                         elif kind=='file' and (getattr(value,'st_flags',0)&0x40000000 or entry.name.endswith('.icloud')):state='remote-only';detail='cloud-placeholder-not-hydrated'
                         elif kind=='file' and protected_store(child):state='protected';detail='encrypted-store-inventory-only'
+                        elif refresh and kind=='file':detail='content-refresh-during-backfill'
                         entries.append((str(child),source['id'],kind,_sig(value),state,_priority(child),generation,value.st_size,None,detail))
                     except OSError:
                         entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
@@ -324,14 +349,14 @@ class DiscoveryCoordinator:
                 elif position<resume:
                     # Prefix replay may itself take several bounded slices.
                     # Keep the durable prefix until it has been fully verified.
-                    self.store.inventory_set(str(path),'enumerating',cursor=row[8],signature=signature,detail='metadata-prefix-replay')
+                    self.store.inventory_set(str(path),'enumerating',cursor=row[8],signature=signature,detail='metadata-refresh-during-backfill' if refresh else 'metadata-prefix-replay')
                     stream.anchor=row[8]
                 elif exhausted:
                     self._discard_stream(stream_key)
                     self.store.inventory_set(str(path),'enumerated',detail='metadata-only',signature=signature)
                 else:
                     saved=json.dumps({'signature':signature,'entries':position,'prefix':mounted['prefix'] if mounted is not None else prefix.hexdigest()})
-                    self.store.inventory_set(str(path),'enumerating',cursor=saved,signature=signature)
+                    self.store.inventory_set(str(path),'enumerating',cursor=saved,signature=signature,detail='metadata-refresh-during-backfill' if refresh else None)
                     if stream is not None:stream.anchor=saved
                 job['metadata_enumerated']+=len(entries)
             except PermissionError:
@@ -363,8 +388,7 @@ class DiscoveryCoordinator:
         if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2))
         scanned=0
         if settings['new_content']=='inspect' and not cancel():
-            rows,cursor=self.store.inventory_page(source['id'],'file',('pending','changed'),cursor=job['content_cursor'],limit=job.get('content_batch',100),prefer_priority=job['slices']%10!=0)
-            job['content_cursor']=cursor
+            rows=self.inventory_page(source,job,'file',('pending','changed'),limit=job.get('content_batch',100))
             groups=defaultdict(list);admitted=0
             for row in rows:
                 if self._excluded(Path(row[0]),source,settings):
