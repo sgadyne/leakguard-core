@@ -251,6 +251,7 @@ class DiscoveryCoordinator:
             'slice_seconds':10,'max_metadata_entries':5000,
             'filtered_fallback_queries':1,'new_arrivals':'monotonic-clock',
             'known_availability_page_rows':25,'known_availability_seconds':2,
+            'known_availability_page_queries':8,
             'observed_followup_files':25,'observed_directory_hints':100,
             'observed_content_share':'half-batch-outside-oldest-slot',
             'interrupted_content_page_paths':100,'content_age':'returned-results'}
@@ -285,10 +286,20 @@ class DiscoveryCoordinator:
         page_method=getattr(self.store,'query_findings_page',None)
         if not callable(page_method):
             job['known_availability_capability']='finding-page-unavailable';return
-        page=page_method(limit=25,cursor=job.get('known_availability_cursor'))
-        job['known_availability_cursor']=page.next_cursor
+        # An encrypted page can contain just one finding from one shard.
+        # Fill the existing row allowance across a bounded number of pages;
+        # sparse shards must not stretch a metadata rotation into many minutes.
+        started=time.monotonic();cursor=job.get('known_availability_cursor')
+        visited={cursor};rows=[];queries=0
+        while queries<8 and len(rows)<25 and not cancel():
+            page=page_method(limit=25-len(rows),cursor=cursor)
+            rows.extend(page.rows);queries+=1;cursor=page.next_cursor
+            if cursor is None or cursor in visited or time.monotonic()-started>=.5:break
+            visited.add(cursor)
+        job['known_availability_cursor']=cursor
+        job['known_availability_page_queries']=job.get('known_availability_page_queries',0)+queries
         paths=set();root=Path(source['root'])
-        for row in page.rows:
+        for row in rows:
             text=(row.get('source') or {}).get('path')
             if row.get('state') not in {'active','unknown'} or not isinstance(text,str):continue
             path=Path(text)
@@ -296,10 +307,13 @@ class DiscoveryCoordinator:
                     or self._excluded(path,source,settings) or protected_store(path)):continue
             paths.add(text)
         if not paths or cancel():return
+        remaining=2-(time.monotonic()-started)
+        if remaining<=0:
+            job['known_availability_capability']='metadata-budget-exhausted';return
         from .mounted_worker import call
         try:
             result=call({'op':'availability','root':str(root),'paths':sorted(paths),
-                'expected':source.get('active_root_identity') or source.get('root_identity')},timeout=2,cancel=cancel)
+                'expected':source.get('active_root_identity') or source.get('root_identity')},timeout=remaining,cancel=cancel)
             if type(result) is not dict or set(result)!={'capability','entries'}:raise navigation.HostError('source-unavailable')
             capability=result.get('capability')
             job['known_availability_capability']=capability

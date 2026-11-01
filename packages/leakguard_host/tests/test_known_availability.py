@@ -73,8 +73,8 @@ def test_known_missing_observation_downgrades_without_positive_content_revalidat
     assert store.deadlines==[None]
     assert job['known_availability_checked']==2 and job['known_availability_unknown']==1
     assert job['known_availability_cursor']=='synthetic-opaque-cursor'
-    assert store.query=={'limit':25,'cursor':None}
-    assert requests[0][1]['timeout']==2
+    assert store.query=={'limit':20,'cursor':'synthetic-opaque-cursor'}
+    assert 0<requests[0][1]['timeout']<=2
     assert requests[0][0]['expected']==[1,2]
     assert requests[0][0]['paths']==[str(tmp_path/'absent'),str(tmp_path/'present')]
 
@@ -140,3 +140,38 @@ def test_runtime_invalidated_unknowns_remain_in_metadata_poll(tmp_path,monkeypat
     owner._known_availability({'kind':'local','root':str(tmp_path),'id':'source','exclusions':[]},{},{'exclusions':[]},lambda:False)
     assert requests and requests[0]['paths']==[str(tmp_path/'invalidated.env')]
     assert store.events==[('invalidated.env','deleted')]
+
+
+def test_sparse_finding_pages_fill_one_bounded_metadata_batch(tmp_path,monkeypatch):
+    store=Store(tmp_path);owner=DiscoveryCoordinator(store,None);queries=[];requests=[]
+    paths=[str(tmp_path/name) for name in ('renamed-old.env','deleted-old.env','present.env')]
+    def page(*,limit,cursor):
+        index=int(cursor or 0);queries.append((limit,cursor))
+        return SimpleNamespace(rows=[{'source':{'path':paths[index]},'state':'unknown'}],next_cursor=str(index+1) if index<2 else None)
+    store.query_findings_page=page
+    def call(request,**kwargs):
+        requests.append(request)
+        return {'capability':'descriptor-metadata','entries':[metadata_entry(tmp_path,p,'present' if p.endswith('/present.env') else 'absent') for p in request['paths']]}
+    monkeypatch.setattr(mounted_worker,'call',call);job={}
+    owner._known_availability({'kind':'local','root':str(tmp_path),'exclusions':[]},job,{'exclusions':[]},lambda:False)
+    assert len(requests)==1 and set(requests[0]['paths'])==set(paths)
+    assert queries==[(25,None),(24,'1'),(23,'2')]
+    assert store.events==[('deleted-old.env','deleted'),('renamed-old.env','deleted')]
+    assert job['known_availability_cursor'] is None
+
+
+@pytest.mark.parametrize('page_size,expected_queries,expected_paths,expected_cursor',[(1,8,8,'8'),(5,5,25,'25')])
+def test_metadata_page_fill_preserves_row_and_query_caps(tmp_path,monkeypatch,page_size,expected_queries,expected_paths,expected_cursor):
+    store=Store(tmp_path);owner=DiscoveryCoordinator(store,None);queries=[];requests=[]
+    def page(*,limit,cursor):
+        start=int(cursor or 0);count=min(page_size,limit);queries.append(limit)
+        return SimpleNamespace(rows=[{'source':{'path':str(tmp_path/f'pending-{i}.env')},'state':'unknown'} for i in range(start,start+count)],next_cursor=str(start+count))
+    store.query_findings_page=page
+    def call(request,**kwargs):
+        requests.append(request)
+        return {'capability':'descriptor-metadata','entries':[metadata_entry(tmp_path,p,'present') for p in request['paths']]}
+    monkeypatch.setattr(mounted_worker,'call',call);job={}
+    owner._known_availability({'kind':'local','root':str(tmp_path),'exclusions':[]},job,{'exclusions':[]},lambda:False)
+    assert len(queries)==expected_queries and len(requests[0]['paths'])==expected_paths
+    assert all(0<limit<=25 for limit in queries)
+    assert job['known_availability_cursor']==expected_cursor
