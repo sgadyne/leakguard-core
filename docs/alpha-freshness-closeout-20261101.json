@@ -1,0 +1,171 @@
+{
+  "date": "2026-11-01",
+  "status": "local-mac-freshness-qualified-review-candidate",
+  "product_commit": "6897e9d28e5da4002e76b215f9a605ce50f820be",
+  "parent_candidate_commit": "c6c4f7589fa08d413546bdfdfcbecb55e57cb83c",
+  "runtime_id": "4af7d93aeebf517dca30a92f5cc03a0aa43ed9148e492c0c7cca378f88b1268e",
+  "artifact": "Password-Buddy-Alpha-6897e9d-macos-arm64.zip",
+  "sha256": "644cfb6096752e9914ec9878186cd030d1a0b1257fa35fc715c508e786088601",
+  "source_archive": "password-buddy-source-6897e9d.tar.gz",
+  "source_archive_sha256": "c2e82802b493a2f4cc7333bdd908a8d6f9c99aa84e243a88f155886588acd2b2",
+  "safe_controls_archive": "safe-whole-machine-freshness-20261101.zip",
+  "safe_controls_sha256": "58a88db1ae74455914a1fc8dbb1c592785442fecb72fd3448b2afff9ca640531",
+  "distribution_approved": false,
+  "changes": [
+    "Revalidate known unknowns after runtime invalidation without trusting prior content evidence.",
+    "Retain unexecuted metadata/content pages and incomplete retries; acknowledge age only for actual returned work.",
+    "Keep changed-version follow-ups FIFO; unchanged pending subtrees remain ordinary discovery.",
+    "Reserve actual ordinary execution alongside observed work, with a shared 100-path cap and independent fair/refresh cursors."
+  ],
+  "validation": {
+    "source_tests_passed": 237,
+    "installed_tests_passed": 237,
+    "subtests_passed_in_each": 83,
+    "installed_source_resource_files_matched": 100,
+    "regressions_failed_before_passed_after": [
+      "known unknown and runtime-invalidated evidence revalidation",
+      "sustained priority arrivals and independent oldest rotation",
+      "byte/deadline/scanner-prefix truncation without aging unexecuted work",
+      "interrupted metadata/content persistence and source/generation/state fences",
+      "sparse active/unknown finding pages with bounded queries",
+      "FIFO across later metadata pages and event arrivals",
+      "unchanged pending subtrees not promoted as observed changes",
+      "ordinary saved-page execution under observed arrivals",
+      "full observed page reconsiders incoming work after credit is freed"
+    ]
+  },
+  "whole_machine_acceptance": {
+    "mode": "Exact packaged backend, automatic root and shipped home seeds, byte-copy of retained encrypted whole-footprint inventory after normal runtime upgrade; no selected-folder source or injected inventory rows.",
+    "configured_recurrence_seconds": 60,
+    "active_seconds": 491.637,
+    "completed_control_sequence": true,
+    "all_positive_control_versions_required_complete": true,
+    "same_size_edit_verified": true,
+    "locked_capability_rejected": true,
+    "reopened_and_resumed": true,
+    "renamed_old_path_nonactive": true,
+    "deleted_path_nonactive": true,
+    "lower_priority_negative_inspected": true,
+    "latencies_seconds": {
+      "initial_complete": 139.774,
+      "genuinely_new_complete": 114.184,
+      "genuinely_new_metadata_committed": 33.693,
+      "same_size_edit_complete": 25.993,
+      "rename_new_path_complete": 25.993,
+      "rename_old_path_nonactive": 58.822,
+      "delete_path_nonactive": 88.444,
+      "restart_new_control_complete": 23.405,
+      "low_priority_negative_complete": 139.774
+    },
+    "criterion_seconds": 300,
+    "criterion_met": true,
+    "criterion_scope": "Trial threshold for these small controlled versions and stale-path downgrades, including cold upgrade startup. Not a fleet SLO or bound for all backlog work.",
+    "publication_measurement": "Committed inventory/finding observations after each complete host tick. Setter hooks and fenced lookups are not publication or inspection proof.",
+    "first_tick_counts": {
+      "enumerated": 392,
+      "enumerating": 10853,
+      "pending": 17340,
+      "excluded": 2158,
+      "changed": 8,
+      "inaccessible": 7,
+      "protected": 5,
+      "inspected": 180,
+      "unsupported": 28
+    },
+    "final_counts": {
+      "enumerated": 487,
+      "enumerating": 11445,
+      "pending": 26910,
+      "excluded": 2903,
+      "inspected": 511,
+      "changed": 9,
+      "inaccessible": 9,
+      "unsupported": 75,
+      "protected": 5,
+      "inspection-error": 2
+    },
+    "coverage_complete": false,
+    "exclusions": "Explicit current-user cloud, browser credential stores, live Password Buddy stores, test/staging roots, remote/volume aliases and mount boundaries. No extra permissions or hydration.",
+    "scope": "Bounded local Mac automatic coordinator trial; not exhaustive machine coverage, read-access monitoring or population recall."
+  },
+  "aged_pending_execution": {
+    "pretrial_matching_pending_versions": 3672,
+    "complete_published_unchanged_versions": 9,
+    "complete_negative": 6,
+    "complete_positive": 3,
+    "complete_priority_counts": {
+      "100": 5,
+      "10": 4
+    },
+    "minimum_wait_lower_bound_seconds": 83.16,
+    "maximum_wait_lower_bound_seconds": 476.352,
+    "reserved_oldest_route_selected_matches": 2,
+    "reserved_oldest_route_complete_matches": 0,
+    "qualification": "Committed complete results match source/generation/signature of pretrial pending versions, also present in an older encrypted pending snapshot; physical metadata rechecked. Selection route is not inferred. Wait lower bounds start after pretrial observation; no continuously pending age since the older snapshot or globally oldest queue bound is claimed."
+  },
+  "pilot_readiness": {
+    "assessment": "Suitable for a limited single-user Mac alpha pilot under similar scope, backlog, exclusions and one-minute recurrence. Observed warm small-file completion reached 114 seconds; completed older backlog versions had wait lower bounds up to 476 seconds and the full backlog remains incomplete. Unattended corporate/fleet readiness and any fixed latency guarantee remain unqualified.",
+    "default_schedule_slo_claimed": false,
+    "full_machine_coverage_claimed": false
+  },
+  "private_continuity_replay": {
+    "batches": 14,
+    "matched_current_content_version_controls": 237,
+    "strict_original_metadata_admissions": 0,
+    "required_reports_complete": true,
+    "cold_warm_and_prior_findings_equal_on_matched_versions": true,
+    "qualification": "Device-only metadata differences admitted only with matching content digests and current source fences; historical version gaps retained. Continuity, not population recall."
+  },
+  "isolated_profile_continuity": {
+    "backup_files_verified": 987,
+    "vault_ciphertext_and_value_preserved": true,
+    "independent_locks": true,
+    "locked_observation_capability_rejected": true,
+    "schedule_and_review_bytes_preserved": true,
+    "qualification": "Exact packaged bootstrap migration and direct backend continuity; earlier native GUI evidence remains separate. No material UI change in this branch.",
+    "live_profile_modified": false,
+    "retained_nested_credential_fields": 7,
+    "retained_declaration_negative_clear": true
+  },
+  "archive_verification": {
+    "sealed_runtime_manifest_matches": true,
+    "roundtrip_bytes_modes_links_and_signature_match": true,
+    "app_tree_sha256": "a71c53233c5123095553813c76f6d86d23296f8601ce28938056adde66d0c2ad"
+  },
+  "resources": {
+    "automatic": {
+      "seconds": 493.945552110672,
+      "sampled_peak_owned_rss_bytes": 726089728,
+      "minimum_disk_free_bytes": 1555243008
+    },
+    "installed_tests": {
+      "seconds": 27.148120880126953,
+      "sampled_peak_owned_rss_bytes": 253952000,
+      "minimum_disk_free_bytes": 1666461696
+    },
+    "final_replay_migration_archive": {
+      "seconds": 130.98439073562622,
+      "sampled_peak_owned_rss_bytes": 362315776,
+      "minimum_disk_free_bytes": 1169448960
+    }
+  },
+  "privacy": {
+    "raw_known_real_value_occurrences_required": 0,
+    "final_audit_report": "evidence/freshness10-privacy-audit.json",
+    "scope": "Final task files, uncompressed ZIP/wheel/TAR entries and all outgoing Git objects since fetched main. Known real values reacquired only in memory; no raw needles persisted or private inputs transferred."
+  },
+  "prior_failed_evidence_preserved": true,
+  "prior_harness_correction": "Earlier digest-plus-active controls could advance on an incomplete result. Final trial requires inspected/complete status for each positive control version; earlier receipts were not relabeled.",
+  "signing": {
+    "ad_hoc": true,
+    "developer_id": false,
+    "notarized": false
+  },
+  "limitations": [
+    "No globally oldest wait bound or exhaustive coverage claim; pending/inaccessible/unsupported/error states remain explicit.",
+    "No fresh Windows, Linux, remote or fleet qualification. Expired remote waiver was not used; remote synthetic cleanup remains deferred.",
+    "Separate scanning-layer/preset feature code is not included in this runtime or qualification.",
+    "No push, CI execution, publication or live installation; protected live apps/profile were preserved."
+  ],
+  "published": false
+}
