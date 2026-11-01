@@ -44,7 +44,7 @@ def test_refresh_slot_falls_back_without_skipping_regular_cursor():
     assert store.calls[0][1]['cursor']==0 and store.calls[0][1]['queue_class']=='refresh'
     assert store.calls[1][1]['cursor']==0 and store.calls[1][1]['prefer_priority'] is False
     assert job['refresh_inventory_cursor']==8 and job['fair_inventory_cursor']==17 and job['inventory_cursor']==9
-    assert job['navigation_profile']['version']=='bounded-refresh-v4'
+    assert job['navigation_profile']['version']=='bounded-observed-refresh-v5'
     job['slices']=6;store.calls.clear()
     owner.inventory_page({'id':'source'},job,'file',('pending','changed'),limit=25)
     assert len(store.calls)==1 and store.calls[0][1]['prefer_priority'] is True
@@ -242,4 +242,45 @@ def test_deadline_before_execution_retains_page_without_aging_unattempted_work(t
         child=store._partitions.get(store._partitions.bucket(str(file)))
         assert child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(file),)).fetchone()[0]==age
         assert store.inventory_counts()=={'pending':1}
+    finally:owner.close();store.close()
+
+
+@__import__('pytest').mark.parametrize('slot',[0,1,5])
+def test_observed_parent_change_executes_bounded_followup_before_unrelated_backfill(tmp_path,monkeypatch,slot):
+    from types import SimpleNamespace
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    from leakguard_core.api import ScanConfig
+    from leakguard_core import backends
+    from leakguard_host.protection import defaults
+    root=tmp_path/'inputs';root.mkdir();low=root/'node_modules';low.mkdir()
+    known=root/'known.env';known.write_text('ordinary synthetic known-version control')
+    negative=low/'ordinary.txt';negative.write_text('ordinary synthetic negative')
+    oldest=root/'oldest.txt';oldest.write_text('ordinary synthetic oldest control')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-observed-followup')
+    source={'id':'source','root':str(root),'kind':'local','exclusions':[]}
+    store.inventory_put([(str(root),'source','directory',_sig(root.stat()),'enumerated',20,1,0,None,None),
+                         (str(low),'source','directory',_sig(low.stat()),'enumerating',200,1,0,None,None),
+                         (str(known),'source','file',_sig(known.stat()),'inspected',0,1,known.stat().st_size,None,None),
+                         (str(negative),'source','file',_sig(negative.stat()),'pending',200,1,negative.stat().st_size,None,None),
+                         (str(oldest),'source','file',_sig(oldest.stat()),'pending',200,1,oldest.stat().st_size,None,None)])
+    new=root/'genuinely-new.env';new.write_text('ordinary synthetic new-version control')
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}))
+    # Model a large unrelated backlog whose ordinary page cannot reach this
+    # parent's shard in this slice. The metadata worker and scanner stay real.
+    def unrelated_page(source,job,kind,status,**kwargs):
+        return store.inventory_selected(source['id'],'file',status,[str(oldest)],1) if kind=='file' else []
+    owner.inventory_page=unrelated_page
+    store.query_findings_page=lambda **kwargs:SimpleNamespace(rows=[{'source':{'path':str(known)},'state':'unknown'}],next_cursor=None)
+    monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',lambda *a,**k:('synthetic-runtime',True))
+    monkeypatch.setattr(backends,'detect',lambda *a,**k:())
+    job={'inventory_generation':1,'inventory_complete':False,'slices':slot,'content_cursor':0,'files_scanned':0,'new_findings':0,'metadata_enumerated':0,'unknown_descendants':0,'reconcile_cursor':256}
+    try:
+        owner.tick(source,job,defaults(),cancel=lambda:False)
+        for path in (new,negative):
+            child=store._partitions.get(store._partitions.bucket(str(path)))
+            row=child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(path),)).fetchone()
+            assert row and row[0]==('pending' if slot==0 else 'inspected'), 'observed changes must progress without consuming the oldest slot'
+        child=store._partitions.get(store._partitions.bucket(str(oldest)))
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(oldest),)).fetchone()[0]=='inspected'
+        assert job['files_scanned']==(1 if slot==0 else 3)
     finally:owner.close();store.close()

@@ -246,11 +246,14 @@ class DiscoveryCoordinator:
         runtime and publication checks still authorize every admitted version.
         A filtered empty page never proves inventory completion.
         """
-        job['navigation_profile']={'version':'bounded-refresh-v4','cycle':10,
+        job['navigation_profile']={'version':'bounded-observed-refresh-v5','cycle':10,
             'oldest_slot':0,'refresh_slot':5,'metadata_seconds':2,
             'slice_seconds':10,'max_metadata_entries':5000,
             'filtered_fallback_queries':1,'new_arrivals':'monotonic-clock',
-            'known_availability_page_rows':25,'known_availability_seconds':2}
+            'known_availability_page_rows':25,'known_availability_seconds':2,
+            'observed_followup_files':25,'observed_directory_hints':100,
+            'observed_content_share':'half-batch-outside-oldest-slot',
+            'interrupted_content_page_paths':100,'content_age':'returned-results'}
         key='inventory_cursor' if kind=='directory' else 'content_cursor'
         # Local execution acknowledges only the attempted prefix. Other
         # consumers retain the original immediate-admission API contract.
@@ -331,13 +334,15 @@ class DiscoveryCoordinator:
         for item in entries:
             if item.get('parent_info') is not None:observed[(str(Path(item['path']).parent),'directory')]=item['parent_info']
             if item['status']=='present' and item.get('info') is not None:observed[(item['path'],'file')]=item['info']
-        observe=getattr(self.store,'inventory_observed',None)
+        observe=getattr(self.store,'inventory_observed',None);changed_work=[]
         if callable(observe) and isinstance(source.get('id'),str) and type(job.get('inventory_generation')) is int:
             from .mounted_worker import signature
             for (path,kind),metadata in observed.items():
                 if cancel():return
                 changed=observe(path,source['id'],job['inventory_generation'],kind,signature(metadata),metadata['st_size'])
-                if changed:job['known_availability_changed']=job.get('known_availability_changed',0)+1
+                if changed:
+                    job['known_availability_changed']=job.get('known_availability_changed',0)+1
+                    changed_work.append((path,kind))
         job['known_availability_checked']=job.get('known_availability_checked',0)+len(entries)
         for item in entries:
             if cancel():break
@@ -346,11 +351,17 @@ class DiscoveryCoordinator:
                 view=_Evidence(child,self.store)
                 view.record_event(item['path'],'deleted' if item['status']=='absent' else 'changed')
             job['known_availability_unknown']=job.get('known_availability_unknown',0)+1
+        return changed_work
 
-    def _enumerate(self,source,job,settings,cancel,deadline):
+    def _enumerate(self,source,job,settings,cancel,deadline,*,observed=(),content_followup=None):
         generation=job['inventory_generation'];seen=0
+        hints=[path for path,kind in observed if kind=='directory']
         while seen<5000 and time.monotonic()<deadline and not cancel():
-            rows=self.inventory_page(source,job,'directory','enumerating',limit=1)
+            hinted=bool(hints)
+            if hinted:
+                rows=self.store.inventory_selected(source['id'],'directory','enumerating',[hints.pop(0)],generation)
+                if not rows:continue
+            else:rows=self.inventory_page(source,job,'directory','enumerating',limit=1)
             if not rows:
                 job['empty_directory_pages']=job.get('empty_directory_pages',0)+1
                 if job['empty_directory_pages']>=32:
@@ -425,6 +436,13 @@ class DiscoveryCoordinator:
                     except OSError:
                         entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
                 self.store.inventory_put(entries)
+                if hinted:
+                    # Follow only descriptor-observed changes and their bounded
+                    # metadata page, using the same ancestry, time and entry
+                    # limits. These hints never create another durable queue.
+                    for entry in entries:
+                        if entry[2]=='directory' and entry[4]=='enumerating' and len(hints)<100:hints.append(entry[0])
+                        elif entry[2]=='file' and entry[4]=='pending' and content_followup is not None and len(content_followup)<25:content_followup.append(entry[0])
                 if mounted is not None:
                     exhausted=mounted['complete'];position=mounted['position']
                 stable=mounted['stable'] if mounted is not None else _sig(path.lstat())==signature
@@ -471,8 +489,10 @@ class DiscoveryCoordinator:
             return {'scanned':0,'inventory_complete':False}
         self._refresh_metadata(source,job)
         deadline=time.monotonic()+10
-        self._known_availability(source,job,settings,cancel)
-        if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2))
+        observed=self._known_availability(source,job,settings,cancel) or []
+        followup=[path for path,kind in observed if kind=='file']
+        if any(kind=='directory' for path,kind in observed):job.update(inventory_complete=False,empty_directory_pages=0)
+        if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2),observed=observed,content_followup=followup)
         scanned=0
         if settings['new_content']=='inspect' and not cancel():
             # Finish an interrupted selection before replacing it with new
@@ -481,7 +501,17 @@ class DiscoveryCoordinator:
             rows=[]
             if source['kind']=='local' and job.get('content_remainder'):
                 rows=self.store.inventory_selected(source['id'],'file',('pending','changed'),job['content_remainder'],job['inventory_generation'])
-            if not rows:rows=self.inventory_page(source,job,'file',('pending','changed'),limit=job.get('content_batch',100))
+            if not rows:
+                batch=job.get('content_batch',100)
+                # Oldest slots and interrupted pages retain their independent
+                # service. Other slots may spend at most half their existing
+                # batch on newly observed versions before regular admission.
+                if source['kind']=='local' and job['slices']%10!=0:
+                    rows=self.store.inventory_selected(source['id'],'file',('pending','changed'),list(dict.fromkeys(followup))[:25],job['inventory_generation'])[:max(1,batch//2)]
+                if len(rows)<batch:
+                    selected=self.inventory_page(source,job,'file',('pending','changed'),limit=batch-len(rows))
+                    selected_paths={row[0] for row in rows}
+                    rows.extend(row for row in selected if row[0] not in selected_paths)
             remaining=[row[0] for row in rows]
             if source['kind']=='local':job['content_remainder']=remaining[:]
             groups=defaultdict(list);admitted=0
@@ -501,7 +531,7 @@ class DiscoveryCoordinator:
                     with self.scanner(view) as scanner:
                         if source['kind']=='local':
                             if cancel() or time.monotonic()>=deadline:break
-                        limits=ScanLimits(deadline_seconds=8,max_files=100,max_file_bytes=self.config.to_mapping()['max_file_bytes'],max_report_bytes=4_000_000,detector_timeout_seconds=5)
+                        limits=ScanLimits(deadline_seconds=min(8,max(.001,deadline-time.monotonic())) if source['kind']=='local' else 8,max_files=100,max_file_bytes=self.config.to_mapping()['max_file_bytes'],max_report_bytes=4_000_000,detector_timeout_seconds=5)
                         if source['kind']=='mounted':
                             from .mounted_worker import call
                             from leakguard_core.api import parse_report
