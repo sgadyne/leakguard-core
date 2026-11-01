@@ -320,3 +320,38 @@ def test_observed_parent_change_executes_bounded_followup_before_unrelated_backf
                 assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(path),)).fetchone()[0]=='inspected', 'a deferred metadata event was lost between slices'
             assert job['files_scanned']==3
     finally:owner.close();store.close()
+
+
+@__import__('pytest').mark.parametrize('tail_size',[1,100])
+def test_observed_arrivals_cannot_consume_every_reserved_oldest_slot(tmp_path,monkeypatch,tail_size):
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    from leakguard_core.api import ScanConfig
+    from leakguard_core import backends
+    from leakguard_host.protection import defaults
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-replenished-tail')
+    oldest=tmp_path/'oldest.txt';oldest.write_text('ordinary synthetic oldest control')
+    hot=[tmp_path/f'priority-{i:03}.env' for i in range(tail_size+12)]
+    for path in hot:path.write_text('ordinary synthetic observed arrival')
+    def row(path,priority):return (str(path),'source','file',_sig(path.stat()),'pending',priority,1,path.stat().st_size,None,None)
+    store.inventory_put([row(oldest,200),*[row(path,0) for path in hot[:tail_size]]])
+    source={'id':'source','root':str(tmp_path),'kind':'local','exclusions':[]}
+    job={'inventory_generation':1,'inventory_complete':True,'slices':0,'content_cursor':0,'fair_content_cursor':int(store._partitions.bucket(str(oldest))[1:],16),'content_remainder':[str(path) for path in hot[:tail_size]],'content_batch':1,'files_scanned':0,'new_findings':0,'reconcile_cursor':256}
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}))
+    monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',lambda *a,**k:('synthetic-runtime',True))
+    monkeypatch.setattr(backends,'detect',lambda *a,**k:())
+    child=store._partitions.get(store._partitions.bucket(str(hot[tail_size-1])))
+    age=child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(hot[tail_size-1]),)).fetchone()[0]
+    try:
+        for step in range(12):
+            store.inventory_put([row(hot[tail_size+step],0)])
+            owner._known_availability=lambda *a,**k:[(str(hot[tail_size+step]),'file')]
+            job['slices']=step
+            owner.tick(source,job,defaults(),cancel=lambda:False)
+            assert len(job['content_remainder'])<=100
+            if step==0 and tail_size==100:
+                child=store._partitions.get(store._partitions.bucket(str(hot[tail_size-1])))
+                assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(hot[tail_size-1]),)).fetchone()[0]=='pending'
+                assert child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(hot[tail_size-1]),)).fetchone()[0]==age
+        child=store._partitions.get(store._partitions.bucket(str(oldest)))
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(oldest),)).fetchone()[0]=='inspected', 'observed replenishment consumed every oldest-work execution slot'
+    finally:owner.close();store.close()

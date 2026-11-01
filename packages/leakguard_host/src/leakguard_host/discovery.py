@@ -519,6 +519,13 @@ class DiscoveryCoordinator:
             rows=[]
             if source['kind']=='local' and job.get('content_remainder'):
                 rows=self.store.inventory_selected(source['id'],'file',('pending','changed'),job['content_remainder'],job['inventory_generation'])
+                if rows and job['slices']%10==0:
+                    # A stream of observed arrivals can replenish this tail
+                    # indefinitely. Preserve one actual oldest-work credit;
+                    # any overflow stays pending with its inventory age intact.
+                    oldest=self.inventory_page(source,job,'file',('pending','changed'),limit=1)
+                    selected={row[0] for row in oldest}
+                    rows=(*oldest,*(row for row in rows if row[0] not in selected))[:100]
             if not rows:
                 batch=job.get('content_batch',100)
                 # Oldest slots and interrupted pages retain their independent
