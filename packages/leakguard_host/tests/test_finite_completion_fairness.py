@@ -133,6 +133,12 @@ def test_finite_old_and_arriving_versions_complete_across_reopen(tmp_path, monke
         assert set(completed) == set(expected)
         assert len(observed_results) == len(expected) == 9
         assert job['files_scanned'] == len(expected)
+        store.checkpoint()
+        evidence = store.inspection_evidence()
+        assert sum(evidence['completed'][name] for name in
+                   ('ordinary', 'observed_change', 'reserved_oldest')) == len(expected)
+        assert evidence['pending']['with_known_age'] == 0
+        assert evidence['pending']['with_unknown_age'] == 0
         for path in [*old, *new]:
             child = store._partitions.get(store._partitions.bucket(str(path)))
             inventory = child.conn.execute(
@@ -175,7 +181,6 @@ def test_generation_change_fences_saved_remainder_after_root_replacement(tmp_pat
            'new_findings': 0, 'reconcile_cursor': 256}
     owner = DiscoveryCoordinator(store, ScanConfig.from_mapping({}))
     owner.identity = lambda _settings: {'policy_id': 'synthetic-policy', 'runtime_id': 'synthetic-runtime'}
-    owner.inventory_page = lambda *a, **k: []
     owner._known_availability = lambda *a, **k: []
     monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',
                         lambda *a, **k: ('synthetic-runtime', True))
