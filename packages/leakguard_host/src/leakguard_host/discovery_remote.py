@@ -153,7 +153,7 @@ class RemoteDiscovery:
    # deadline. Retry that version alone before retaining an explicit gap.
    attempts+=1;job['content_batch_limit']=1;job['content_success_streak']=0
    state='pending' if attempts<3 else 'inspection-error'
-  self.store.inventory_set(logical,state,detail=json.dumps({'digest':snapshot['sha256'],'remote_signature':snapshot['signature'],'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({x.code.value for x in result.issues}),'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==snapshot['sha256'] if previous.get('digest') else None,'transport':'ssh','checked_after_scan':bool(valid)}))
+  self.store.inventory_set(logical,state,detail=json.dumps({'digest':snapshot['sha256'],'remote_signature':snapshot['signature'],'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({x.code.value for x in result.issues}),'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==snapshot['sha256'] if previous.get('digest') else None,'transport':'ssh','checked_after_scan':bool(valid)}),completion_route=('reserved_oldest' if job['slices']%10==0 else 'ordinary') if 'slices' in job else None)
 
  def _retry_missing(self,rows,observed,job):
   missing=[row for row in rows if row[0] not in observed]

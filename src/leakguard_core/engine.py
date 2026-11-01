@@ -1352,7 +1352,8 @@ class ScanService:
                 if materials is not None and (materials.references or materials.issues):
                     kwargs.update(material_observations=observations, materials_checked=True, materials_complete=result.coverage is m.CoverageState.COMPLETE)
                 self.store.record_result(result, generation=generation, cache_key=cache_key if result.coverage is m.CoverageState.COMPLETE else None, **kwargs)
-            except Exception:
+            except Exception as error:
+                self._diagnostic('publish','state-failed',error)
                 issue = m.CoverageIssue(m.ErrorCode.STATE_FAILED, result.source, required=True)
                 run_issues.append(issue)
                 # Hosts use per-file coverage to advance durable inventory.
@@ -1405,11 +1406,21 @@ class ScanService:
                 self.store.record_report(report)
             else:
                 self.store.record_report(report, repository=repository)
-        except Exception:
+        except Exception as error:
+            self._diagnostic('publish','state-failed',error)
             issue = m.CoverageIssue(m.ErrorCode.STATE_FAILED, required=True)
             coverage, decision = scan_policy.evaluate(report.results, policy=policy, policy_id=policy_id, enumeration_complete=False, issues=report.issues + (issue,), pending_files=coverage.pending_files, pending_directories=coverage.pending_directories, cycle_id=coverage.cycle_id)
             report = replace(report, coverage=coverage, decision=decision, issues=report.issues + (issue,))
         return _cap_report(report, limits.max_report_bytes)
+
+    def _diagnostic(self, stage, code=None, error=None):
+        # Optional collection never widens the ScanStore capability or leaks
+        # exception messages/args. Original coverage failure remains primary.
+        sink=getattr(self.store,'record_diagnostic',None)
+        if callable(sink):
+            from .diagnostics import event
+            try:sink(event(stage,code,error))
+            except Exception:pass
 
     @staticmethod
     def _error_code(value, fallback='detector-failed'):
@@ -1442,7 +1453,8 @@ class ScanService:
                 raise InputFailure('configuration-invalid')
             try:
                 generation = self.store.reserve(source)
-            except Exception:
+            except Exception as error:
+                self._diagnostic('publish','state-failed',error)
                 raise InputFailure('state-failed', source) from None
             snapshot = None
             cached = None
@@ -1454,11 +1466,17 @@ class ScanService:
                     snapshot = acquire_file(item.path, max_bytes=limits.max_file_bytes, boundary=getattr(item, 'boundary', None))
                 else:
                     snapshot = acquire_bytes(item.data, item.logical_path, max_bytes=limits.max_file_bytes)
-                identity, cache_key = self._snapshot_identity(snapshot, policy_id, materials)
-                if use_cache and identity.cache_eligible:
-                    cached = self.store.get_cached(cache_key)
             except Exception as failure:
+                self._diagnostic('acquire',getattr(failure,'code',None),failure)
                 error = failure
+            if error is None:
+                try:
+                    identity, cache_key = self._snapshot_identity(snapshot, policy_id, materials)
+                    if use_cache and identity.cache_eligible:
+                        cached = self.store.get_cached(cache_key)
+                except Exception as failure:
+                    self._diagnostic('unknown',getattr(failure,'code',None),failure)
+                    error = failure
             return source, generation, snapshot, cached, error
 
         def execute(work):
@@ -1479,7 +1497,13 @@ class ScanService:
         # reservations, cache reads and publication all stay on this thread.
         workers = min(self.config.get('scan_workers', 2), limits.max_files)
         with backends.prepare(binary=self.binary, rules=self.rules, check=check, cache_native=use_cache) as backend:
-            yield from ordered_work(inputs, prepare=prepare, execute=execute, workers=workers,
+            def observed_inputs():
+                try:
+                    yield from inputs
+                except Exception as error:
+                    self._diagnostic('enumerate',getattr(error,'code',None),error)
+                    raise
+            yield from ordered_work(observed_inputs(), prepare=prepare, execute=execute, workers=workers,
                                     max_items=limits.max_files, stop=stopped.stop)
 
     def _snapshot_identity(self, snapshot, policy_id, materials=None):
@@ -1502,7 +1526,15 @@ class ScanService:
                 return replace(cached, source=source, outcome=m.ScanOutcome.REUSED, observed_at=when, last_verified_at=when, reused_from=cached.reused_from or hashlib.sha256(_legacy_origin(cached).encode()).hexdigest()), cache_key, ()
         when = dt.datetime.now(dt.timezone.utc)
         remaining = max(0.001, deadline - time.monotonic())
-        extracted = extraction.extract(snapshot.data, source.path, limits=limits, timeout=min(limits.extract_timeout_seconds, remaining), plugins=self._plugins, cancel=cancel, extractor_overrides=self.config.get('extractor_overrides'), worker_policy=self.config.get('worker_policy', 'strict'))
+        try:
+            extracted = extraction.extract(snapshot.data, source.path, limits=limits, timeout=min(limits.extract_timeout_seconds, remaining), plugins=self._plugins, cancel=cancel, extractor_overrides=self.config.get('extractor_overrides'), worker_policy=self.config.get('worker_policy', 'strict'))
+        except Exception as error:
+            self._diagnostic('parse',getattr(error,'code',None),error)
+            raise
+        for code in extracted.issues:
+            if code in {'extract-failed','extract-timeout','extract-crashed','extract-output-limit','extract-part-limit','decode-failed','dependency-unavailable'}:
+                # A supervised parser returns a bounded code, not its exception.
+                self._diagnostic('parse',code)
         issues = _IssueBudget(min(32768, limits.max_report_bytes // 16))
         if materials is not None:
             issues.extend(m.CoverageIssue(self._error_code(code), source, required=True) for code in materials.issues)
@@ -1557,6 +1589,7 @@ class ScanService:
                         break
                     findings.append(self._finding(snapshot, part, item.rule, item.start_line, item.end_line, item.severity, 'gitleaks', mode=policy.mode))
             except Exception as error:
+                self._diagnostic('recognize',getattr(error,'code',None),error)
                 issues.append(m.CoverageIssue(self._error_code(getattr(error, 'code', 'detector-failed')), source, part.part_id, True))
             if finding_admission_stopped:
                 break
@@ -1573,6 +1606,7 @@ class ScanService:
                         end = part.text.count('\n', 0, analysis.end - 1) + 1 if analysis is not None else item.line
                         findings.append(self._finding(snapshot, part, item.rule, item.line, end, item.severity, plugins.detector_id(instance), mode=policy.mode, analysis=analysis))
                 except Exception as error:
+                    self._diagnostic('recognize',getattr(error,'code',None),error)
                     issues.append(m.CoverageIssue(self._error_code(getattr(error, 'code', 'detector-failed')), source, part.part_id, True))
                 if finding_admission_stopped:
                     break

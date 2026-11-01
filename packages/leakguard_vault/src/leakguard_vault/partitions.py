@@ -16,6 +16,8 @@ import sqlite3
 import zlib
 import shutil
 
+from . import inspection
+
 from leakguard_core.scan_store import SQLiteScanStore, StateError
 from . import _envelope as envelope
 from ._files import atomic_write, read_bounded
@@ -31,7 +33,7 @@ CREATE TABLE IF NOT EXISTS physical(identity TEXT PRIMARY KEY,generation INTEGER
 CREATE TABLE IF NOT EXISTS inventory_admissions(path TEXT PRIMARY KEY,sequence INTEGER NOT NULL CHECK(typeof(sequence)='integer' AND sequence>=0));
 CREATE TABLE IF NOT EXISTS inventory_admission_clock(id INTEGER PRIMARY KEY CHECK(id=1),sequence INTEGER NOT NULL CHECK(typeof(sequence)='integer' AND sequence>=0));
 INSERT OR IGNORE INTO inventory_admission_clock VALUES(1,0);
-'''
+''' + inspection.SCHEMA
 
 
 class EncryptedPartitions:
@@ -43,7 +45,7 @@ class EncryptedPartitions:
         if type(self.catalog) is not dict or len(self.catalog) > 768:
             raise StateError('state-data-invalid')
         for bucket, item in self.catalog.items():
-            if not re.fullmatch(r'[iep][a-f0-9]{2}', bucket) or type(item) is not dict or set(item) not in ({'base','logs','bytes','counts'},{'base','logs','bytes','counts','priorities'}):
+            if not re.fullmatch(r'[iep][a-f0-9]{2}', bucket) or type(item) is not dict or not {'base','logs','bytes','counts'} <= set(item) <= {'base','logs','bytes','counts','priorities','inspection'}:
                 raise StateError('state-data-invalid')
             names = ([item['base']] if item['base'] else []) + item['logs']
             if len(item['logs']) > 64 or not all(type(n) is str and _NAME.fullmatch(n) for n in names):
@@ -152,6 +154,8 @@ class EncryptedPartitions:
         aggregate=store.conn.execute('SELECT location,kind,status,count(*),min(priority) FROM inventory GROUP BY location,kind,status').fetchall()
         item['counts']={envelope.canonical([loc,kind,state]).decode():count for loc,kind,state,count,priority in aggregate}
         item['priorities']={envelope.canonical([loc,kind,state]).decode():priority for loc,kind,state,count,priority in aggregate}
+        if bucket.startswith('i') and store.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inventory_chronology'").fetchone():
+            item['inspection'] = inspection.summary(store.conn)
         self.catalog[bucket] = item
         current_names=set(([item['base']] if item['base'] else [])+item['logs'])
         for name in old_names:
@@ -211,9 +215,12 @@ class EncryptedPartitions:
         for bucket, group in sorted(groups.items()):
             store = self.get(bucket)
             changed=[]
+            previous_rows={}
             new_paths=set()
             for row in group:
-                previous=store.conn.execute('SELECT signature FROM inventory WHERE path=?',(row[0],)).fetchone()
+                previous_row=store.conn.execute('SELECT * FROM inventory WHERE path=?',(row[0],)).fetchone()
+                previous_rows[row[0]]=previous_row
+                previous=(previous_row[3],) if previous_row is not None else None
                 if previous is None:
                     new_paths.add(row[0]);versions.append((row[0],row[2]))
                 elif previous[0]!=row[3]:
@@ -230,6 +237,9 @@ class EncryptedPartitions:
             try:
                 with store.conn:
                     store.conn.executemany('''INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET location=excluded.location,kind=excluded.kind,signature=excluded.signature,status=CASE WHEN inventory.signature=excluded.signature AND inventory.kind='directory' AND inventory.generation=excluded.generation AND inventory.status IN ('enumerated','alias','inaccessible','excluded') THEN inventory.status WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.status WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='file' AND excluded.kind='file' AND inventory.status IN ('pending','changed') AND excluded.status='pending' AND excluded.detail IN ('content-refresh-during-backfill','content-version-refresh-during-backfill') THEN inventory.status WHEN inventory.signature IS NOT excluded.signature AND excluded.status='pending' THEN 'changed' ELSE excluded.status END,priority=excluded.priority,generation=excluded.generation,size=excluded.size,cursor=CASE WHEN inventory.kind='directory' AND inventory.status='enumerating' AND excluded.status='enumerating' AND inventory.signature=excluded.signature AND inventory.generation=excluded.generation AND excluded.cursor IS NULL THEN inventory.cursor ELSE excluded.cursor END,detail=CASE WHEN inventory.signature IS NOT NULL AND excluded.signature IS NOT NULL AND inventory.signature<>excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status IN ('enumerating','enumerated','inaccessible') AND excluded.status='enumerating' THEN 'metadata-version-refresh-during-backfill' WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status='enumerating' AND excluded.status='enumerating' AND excluded.detail IN ('metadata-refresh-during-backfill','metadata-version-refresh-during-backfill') THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status='enumerating' AND excluded.status='enumerating' AND inventory.detail IN ('metadata-refresh-during-backfill','metadata-version-refresh-during-backfill') AND excluded.detail IS NULL THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='file' AND excluded.kind='file' AND inventory.status IN ('pending','changed') AND excluded.status='pending' AND excluded.detail IN ('content-refresh-during-backfill','content-version-refresh-during-backfill') THEN inventory.detail ELSE excluded.detail END''', group)
+                    for path,previous in previous_rows.items():
+                        current=store.conn.execute('SELECT * FROM inventory WHERE path=?',(path,)).fetchone()
+                        inspection.transition(store.conn,previous,current)
                     # New arrivals join behind already-admitted work. Legacy rows
                     # with no admission remain sequence zero until first admitted.
                     # Insertions and their stamps commit or roll back together.
@@ -353,11 +363,21 @@ class EncryptedPartitions:
             return rows,(index+1)%256
         return [],(cursor+8)%256
 
-    def inventory_set(self, path, status, *, cursor=None, detail=None,signature=None):
+    def inventory_set(self, path, status, *, cursor=None, detail=None,signature=None,completion_route=None):
         store = self.get(self.bucket(path))
-        with store.conn:
-            store.conn.execute('UPDATE inventory SET status=?,cursor=?,detail=? WHERE path=?', (status,cursor,detail,path))
-            if signature is not None:store.conn.execute('UPDATE inventory SET signature=? WHERE path=?',(signature,path))
+        journal,journal_size=self.cache[self.bucket(path)][1:]
+        start,size_start=len(journal),journal_size[0]
+        try:
+            with store.conn:
+                previous=store.conn.execute('SELECT * FROM inventory WHERE path=?',(path,)).fetchone()
+                store.conn.execute('UPDATE inventory SET status=?,cursor=?,detail=? WHERE path=?', (status,cursor,detail,path))
+                if signature is not None:store.conn.execute('UPDATE inventory SET signature=? WHERE path=?',(signature,path))
+                current=store.conn.execute('SELECT * FROM inventory WHERE path=?',(path,)).fetchone()
+                inspection.transition(store.conn,previous,current,route=completion_route)
+        except BaseException:
+            del journal[start:]
+            journal_size[0]=size_start
+            raise
 
     def physical_visit(self, identity, generation, path):
         store = self.get(self.bucket(identity, 'p'))
@@ -373,7 +393,12 @@ class EncryptedPartitions:
         if bucket in self.catalog or bucket in self.cache:
             store=self.get(bucket)
             with store.conn:
+                previous=store.conn.execute("SELECT * FROM inventory WHERE location=? AND kind='file' AND status IN ('inspected','inspected-with-omissions','unsupported','inspection-error')",(source['id'],)).fetchall()
                 store.conn.execute("UPDATE inventory SET status='pending',detail='policy-or-runtime-changed' WHERE location=? AND kind='file' AND status IN ('inspected','inspected-with-omissions','unsupported','inspection-error')",(source['id'],))
+                for row in previous:
+                    current=store.conn.execute('SELECT * FROM inventory WHERE path=?',(row[0],)).fetchone()
+                    inspection.transition(store.conn,row,current)
+                    store.conn.execute('UPDATE inventory_chronology SET last_complete_at=NULL WHERE path=?',(row[0],))
         evidence=f'e{index:02x}'
         if evidence in self.catalog or evidence in self.cache:self.get(evidence).invalidate_scope(source['root'],reason='source-unavailable')
 

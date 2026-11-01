@@ -440,6 +440,14 @@ class EncryptedScanStore:
             self._dirty = True
             return self._partitions.physical_visit(*args)
 
+    def inspection_evidence(self):
+        # Read only bounded authenticated catalog metadata. Never open/decrypt
+        # inventory partitions or update the checkpoint from a polling request.
+        from .inspection import projection
+        with self._mutex:
+            self._ensure_open()
+            return projection(self._partitions.catalog)
+
     def inventory_counts(self, location=None):
         with self._mutex:
             self._ensure_open()

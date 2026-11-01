@@ -76,3 +76,31 @@ fixed existing polling/off modes. Values come from the resolver's actual current
 config/protection input. Plugin option values, paths and aliases are excluded.
 An empty list means the compared safe fields are unchanged; it does not waive
 runtime preflight or prove arbitrary plugin options unchanged.
+
+
+## Implemented chronology projection
+
+The test-only fixtures are in fixtures/inspection-evidence.json (available,
+historical unknown-age, and locked with the projection omitted). They are captured
+from the production encrypted store projection with synthetic inputs.
+
+The projection is a last-encrypted-checkpoint catalog summary. Polling opens no
+inventory partitions and runs no inventory SQL. Mutation-time aggregation adds
+bounded metadata to each of the at most 256 inventory catalog entries.
+Counts cover the observed window; completion counters require an actual fully
+inspected result and exclude inspected-with-omissions and terminal gaps.
+Repeated unchanged inspected transitions do not count twice. Reserved-oldest
+counts identify the actual reserved selection subset that completed, not all
+work in that scheduling slice.
+
+Age buckets are omitted, with age_buckets_available:false. Recomputing live
+buckets soundly is not part of this bounded projection. Oldest-observed-pending
+timestamps still let a client display elapsed observed age. measured_at is the
+latest mutation checkpoint summary time; unchanged partition summaries remain
+valid for pending counts/timestamps. This is not a historical full-scope census.
+
+Diagnostics retain at most eight events per bounded job and sixteen in the status
+projection. exception_type:null means a supervised component reported a safe code
+without exposing its underlying exception. Recovery is conservative: the finite
+source must complete without terminal inspection gaps; successful unrelated work
+does not erase or recover an earlier failure. Source/job IDs are opaque.

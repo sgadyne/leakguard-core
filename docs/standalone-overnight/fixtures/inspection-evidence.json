@@ -1,0 +1,64 @@
+{
+  "cases": {
+    "available": {
+      "host": {
+        "inspection_evidence": {
+          "age_buckets_available": false,
+          "completed": {
+            "observed_change": 1,
+            "oldest_observed_wait_seconds": 102.0,
+            "ordinary": 1,
+            "reserved_oldest": 1
+          },
+          "diagnostics": [],
+          "last_complete_inspection_at": 202.0,
+          "measured_at": 300.0,
+          "measurement": "last-encrypted-checkpoint-catalog",
+          "observation_started_at": 100.0,
+          "pending": {
+            "oldest_observed_pending_at": 100.0,
+            "with_known_age": 2,
+            "with_unknown_age": 0
+          },
+          "schema_version": 1
+        },
+        "observation_available": true
+      }
+    },
+    "historical": {
+      "host": {
+        "inspection_evidence": {
+          "age_buckets_available": false,
+          "completed": {
+            "observed_change": 0,
+            "oldest_observed_wait_seconds": null,
+            "ordinary": 0,
+            "reserved_oldest": 0
+          },
+          "diagnostics": [],
+          "last_complete_inspection_at": null,
+          "measured_at": 300.0,
+          "measurement": "last-encrypted-checkpoint-catalog",
+          "observation_started_at": null,
+          "pending": {
+            "oldest_observed_pending_at": null,
+            "with_known_age": 0,
+            "with_unknown_age": 2
+          },
+          "schema_version": 1
+        },
+        "observation_available": true
+      }
+    },
+    "locked": {
+      "host": {
+        "observation_available": false
+      },
+      "observations": {
+        "unlocked": false
+      }
+    }
+  },
+  "schema_version": 1,
+  "test_only": true
+}

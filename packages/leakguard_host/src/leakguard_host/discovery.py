@@ -55,7 +55,11 @@ def _priority(path):
 
 
 class _Evidence:
-    def __init__(self,child,owner):self.child,self.owner=child,owner;self.new_findings=0;self.deadline=None
+    def __init__(self,child,owner,job=None):self.child,self.owner,self.job=child,owner,job;self.new_findings=0;self.deadline=None
+    def record_diagnostic(self,value):
+        if self.job is not None:
+            from leakguard_core.diagnostics import retain
+            with self.owner._mutex:retain(self.job,value)
     def set_deadline(self,deadline):self.deadline=deadline
     def __getattr__(self,name):
         method=getattr(self.child,name)
@@ -534,7 +538,7 @@ class DiscoveryCoordinator:
                 try:return json.loads(row[9]).get('attempts',0)>0 if row[9] else False
                 except (ValueError,TypeError,AttributeError):return False
             batch=job.get('content_batch',100)
-            rows=[];saved=[];observed_paths=[]
+            rows=[];saved=[];observed_paths=[];oldest_paths=set()
             if source['kind']=='local' and job.get('content_remainder'):
                 saved=self.store.inventory_selected(source['id'],'file',('pending','changed'),job['content_remainder'],job['inventory_generation'])
                 rows=saved
@@ -565,6 +569,7 @@ class DiscoveryCoordinator:
                     # indefinitely. Preserve one actual oldest-work credit;
                     # any overflow stays pending with its inventory age intact.
                     oldest=self.inventory_page(source,job,'file',('pending','changed'),limit=min(50,batch))
+                    oldest_paths.update(row[0] for row in oldest)
                     selected={row[0] for row in oldest}
                     rows=(*oldest,*(row for row in rows if row[0] not in selected))[:100]
             if not saved:
@@ -572,6 +577,7 @@ class DiscoveryCoordinator:
                 # rows keep service without resetting their inventory age.
                 if len(rows)<batch:
                     selected=self.inventory_page(source,job,'file',('pending','changed'),limit=batch-len(rows))
+                    if job['slices']%10==0:oldest_paths.update(row[0] for row in selected)
                     selected_paths={row[0] for row in rows}
                     rows.extend(row for row in selected if row[0] not in selected_paths)
             remaining=[row[0] for row in rows]
@@ -589,7 +595,7 @@ class DiscoveryCoordinator:
             for bucket,files in groups.items():
                 if cancel() or time.monotonic()>=deadline:break
                 with self.store.partition(bucket) as child:
-                    view=_Evidence(child,self.store)
+                    view=_Evidence(child,self.store,job)
                     with self.scanner(view) as scanner:
                         if source['kind']=='local':
                             if cancel() or time.monotonic()>=deadline:break
@@ -636,6 +642,7 @@ class DiscoveryCoordinator:
                             if state=='inspection-error':
                                 view.invalidate_scope(row[0],reason='incomplete-scan')
                                 if source['kind']=='local':remaining.remove(row[0])
+                        publication_failed=any(i.required and i.code.value=='state-failed' for i in report.issues)
                         for result in report.results:
                             path=result.source.path
                             codes=sorted({i.code.value for i in result.issues})
@@ -644,9 +651,12 @@ class DiscoveryCoordinator:
                             attempts=previous.get('attempts',0)
                             omitted=any(i.omission_id for i in result.issues)
                             state=('inspected-with-omissions' if omitted else 'inspected') if result.coverage.value=='complete' else 'unsupported' if result.coverage.value=='omitted' else 'inaccessible' if any(code in {'input-unreadable','source-unavailable','input-nonregular'} for code in codes) else 'pending' if attempts<2 else 'inspection-error'
-                            if result.coverage.value=='incomplete':attempts+=1;job['content_batch']=max(1,job.get('content_batch',100)//2)
+                            if publication_failed:
+                                state='pending' if attempts<2 else 'inspection-error'
+                            if result.coverage.value=='incomplete' or publication_failed:attempts+=1;job['content_batch']=max(1,job.get('content_batch',100)//2)
                             detail=json.dumps({'digest':result.content.digest if result.content else None,'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({i.code.value for i in result.issues}),'omissions':omitted,'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==result.content.digest if previous.get('digest') and result.content else None})
-                            self.store.inventory_set(path,state,detail=detail);scanned+=1
+                            route=('reserved_oldest' if path in oldest_paths else 'observed_change' if path in observed_paths or by_path[path][9] in {'content-refresh-during-backfill','content-version-refresh-during-backfill'} else 'ordinary')
+                            self.store.inventory_set(path,state,detail=detail,completion_route=route);scanned+=1
                             if source['kind']=='local' and state=='pending' and path not in remaining:
                                 remaining.append(path)
                         job['new_findings']+=view.new_findings

@@ -167,3 +167,22 @@ def test_failed_publication_checkpoint_reopen_retries_without_false_resolution(t
             assert status(store,file)[0]=='inspected'
             assert not findings(store)
     finally:store.close()
+
+
+def test_failed_report_publication_preserves_pending_and_does_not_count_completion(tmp_path):
+    root=tmp_path/'source';root.mkdir();file=root/'ordinary.txt';file.write_text('ordinary synthetic text')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-report-publication-passphrase')
+    source,job=seeded(store,root,[file])
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}))
+    try:
+        with patch('leakguard_core.scan_policy.runtime_identity',return_value=('synthetic-runtime',True)), patch.object(backends,'detect',return_value=()):
+            with patch.object(SQLiteScanStore,'record_report',side_effect=StateError('state-failed')):
+                advance(owner,source,job)
+            assert status(store,file)[0]=='pending'
+            assert job['diagnostics'][-1]['stage']=='publish'
+            store.checkpoint()
+            assert sum(store.inspection_evidence()['completed'][key] for key in ('ordinary','observed_change','reserved_oldest'))==0
+            job['content_cursor']=0
+            advance(owner,source,job)
+            assert status(store,file)[0]=='inspected'
+    finally:owner.close();store.close()

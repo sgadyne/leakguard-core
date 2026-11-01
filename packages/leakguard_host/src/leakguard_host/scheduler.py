@@ -63,9 +63,15 @@ def _interval(value) -> int | None:
 
 class _SliceStore:
     """Observe progress while forwarding to the sole application-owned sink."""
-    def __init__(self, store):
+    def __init__(self, store, job=None):
         self._store = store
+        self._job = job
         self.advanced = False
+
+    def record_diagnostic(self,value):
+        if self._job is not None:
+            from leakguard_core.diagnostics import retain
+            retain(self._job,value)
 
     def __getattr__(self, name):
         method = getattr(self._store, name)
@@ -180,6 +186,19 @@ class HostService:
             for key, job in value["jobs"].items():
                 if type(job) is not dict or job["id"] != key or not isinstance(key, str) or len(key) != 32 or job["source_id"] not in value["sources"] or job["state"] not in _ACTIVE | _FINAL:
                     raise ValueError()
+                diagnostics=job.get('diagnostics',[])
+                if type(diagnostics) is not list or len(diagnostics)>8:raise ValueError()
+                from leakguard_core.diagnostics import retain
+                safe={}
+                for diagnostic in diagnostics:
+                    if type(diagnostic) is not dict:raise ValueError()
+                    cleaned=retain(safe,diagnostic)
+                    cleaned['recovered']=diagnostic.get('recovered') is True
+                    # Preserve the recorded retry count only within its bound.
+                    retry=diagnostic.get('retry_count',0)
+                    if type(retry) is not int or not 0<=retry<=30:raise ValueError()
+                    cleaned['retry_count']=retry
+                if diagnostics:job['diagnostics']=safe['diagnostics']
                 for field in ("attempts", "slices", "files_scanned"):
                     if type(job[field]) is not int or job[field] < 0:
                         raise ValueError()
@@ -601,7 +620,9 @@ class HostService:
             managed_result = None
             managed_job = None
             managed_source = None
-            slice_store = _SliceStore(self._store)
+            prior_diagnostics=deepcopy(job.get('diagnostics',[]))
+            slice_diagnostics={}
+            slice_store = _SliceStore(self._store,slice_diagnostics)
             failure = None
             if status != "available":
                 failure = status
@@ -617,6 +638,9 @@ class HostService:
                         managed_result=self._discovery.tick(managed_source,managed_job,self._protection,cancel=lambda:self._cancelled(job_id))
                 except Exception as error:
                     failure=getattr(error,'code','scan-failed')
+                    if (managed_job or {}).get('diagnostics',[])==prior_diagnostics:
+                        from leakguard_core.diagnostics import event,retain
+                        retain(slice_diagnostics,event('unknown',failure,error))
             else:
                 values = self._config.to_mapping()
                 scope = "host-" + source["id"]
@@ -637,6 +661,11 @@ class HostService:
                 def finish():
                     job = self._job(job_id)
                     source_now = self._source(job["source_id"])
+                    from leakguard_core.diagnostics import retain,recover
+                    if managed_job is not None and managed_job.get('diagnostics'):
+                        job['diagnostics']=deepcopy(managed_job['diagnostics'])
+                    for diagnostic in slice_diagnostics.get('diagnostics',[]):
+                        retain(job,diagnostic)
                     if managed_result is not None:
                         protected={'id','source_id','state','created_at','updated_at','next_retry_at','attempts','slices','last_error'}
                         refresh_revision=job.get('refresh_revision',0)
@@ -692,6 +721,10 @@ class HostService:
                             job["stalled_slices"] = job.get("stalled_slices", 0) + 1 if stalled else 0
                             job.update(state="paused" if job["stalled_slices"] >= 3 else "queued",
                                        last_error="scan-progress-stalled" if job["stalled_slices"] >= 3 else None)
+                    if job['state']=='completed' and self._protection['new_content']=='inspect':
+                        gaps={'pending','changed','inspection-error','inaccessible','unsupported','inspected-with-omissions'}
+                        if managed_result is None or not any(counts.get(key,0) for key in gaps):
+                            recover(job,stages={'enumerate','acquire','parse','recognize','publish','unknown'})
                     return job
                 result = self._mutate(finish)
             return {"worked": True, "status": result["state"], "job": result}
@@ -712,7 +745,14 @@ class HostService:
             except Exception:
                 store_status = {}
             available = self._storage_error is None and store_status.get("unlocked") is not False and store_status.get("healthy") is not False
-            return {"scheduler": "running" if self._thread and self._thread.is_alive() else "stopped",
+            evidence_method=getattr(self._store,'inspection_evidence',None)
+            evidence=evidence_method() if available and callable(evidence_method) else None
+            if evidence is not None:
+                records=[{**diagnostic,'source_id':job['source_id'],'job_id':job['id']}
+                    for job in self._state['jobs'].values() for diagnostic in job.get('diagnostics',[])]
+                evidence['diagnostics']=sorted(records,key=lambda row:row['at'])[-16:]
+            return {**({'inspection_evidence':evidence} if evidence is not None else {}),
+                    "scheduler": "running"  if self._thread and self._thread.is_alive() else "stopped",
                     "active_job": self._current, "observation_available": available,
                     "unattended_available": available and store_status.get("unattended_available") is True,
                     "storage_error": self._storage_error, "worker_error": self._worker_error, "sources": len(self._state["sources"]),
@@ -772,5 +812,16 @@ class HostService:
         if not self._slice_lock.acquire(timeout=max(0, deadline - time.monotonic())):
             raise HostError("worker-still-running")
         self._slice_lock.release()
-        if self._discovery is not None:self._discovery.close()
+        if self._discovery is not None:
+            try:self._discovery.close()
+            except Exception as error:
+                from leakguard_core.diagnostics import event,retain
+                with self._lock:
+                    def failed_close():
+                        jobs=list(self._state['jobs'].values())
+                        if jobs:
+                            job=max(jobs,key=lambda row:(row['updated_at'],row['id']))
+                            retain(job,event('shutdown','shutdown-failed',error))
+                    self._mutate(failed_close)
+                raise HostError('shutdown-failed') from None
         return self.status()
