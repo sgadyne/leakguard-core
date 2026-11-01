@@ -198,3 +198,146 @@ def test_old_loader_rejects_new_admission_journal_without_reinitializing_store(t
         page,_=store.inventory_page('synthetic','file','pending',limit=1,prefer_priority=False)
         assert page[0][0]==paths[1]
     finally:store.close()
+
+
+class RefreshQueueEvidence(unittest.TestCase):
+    def test_refresh_file_reinsertion_preserves_old_pending_or_changed_detail(self):
+        bucket, paths = same_bucket_paths(7)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        old = [
+            (paths[0], 'one', 'file', 'same', 'pending', 10, 1, 1, None, None),
+            (paths[1], 'one', 'file', 'same', 'pending', 10, 1, 1, None, 'old-backfill'),
+            (paths[2], 'one', 'file', 'same', 'changed', 10, 1, 1, None, 'changed-before-refresh'),
+            (paths[3], 'one', 'file', 'same', 'inspected', 10, 1, 1, None, 'old-result'),
+            (paths[4], 'one', 'file', 'before', 'pending', 10, 1, 1, None, None),
+            (paths[5], 'two', 'file', 'same', 'pending', 10, 1, 1, None, 'other-source'),
+        ]
+        inventory.inventory_put(old)
+        tag = 'content-refresh-during-backfill'
+        refreshed = [(p, 'one', 'file', 'same' if i != 4 else 'after', 'pending', 10, 1, 1, None, tag)
+                     for i, p in enumerate(paths[:5])]
+        refreshed.append((paths[6], 'one', 'file', 'new', 'pending', 10, 1, 1, None, tag))
+        inventory.inventory_put(refreshed)
+        values = {row[0]: (row[1], row[4], row[9]) for row in connection.execute('SELECT * FROM inventory')}
+        self.assertEqual(values[paths[0]], ('one', 'pending', None))
+        self.assertEqual(values[paths[1]], ('one', 'pending', 'old-backfill'))
+        self.assertEqual(values[paths[2]], ('one', 'changed', 'changed-before-refresh'))
+        self.assertEqual(values[paths[3]], ('one', 'inspected', 'old-result'))
+        self.assertEqual(values[paths[4]], ('one', 'changed', tag))
+        self.assertEqual(values[paths[5]], ('two', 'pending', 'other-source'))
+        self.assertEqual(values[paths[6]], ('one', 'pending', tag))
+        fresh, cursor = inventory.inventory_page('one', 'file', ('pending', 'changed'), limit=1,
+                                                  prefer_priority=False, queue_class='refresh')
+        next_fresh, _ = inventory.inventory_page('one', 'file', ('pending', 'changed'), cursor=cursor,
+                                                  limit=1, prefer_priority=False, queue_class='refresh')
+        self.assertEqual({fresh[0][0], next_fresh[0][0]}, {paths[4], paths[6]})
+        self.assertTrue(all(len(row) == 10 for row in (*fresh, *next_fresh)))
+
+    def test_preservation_is_limited_to_same_source_and_refresh_tag(self):
+        bucket, paths = same_bucket_paths(2)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        inventory.inventory_put([
+            (paths[0], 'old-source', 'file', 'sig', 'changed', 10, 1, 1, None, 'old-detail'),
+            (paths[1], 'one', 'file', 'sig', 'changed', 10, 1, 1, None, 'old-detail'),
+        ])
+        inventory.inventory_put([
+            (paths[0], 'new-source', 'file', 'sig', 'pending', 10, 1, 1, None, 'content-refresh-during-backfill'),
+            (paths[1], 'one', 'file', 'sig', 'pending', 10, 1, 1, None, 'ordinary-rediscovery'),
+        ])
+        values = {row[0]: (row[1], row[4], row[9]) for row in connection.execute('SELECT * FROM inventory')}
+        self.assertEqual(values[paths[0]], ('new-source', 'pending', 'content-refresh-during-backfill'))
+        self.assertEqual(values[paths[1]], ('one', 'pending', 'ordinary-rediscovery'))
+
+    def test_refresh_filter_is_exact_and_scoped_by_source_kind_and_state(self):
+        bucket, paths = same_bucket_paths(7)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        tag = 'metadata-refresh-during-backfill'
+        inventory.inventory_put([
+            (paths[0], 'one', 'directory', 'a', 'enumerating', 10, 1, 1, None, tag),
+            (paths[1], 'one', 'directory', 'b', 'enumerating', 10, 1, 1, None, tag + '-extra'),
+            (paths[2], 'two', 'directory', 'c', 'enumerating', 10, 1, 1, None, tag),
+            (paths[3], 'one', 'directory', 'd', 'enumerated', 10, 1, 1, None, tag),
+            (paths[4], 'one', 'file', 'e', 'enumerating', 10, 1, 1, None, tag),
+            (paths[5], 'one', 'directory', 'f', 'enumerating', 10, 1, 1, None, None),
+            (paths[6], 'one', 'file', 'g', 'pending', 10, 1, 1, None, 'content-refresh-during-backfill'),
+        ])
+        rows, _ = inventory.inventory_page('one', 'directory', 'enumerating', limit=10, queue_class='refresh')
+        self.assertEqual([row[0] for row in rows], [paths[0]])
+        rows, _ = inventory.inventory_page('one', 'file', 'pending', limit=10, queue_class='refresh')
+        self.assertEqual([row[0] for row in rows], [paths[6]])
+        rows, _ = inventory.inventory_page('one', 'directory', 'enumerating', limit=10)
+        self.assertCountEqual([row[0] for row in rows], [paths[0], paths[1], paths[5]])
+
+    def test_sparse_refresh_can_exhaust_eight_bucket_budget_without_completeness(self):
+        paths_by_bucket = {}
+        for number in range(4096):
+            path = f'/synthetic/sparse-{number}'
+            paths_by_bucket.setdefault(EncryptedPartitions.bucket(path), path)
+            if len(paths_by_bucket) == 9:
+                break
+        buckets = sorted(paths_by_bucket)
+        inventory = EncryptedPartitions.__new__(EncryptedPartitions)
+        from leakguard_vault import _envelope
+        label = _envelope.canonical(['one', 'file', 'pending']).decode()
+        inventory.catalog = {bucket: {'counts': {label: 1}, 'priorities': {label: 0}} for bucket in buckets}
+        inventory.cache = OrderedDict()
+        stores = {}
+        for bucket in buckets:
+            connection = sqlite3.connect(':memory:')
+            self.addCleanup(connection.close)
+            connection.executescript(_SCHEMA)
+            connection.execute('INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?)',
+                               (paths_by_bucket[bucket], 'one', 'file', bucket, 'pending', 0, 1, 1, None,
+                                'content-refresh-during-backfill' if bucket == buckets[-1] else None))
+            connection.commit()
+            stores[bucket] = SimpleNamespace(conn=connection)
+        inventory.get = stores.__getitem__
+        from unittest.mock import patch
+        with patch.object(inventory, 'get', wraps=inventory.get) as get:
+            empty, cursor = inventory.inventory_page('one', 'file', 'pending', cursor=0, limit=1,
+                                                      prefer_priority=False, queue_class='refresh')
+        self.assertEqual(empty, [])
+        self.assertEqual(cursor, 8)
+        self.assertEqual(get.call_count, 8)
+        fallback, _ = inventory.inventory_page('one', 'file', 'pending', cursor=0, limit=1, prefer_priority=False)
+        self.assertTrue(fallback)
+        found, _ = inventory.inventory_page('one', 'file', 'pending', cursor=int(buckets[-1][1:], 16), limit=1,
+                                             prefer_priority=False, queue_class='refresh')
+        self.assertEqual(found[0][0], paths_by_bucket[buckets[-1]])
+
+    def test_unknown_refresh_selectors_fail_closed_without_admission(self):
+        from leakguard_core.scan_store import StateError
+        bucket, paths = same_bucket_paths(1)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        inventory.inventory_put([(paths[0], 'one', 'file', 'sig', 'pending', 0, 1, 1, None, 'content-refresh-during-backfill')])
+        for queue, kind in (('unknown', 'file'), ('', 'file'), (False, 'file'), ('refresh', 'other')):
+            with self.subTest(queue=queue, kind=kind), self.assertRaises(StateError):
+                inventory.inventory_page('one', kind, 'pending', queue_class=queue)
+        self.assertEqual(connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0], 0)
+        self.assertEqual(connection.execute('SELECT count(*) FROM inventory_admissions').fetchone()[0], 0)
+
+
+def test_refresh_selector_survives_encrypted_checkpoint(tmp_path):
+    from leakguard_vault import EncryptedScanStore
+    path = tmp_path / 'observations.lgo'
+    phrase = 'synthetic-refresh-checkpoint'
+    _, (old, fresh) = same_bucket_paths(2)
+    store = EncryptedScanStore.create(path, phrase)
+    try:
+        store.inventory_put([(old, 'one', 'file', 'sig', 'pending', 10, 1, 1, None, None),
+                             (fresh, 'one', 'file', 'sig', 'pending', 10, 1, 1, None, 'content-refresh-during-backfill')])
+        store.checkpoint()
+    finally:
+        store.close()
+    store = EncryptedScanStore.open(path, phrase)
+    try:
+        rows, _ = store.inventory_page('one', 'file', 'pending', limit=1,
+                                       prefer_priority=False, queue_class='refresh')
+        assert len(rows) == 1 and len(rows[0]) == 10 and rows[0][0] == fresh
+        assert store.inventory_counts('one') == {'pending': 2}
+    finally:
+        store.close()
