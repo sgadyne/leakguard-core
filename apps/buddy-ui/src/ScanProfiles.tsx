@@ -1,46 +1,38 @@
-import React, {useEffect, useState} from 'react';
-import {Alert, Button, FormControl, InputLabel, MenuItem, Paper, Select, Stack, TextField, Typography} from '@mui/material';
-import {request} from './api';
-
-export default function ScanProfiles({revision, onApplied, onError}: {revision: number, onApplied: () => Promise<void>, onError: (message: string) => void}) {
- const [catalog, setCatalog] = useState<any>(null);
- const [preset, setPreset] = useState('standard');
- const [advanced, setAdvanced] = useState(false);
- const [document, setDocument] = useState(JSON.stringify({version:1,preset:'standard'}, null, 2));
- const [preview, setPreview] = useState<any>(null);
- const [busy, setBusy] = useState(false);
- const [message, setMessage] = useState('');
- async function load() { setCatalog(await request('/scan-profiles')); }
- useEffect(() => {void load().catch(e => onError(e.message));}, [revision]);
- async function run(action: () => Promise<void>) {
-  setBusy(true); setMessage('');
-  try {await action();} catch(e) {onError((e as Error).message);} finally {setBusy(false);}
- }
- function parsed() {
-  try {return advanced ? JSON.parse(document) : {version:1,preset};}
-  catch {throw new Error('Enter a valid JSON scan profile.');}
- }
- function select(id: string) {setPreset(id);setDocument(JSON.stringify({version:1,preset:id},null,2));setPreview(null);}
- if (!catalog) return null;
- return <Paper variant="outlined" sx={{p:2,mb:2}}>
-  <Stack spacing={1.5}>
-   <Typography variant="h3">Scanning profiles</Typography>
-   <Typography variant="body2">Choose a preset or compose your own inspection packs and recurring jobs. Locations and their individual schedule overrides stay unchanged.</Typography>
-   {catalog.current && <Typography variant="body2">Last applied: {catalog.current.document.preset}{catalog.current.customized ? ' · settings changed since application' : ' · settings match'}</Typography>}
-   {catalog.record_error && <Alert severity="warning">The saved profile receipt could not be read.</Alert>}
-   <FormControl size="small"><InputLabel>Scan preset</InputLabel><Select disabled={busy||advanced} label="Scan preset" value={preset} onChange={e=>select(e.target.value)}>
-    {catalog.presets.map((p:any)=><MenuItem key={p.id} value={p.id}>{p.id==='standard'?'Standard credentials':p.id==='sensitive'?'Credentials and sensitive information':'Inventory metadata only'}</MenuItem>)}
-   </Select></FormControl>
-   <Button sx={{alignSelf:'flex-start'}} disabled={busy} onClick={()=>{setAdvanced(!advanced);setPreview(null);}}>{advanced?'Use preset controls':'Edit custom profile JSON'}</Button>
-   {advanced && <><TextField label="Scan profile JSON" multiline minRows={6} maxRows={16} value={document} disabled={busy} onChange={e=>{setDocument(e.target.value);setPreview(null);}}/>
-    {catalog.current && <Button disabled={busy} onClick={()=>{setDocument(JSON.stringify(catalog.current.document,null,2));setPreview(null);}}>Load last applied profile</Button>}</>}
-   <Typography variant="caption">Existing custom recognizers are retained. Custom code must already be installed and trusted; applying a profile never downloads plugins. Native event monitoring, recursive archives and process-access auditing are not available in this version.</Typography>
-   <Stack direction="row" spacing={1}><Button disabled={busy} onClick={()=>void run(async()=>{setPreview(await request('/scan-profiles/preview','POST',{document:parsed()}));})}>Preview changes</Button>
-    <Button variant="contained" disabled={busy||!preview} onClick={()=>void run(async()=>{await request('/scan-profiles/apply','POST',{document:parsed(),expected_identity:preview.identity});setPreview(null);await load();await onApplied();setMessage('Scan profile applied. Configured jobs use the new settings when protection is running.');})}>Apply reviewed profile</Button></Stack>
-   {preview && <><Typography variant="body2">{preview.inspection.mode==='inventory'?'Metadata inventory; content inspection disabled':'Content inspection'} · {preview.inspection.max_file_bytes.toLocaleString()} bytes per file · {preview.inspection.scan_workers} workers · {preview.components.length} configured extensions</Typography>
-    <Typography variant="body2">Reconciliation: {preview.jobs.reconcile.mode==='daily'?'daily at '+preview.jobs.reconcile.daily_time+' '+preview.jobs.reconcile.timezone:'every '+preview.jobs.reconcile.interval_seconds/60+' minutes'}. Changes are discovered by polling.</Typography>
-    <TextField label="Resolved profile details" multiline minRows={3} maxRows={12} value={JSON.stringify(preview,null,2)} slotProps={{input:{readOnly:true}}}/></>}
-   {message && <Alert severity="success">{message}</Alert>}
-  </Stack>
- </Paper>;
+import React, {useEffect, useState} from "react";
+import {Alert, Box, Button, Chip, FormControl, InputLabel, MenuItem, Paper, Select, Stack, TextField, Typography} from "@mui/material";
+import {request} from "./api";
+type Schedule={mode:"interval"|"daily";interval_seconds:number;daily_time:string;timezone:string};
+type Change={field:string;prior:unknown;effective:unknown;provenance:string};
+type Preview={identity:string;inspection:{mode:string;recognizers:string;max_file_bytes:number;scan_workers:number};jobs:{reconcile:Schedule};components:{module:string;option_names:string[]}[];changes?:Change[];provenance:Record<string,string>};
+type Catalog={presets:{id:string}[];current?:{document:Record<string,any>;customized?:boolean};record_error?:boolean};
+const display=(v:unknown)=>v==null?"Not configured":typeof v==="object"?JSON.stringify(v):String(v);
+export default function ScanProfiles({revision,onApplied,onError}:{revision:number;onApplied:()=>Promise<void>;onError:(message:string)=>void}) {
+ const [catalog,setCatalog]=useState<Catalog|null>(null),[advanced,setAdvanced]=useState(false),[document,setDocument]=useState(""),[preset,setPreset]=useState("standard");
+ const [schedule,setSchedule]=useState<Schedule|null>(null),[preview,setPreview]=useState<Preview|null>(null),[busy,setBusy]=useState(false),[message,setMessage]=useState(""),[dirty,setDirty]=useState(false);
+ async function load(){const [c,s]=await Promise.all([request<Catalog>("/scan-profiles"),request<any>("/settings")]);setCatalog(c);setSchedule(s.protection.schedule);const doc=c.current?.document||{version:1,preset:"standard"};setDocument(JSON.stringify(doc,null,2));setPreset(doc.preset);setAdvanced(Boolean(doc.packs?.length||doc.presets?.length));setDirty(false);}
+ useEffect(()=>{void load().catch(e=>onError(e.message));},[revision]);
+ async function run(action:()=>Promise<void>){if(busy)return;setBusy(true);setMessage("");try{await action();}catch(e){setPreview(null);onError((e as Error).message);}finally{setBusy(false);}}
+ function parsed(){try{return JSON.parse(document);}catch{throw new Error("Enter a valid JSON scan profile.");}}
+ function editSchedule(key:keyof Schedule,value:string|number){if(!schedule)return;const next={...schedule,[key]:value};setSchedule(next);const doc=parsed();doc.overrides={...doc.overrides,jobs:{...doc.overrides?.jobs,reconcile:next}};setDocument(JSON.stringify(doc,null,2));setPreview(null);setDirty(true);}
+ function select(id:string){setPreset(id);const doc=parsed();doc.preset=id;setDocument(JSON.stringify(doc,null,2));setPreview(null);setDirty(true);}
+ if(!catalog||!schedule)return <Paper variant="outlined" sx={{p:2.5,mb:2,borderRadius:3.5}}><Typography>Loading recognition and schedule…</Typography></Paper>;
+ const presetKnown=catalog.presets.some(p=>p.id===preset);
+ return <Paper variant="outlined" sx={{p:2.5,mb:2.5,borderRadius:3.5}}><Stack spacing={2}>
+ <Box><Typography variant="h3">Recognition and schedule</Typography><Typography variant="body2" color="text.secondary" sx={{mt:.75}}>One resolved profile controls content inspection and recurring jobs. Preview the actual changes before applying. Location overrides remain in effect.</Typography></Box>
+ {catalog.current&&<Typography variant="body2">Last applied: {catalog.current.document.preset} · {catalog.current.customized?"Current settings changed since application":"Settings match the saved receipt"}</Typography>}
+ {catalog.record_error&&<Alert severity="warning">The saved profile receipt could not be read. Current settings remain authoritative.</Alert>}
+ <Box sx={{display:"grid",gridTemplateColumns:{xs:"1fr",sm:"1fr 1fr"},gap:1.5}}>
+ <FormControl size="small"><InputLabel>Scan preset</InputLabel><Select disabled={busy||advanced} label="Scan preset" value={preset} onChange={e=>select(e.target.value)}>{!presetKnown&&<MenuItem value={preset}>{preset} (custom)</MenuItem>}{catalog.presets.map(p=><MenuItem key={p.id} value={p.id}>{p.id==="standard"?"Standard credentials":p.id==="sensitive"?"Credentials and sensitive information":"Inventory metadata only"}</MenuItem>)}</Select></FormControl>
+ <FormControl size="small"><InputLabel>Run schedule</InputLabel><Select disabled={busy||advanced} label="Run schedule" value={schedule.mode} onChange={e=>editSchedule("mode",e.target.value)}><MenuItem value="interval">At an interval</MenuItem><MenuItem value="daily">At a daily time</MenuItem></Select></FormControl>
+ {schedule.mode==="interval"?<TextField disabled={busy||advanced} size="small" type="number" label="Interval in minutes" value={schedule.interval_seconds/60} onChange={e=>editSchedule("interval_seconds",Number(e.target.value)*60)}/>:<TextField disabled={busy||advanced} size="small" type="time" label="Daily local time" value={schedule.daily_time} onChange={e=>editSchedule("daily_time",e.target.value)} slotProps={{inputLabel:{shrink:true}}}/>}
+ <TextField disabled={busy||advanced} size="small" label="Time zone" value={schedule.timezone} onChange={e=>editSchedule("timezone",e.target.value)}/>
+ </Box>
+ <Typography variant="caption" color="text.secondary">After downtime, one missed run catches up. Daily schedules use the saved IANA time zone. New installations keep the hourly default.</Typography>
+ <Button sx={{alignSelf:"flex-start"}} disabled={busy} onClick={()=>{setAdvanced(!advanced);setPreview(null);}}>{advanced?"Use profile controls":"Edit custom profile JSON"}</Button>
+ {advanced&&<><TextField label="Scan profile JSON" multiline minRows={6} maxRows={16} value={document} disabled={busy} onChange={e=>{setDocument(e.target.value);setPreview(null);setDirty(true);}} slotProps={{htmlInput:{spellCheck:false}}}/>{catalog.current&&<Button sx={{alignSelf:"flex-start"}} disabled={busy} onClick={()=>{setDocument(JSON.stringify(catalog.current!.document,null,2));setPreview(null);setDirty(true);}}>Load last applied profile</Button>}</>}
+ <Alert severity="info">Custom recognizers are retained. Required packages must already be installed and trusted. Profiles do not download plugins. Native event monitoring, recursive archives and process auditing are unavailable.</Alert>
+ <Stack direction="row" spacing={1} useFlexGap sx={{flexWrap:"wrap",alignItems:"center"}}><Button variant="outlined" disabled={busy} onClick={()=>void run(async()=>setPreview(await request<Preview>("/scan-profiles/preview","POST",{document:parsed()})))}>{busy?"Checking…":"Preview changes"}</Button><Button variant="contained" disabled={busy||!preview} onClick={()=>void run(async()=>{await request("/scan-profiles/apply","POST",{document:parsed(),expected_identity:preview!.identity});setPreview(null);await load();await onApplied();setMessage("Scan profile applied. Configured jobs use these settings while protection is running.");})}>Apply reviewed profile</Button>{dirty&&!preview&&<Chip label="Unapplied edits" variant="outlined" size="small"/>}</Stack>
+ {preview&&<Box role="region" aria-label="Profile change preview"><Typography variant="h3" sx={{mb:1.5}}>Review resolved changes</Typography>{preview.changes?<Box sx={{overflowX:"auto"}}><table className="workbench-table profile-diff"><thead><tr><th scope="col">Setting</th><th scope="col">Current</th><th scope="col">After apply</th><th scope="col">From</th></tr></thead><tbody>{preview.changes.length?preview.changes.map(c=><tr key={c.field}><td>{c.field}</td><td>{display(c.prior)}</td><td>{display(c.effective)}</td><td>{c.provenance}</td></tr>):<tr><td colSpan={4}>No effective setting changes.</td></tr>}</tbody></table></Box>:<Alert severity="info">Field comparison is unavailable from this engine. Review the effective settings below before applying.</Alert>}<Typography variant="body2" sx={{mt:2}}>{preview.inspection.mode==="inventory"?"Metadata inventory; content inspection disabled":"Content inspection"} · {preview.inspection.max_file_bytes.toLocaleString()} bytes per file · {preview.inspection.scan_workers} workers · {preview.components.length} configured components</Typography><Typography variant="body2" sx={{my:1}}>Reconciliation: {preview.jobs.reconcile.mode==="daily"?"daily at "+preview.jobs.reconcile.daily_time+" "+preview.jobs.reconcile.timezone:"every "+preview.jobs.reconcile.interval_seconds/60+" minutes"}. Changes are discovered by polling.</Typography><details><summary>Advanced resolved details and provenance</summary><pre style={{whiteSpace:"pre-wrap",overflowWrap:"anywhere",fontSize:12}}>{JSON.stringify(preview,null,2)}</pre></details></Box>}
+ {message&&<Alert severity="success">{message}</Alert>}
+ </Stack></Paper>;
 }
