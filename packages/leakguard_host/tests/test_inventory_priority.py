@@ -44,7 +44,7 @@ def test_refresh_slot_falls_back_without_skipping_regular_cursor():
     assert store.calls[0][1]['cursor']==0 and store.calls[0][1]['queue_class']=='refresh'
     assert store.calls[1][1]['cursor']==9 and store.calls[1][1]['prefer_priority'] is False
     assert job['refresh_inventory_cursor']==8 and job['inventory_cursor']==17
-    assert job['navigation_profile']['version']=='bounded-refresh-v1'
+    assert job['navigation_profile']['version']=='bounded-refresh-v2'
     job['slices']=6;store.calls.clear()
     owner.inventory_page({'id':'source'},job,'file',('pending','changed'),limit=25)
     assert len(store.calls)==1 and store.calls[0][1]['prefer_priority'] is True

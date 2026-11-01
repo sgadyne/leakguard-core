@@ -246,10 +246,10 @@ class DiscoveryCoordinator:
         runtime and publication checks still authorize every admitted version.
         A filtered empty page never proves inventory completion.
         """
-        job['navigation_profile']={'version':'bounded-refresh-v1','cycle':10,
+        job['navigation_profile']={'version':'bounded-refresh-v2','cycle':10,
             'oldest_slot':0,'refresh_slot':5,'metadata_seconds':2,
             'slice_seconds':10,'max_metadata_entries':5000,
-            'filtered_fallback_queries':1}
+            'filtered_fallback_queries':1,'new_arrivals':'monotonic-clock'}
         key='inventory_cursor' if kind=='directory' else 'content_cursor'
         if job['slices']%10==5:
             refresh_key='refresh_'+key
