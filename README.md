@@ -1,5 +1,14 @@
 # LeakGuard Core
 
+## Supervised Mac alpha pilot
+
+The [Apple Silicon Mac pilot](https://github.com/sgadyne/leakguard-core/releases/tag/alpha-macos-20261101)
+combines automatic discovery/freshness, configurable scan profiles and alias packs.
+Use the [pilot installation guide](docs/mac-pilot.md) and
+[exact-build validation receipt](docs/pilot-validation-20261101.json).
+This is an ad-hoc signed, supervised alpha; full-drive backfill, oldest-queue
+latency bounds and unattended corporate deployment are not qualified.
+
 ## Install the current integrated revision
 
 Use the reviewed integrated source commit and matching fresh wheel set recorded

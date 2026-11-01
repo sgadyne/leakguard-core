@@ -1,0 +1,122 @@
+{
+  "schema": "password-buddy.mac-pilot-validation.v1",
+  "created_utc": "2026-11-01T22:45:15Z",
+  "source_commit": "0eabbc0d940e97bcecc99b6997d8ffd692e43154",
+  "runtime_id": "857376704643e82b2153596b4f6ebdaf477b0d0c19558b01cd9e0838009b3f99",
+  "platform": "macos-arm64",
+  "scope": "Supervised alpha pilot; bounded automatic discovery/freshness and version-matched baseline checks, not exhaustive machine coverage or population recall.",
+  "artifact": {
+    "archive_sha256": "39b7440262eac2224e27c8e9bc3ed41f6e1df5a6e924f0f21a4ae86b3ac073f2",
+    "archive_bytes": 191887070,
+    "source_archive_sha256": "49425634d61f465cc2cfab50356ed020e3e74541f9752693be4a967d73481677",
+    "app_tree_sha256": "d6378e28608f541a07e6351fa7361527ebdbaf6dbf91a892fd09cd68cf2726ac",
+    "sealed_runtime_resource_records_match": true,
+    "archive_roundtrip_tree_and_signature_verified": true,
+    "signature": "ad-hoc deep strict verified",
+    "developer_id_signed": false,
+    "notarized": false
+  },
+  "installed_checks": {
+    "passed": 399,
+    "failed": 0,
+    "errors": 0,
+    "subtests_passed": 143,
+    "source_resource_files_matched": 101,
+    "packages_checked": 7
+  },
+  "baseline_replay": {
+    "batches_requested": 14,
+    "batches_with_admitted_inputs": 11,
+    "synthetic_matched_versions": 39,
+    "matched_content_versions": 237,
+    "unavailable_baseline_versions": 4,
+    "all_required_complete": true,
+    "cold_warm_equal": true,
+    "baseline_findings_equal_on_matched_versions": true,
+    "comparison_exception": "Only credential-detector analyzer_version a3 -> a4 normalized for equality; original reports preserve actual versions. Other finding fields unchanged.",
+    "admission": "Historical file versions were retained as gaps. Device-only renumbered current inputs were separately admitted only with matching baseline content digests. Unavailable/changed content was not counted as a miss or a pass."
+  },
+  "automatic_discovery": {
+    "selection": "Automatic / and shipped home seeds resumed from encrypted snapshot; no selected-folder source or injected inventory rows. Existing exclusions included browser/vault stores, cloud stores, mounted/network volumes and task staging.",
+    "alias_pack": "corpPassword:password; positive controls used the custom alias",
+    "recurrence_seconds": 60,
+    "window_seconds": 389.633,
+    "transition_acceptance": {
+      "renamed_old_path_not_active": true,
+      "deleted_path_not_active": true,
+      "restart_current_finding_active": true,
+      "lower_priority_inspected": true
+    },
+    "latency_seconds": {
+      "initial": 95.433,
+      "new_file": 74.662,
+      "same_size_edit": 43.273,
+      "renamed_content": 47.634,
+      "old_rename_path_nonactive": 59.086,
+      "deleted_path_nonactive": 62.111,
+      "restart_content": 15.736
+    },
+    "negative_control_inspected_without_finding": true,
+    "coordinator_exceptions_observed": 0,
+    "final_inventory_counts": {
+      "enumerated": 978,
+      "enumerating": 10846,
+      "pending": 24013,
+      "excluded": 2834,
+      "inspected": 409,
+      "changed": 15,
+      "inaccessible": 8,
+      "unsupported": 56,
+      "protected": 5
+    },
+    "coverage_complete": false,
+    "oldest_pending_execution_acceptance": false,
+    "oldest_pending_latency_bound_proven": false,
+    "cleanup": {
+      "host_stopped": true,
+      "encrypted_store_closed": true,
+      "owned_synthetic_directory_removed": true,
+      "owned_synthetic_directory_retained_for_continuation": false,
+      "live_profile_modified": false,
+      "private_inputs_uploaded": false
+    }
+  },
+  "upgrade": {
+    "backup_files_verified": 987,
+    "vault_ciphertext_unchanged": true,
+    "vault_value_preserved": true,
+    "annotations_preserved": true,
+    "schedule_bytes_preserved": true,
+    "independent_locks": true,
+    "locked_observation_capability_rejected": true
+  },
+  "native_gui": {
+    "method": "Computer-use check of exact packaged native renderer, followed by independent backend reopen",
+    "isolated_profile_confirmed_in_settings": true,
+    "preview_apply_persisted": true,
+    "custom_alias_count": 2,
+    "five_minute_utc_schedule_persisted": true,
+    "preview_provenance_displayed": true,
+    "invalid_value_rejected": "scan-profile-invalid",
+    "unavailable_events_rejected": "scan-profile-capability-unavailable",
+    "rejected_edits_did_not_replace_saved_polling_profile": true,
+    "vault_ciphertext_unchanged": true,
+    "automatic_scope_preserved": true,
+    "clean_exit": true,
+    "live_profile_modified": false
+  },
+  "limits": [
+    "Ad-hoc signed; no Developer ID/notarization.",
+    "Full-machine backfill remains incomplete; no population precision/recall claim.",
+    "This bounded run did not prove oldest-queue completion or a global wait bound.",
+    "A prior candidate recovered one generic scan-failed slice whose cause is unconfirmed; none recorded in this combined bounded trial.",
+    "Polling, not native events/read auditing; fresh profile polling defaults to one hour.",
+    "No new Windows/Linux or remote-source platform qualification in this release.",
+    "Recursive archives/OCR/obfuscation search and arbitrary job/transport plugins are not implemented."
+  ],
+  "publication": {
+    "github_actions_requested": false,
+    "private_scan_reports_included": false,
+    "live_profile_modified": false
+  }
+}
