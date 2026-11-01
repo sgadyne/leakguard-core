@@ -13,5 +13,5 @@ declare global {
   }
   interface DesktopPreferences { theme: "system" | "light" | "dark"; startAtLogin: boolean }
   interface DesktopInfo { protocolVersion: 1; appVersion: string; platform: "darwin" | "win32" | "linux"; packaged: boolean; profileKind: "desktop"; capabilities: { directoryPicker: boolean; encryptedBackupSave: boolean; nativeClipboard: boolean; startAtLogin: boolean; sessionLockEvents: boolean } }
-  type DesktopEvent = { type: "navigate"; page: "overview" | "sources" | "findings" | "vault" | "plugins" | "settings" } | { type: "clear-sensitive"; reason: string } | { type: "vault-locked" } | { type: "backend-state"; state: "ready" | "unavailable" | "stopping"; code?: string };
+  type DesktopEvent = { type: "navigate"; page: "activity" | "overview" | "sources" | "findings" | "vault" | "plugins" | "settings" } | { type: "clear-sensitive"; reason: string } | { type: "vault-locked" } | { type: "backend-state"; state: "ready" | "unavailable" | "stopping"; code?: string };
 }

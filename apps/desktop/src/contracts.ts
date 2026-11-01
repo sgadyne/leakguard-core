@@ -1,5 +1,5 @@
 export type Preferences = { theme: 'system'|'light'|'dark'; startAtLogin: boolean };
-export type Page = 'overview'|'sources'|'findings'|'vault'|'plugins'|'settings';
+export type Page = 'activity'|'overview'|'sources'|'findings'|'vault'|'plugins'|'settings';
 export type ClearReason = 'hide'|'blur'|'idle'|'os-lock'|'suspend'|'disconnect'|'quit';
 export type DesktopEvent =
   | {type:'navigate'; page:Page}
