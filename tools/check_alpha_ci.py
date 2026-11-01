@@ -18,6 +18,12 @@ PACKAGES = {
     "jose_recognizers": "plugins/jose_recognizers/src/jose_recognizers",
 }
 TESTS = (
+    "packages/leakguard_host/tests/test_scan_profiles.py",
+    "packages/leakguard_host/tests/test_scan_profiles_runtime.py",
+    "apps/buddy/tests/test_profile_settings.py",
+    "apps/buddy/tests/test_local_server.py",
+    "apps/buddy/tests/test_plugins.py",
+    "plugins/credential_detector/tests",
     "tests/test_alpha_refinement.py",
     "tests/test_runtime_identity.py",
     "tests/test_runtime_session.py",
@@ -62,6 +68,7 @@ def main():
                     raise RuntimeError("Installed product differs from source: " + str(path.relative_to(source)))
                 count += 1
     print(json.dumps({"installed_packages": len(PACKAGES), "source_files_verified": count}))
+    os.environ["LEAKGUARD_PROFILE_RUNTIME_CHECK"] = "1"
     import pytest
     return pytest.main(["-q", "--import-mode=importlib", "-p", "no:cacheprovider",
                         "--junitxml=" + str(args.junit.resolve()),
