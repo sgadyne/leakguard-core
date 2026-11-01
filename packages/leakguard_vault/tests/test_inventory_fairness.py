@@ -451,7 +451,7 @@ class RefreshQueueEvidence(unittest.TestCase):
         self.assertTrue(inventory.inventory_observed(paths[1], 'one', 7, 'directory', 'after', 20))
         rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
         self.assertEqual((rows[paths[0]][3], rows[paths[0]][4], rows[paths[0]][5], rows[paths[0]][7], rows[paths[0]][9]),
-                         ('after', 'changed', 17, 20, 'content-refresh-during-backfill'))
+                         ('after', 'changed', 17, 20, 'content-version-refresh-during-backfill'))
         self.assertEqual((rows[paths[1]][3], rows[paths[1]][4], rows[paths[1]][5], rows[paths[1]][7], rows[paths[1]][9]),
                          ('after', 'enumerating', 23, 20, 'metadata-version-refresh-during-backfill'))
         self.assertCountEqual(events, [(paths[0], 'changed'), (paths[1], 'changed')])
@@ -484,7 +484,10 @@ class RefreshQueueEvidence(unittest.TestCase):
                 (paths_by_bucket[bucket], 'one', 'directory', bucket, 'enumerating', 0, 1, 0, None, detail))
             connection.commit()
             stores[bucket] = SimpleNamespace(conn=connection)
-        inventory.get = stores.__getitem__
+        def get_cached(bucket):
+            inventory.cache.setdefault(bucket, (stores[bucket], [], [0]))
+            return stores[bucket]
+        inventory.get = get_cached
         rows, cursor = inventory.inventory_page('one', 'directory', 'enumerating', cursor=0, limit=5,
                                                  prefer_priority=False, queue_class='refresh')
         self.assertEqual([row[0] for row in rows], [paths_by_bucket[buckets[7]]])
@@ -606,7 +609,10 @@ class RefreshQueueEvidence(unittest.TestCase):
                                 'content-refresh-during-backfill' if bucket == buckets[-1] else None))
             connection.commit()
             stores[bucket] = SimpleNamespace(conn=connection)
-        inventory.get = stores.__getitem__
+        def get_cached(bucket):
+            inventory.cache.setdefault(bucket, (stores[bucket], [], [0]))
+            return stores[bucket]
+        inventory.get = get_cached
         from unittest.mock import patch
         with patch.object(inventory, 'get', wraps=inventory.get) as get:
             empty, cursor = inventory.inventory_page('one', 'file', 'pending', cursor=0, limit=1,
@@ -764,3 +770,69 @@ def test_observed_file_change_requeues_and_marks_existing_finding_unknown(tmp_pa
         assert len(rows) == 1 and rows[0][0] == file_path
     finally:
         store.close()
+
+
+def test_failed_page_admission_is_not_replayed_after_encrypted_reopen(tmp_path):
+    from leakguard_vault import EncryptedScanStore
+    path = tmp_path / 'page-rollback.lgo'
+    phrase = 'synthetic-page-rollback'
+    bucket, paths = same_bucket_paths(2)
+    store = EncryptedScanStore.create(path, phrase)
+    try:
+        store.inventory_put([(p, 'one', 'file', 'sig', 'pending', 0, 1, 1, None, None)
+                             for p in paths])
+        store.checkpoint()
+        base = store._partitions.catalog[bucket]['base']
+        child = store._partitions.get(bucket)
+        before = child.conn.execute('SELECT path,sequence FROM inventory_admissions ORDER BY path').fetchall()
+        clock = child.conn.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0]
+        child.conn.execute("CREATE TRIGGER reject_page BEFORE INSERT ON inventory_admissions BEGIN SELECT RAISE(ABORT,'synthetic-page-failure'); END")
+        child.conn.commit()
+        try:
+            store.inventory_page('one', 'file', 'pending', limit=1, prefer_priority=False)
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError('synthetic failure was not raised')
+        child.conn.execute('DROP TRIGGER reject_page')
+        child.conn.commit()
+        store.checkpoint()
+        assert store._partitions.catalog[bucket]['base'] == base
+        assert store._partitions.catalog[bucket]['logs'], 'exercise journal replay'
+    finally:
+        store.close()
+    store = EncryptedScanStore.open(path, phrase)
+    try:
+        child = store._partitions.get(bucket)
+        assert child.conn.execute('SELECT path,sequence FROM inventory_admissions ORDER BY path').fetchall() == before
+        assert child.conn.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0] == clock
+        assert store.inventory_counts('one') == {'pending': 2}
+        rows, _ = store.inventory_page('one', 'file', 'pending', limit=1, prefer_priority=False)
+        assert rows[0][0] == paths[0]
+    finally:
+        store.close()
+
+
+def test_changed_content_precedes_periodic_refresh_without_promoting_old_pending():
+    bucket, (periodic, changed, old) = same_bucket_paths(3)
+    inventory, connection = partitions(bucket)
+    try:
+        inventory.inventory_put([
+            (periodic, 'one', 'file', 'a', 'pending', 0, 1, 1, None, 'content-refresh-during-backfill'),
+            (old, 'one', 'file', 'a', 'pending', 0, 1, 1, None, None),
+            (changed, 'one', 'file', 'before', 'inspected', 200, 1, 1, None, None)])
+        assert inventory.inventory_observed(changed, 'one', 1, 'file', 'b', 1)
+        rows, _ = inventory.inventory_page('one', 'file', ('pending', 'changed'), limit=1,
+                                           prefer_priority=False, queue_class='refresh')
+        assert rows[0][0] == changed
+        # Rediscovery cannot erase an urgent tag or promote an unchanged backlog item.
+        inventory.inventory_put([(changed, 'one', 'file', 'b', 'pending', 200, 1, 1, None, 'content-refresh-during-backfill'),
+                                 (old, 'one', 'file', 'a', 'pending', 0, 1, 1, None, 'content-version-refresh-during-backfill')])
+        assert connection.execute('SELECT detail FROM inventory WHERE path=?', (changed,)).fetchone()[0] == 'content-version-refresh-during-backfill'
+        assert connection.execute('SELECT detail FROM inventory WHERE path=?', (old,)).fetchone()[0] is None
+        inventory.inventory_set(changed, 'inspected')
+        rows, _ = inventory.inventory_page('one', 'file', 'pending', limit=1,
+                                           prefer_priority=False, queue_class='refresh')
+        assert rows[0][0] == periodic
+    finally:
+        connection.close()

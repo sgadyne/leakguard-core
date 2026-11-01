@@ -72,7 +72,7 @@ class RemoteDiscovery:
          elif kind=='file' and value['st_dev']!=source['remote_identity']['device']:state='unsupported';detail='mount-boundary'
          elif kind=='file' and (value['st_flags']&0x40000000 or actual.name.endswith('.icloud')):state='remote-only';detail='placeholder-not-hydrated'
          elif kind=='file' and protected_store(actual,remote=True):state='protected';detail='protected-store-inventory-only'
-         elif refresh and kind in {'file','directory'}:detail='content-refresh-during-backfill' if kind=='file' else row[9]
+         elif refresh and kind in {'file','directory'}:detail=('content-version-refresh-during-backfill' if row[9]=='metadata-version-refresh-during-backfill' else 'content-refresh-during-backfill') if kind=='file' else row[9]
         entries.append((child,source['id'],kind,json.dumps(sig(value)) if value else None,state,_priority(PurePosixPath(child)),job['inventory_generation'],value['st_size'] if value else 0,None,detail))
        self.store.inventory_put(entries);job['metadata_enumerated']+=len(entries)
        if not result['stable']:

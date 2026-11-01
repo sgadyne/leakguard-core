@@ -246,7 +246,7 @@ class DiscoveryCoordinator:
         runtime and publication checks still authorize every admitted version.
         A filtered empty page never proves inventory completion.
         """
-        job['navigation_profile']={'version':'bounded-refresh-v3','cycle':10,
+        job['navigation_profile']={'version':'bounded-refresh-v4','cycle':10,
             'oldest_slot':0,'refresh_slot':5,'metadata_seconds':2,
             'slice_seconds':10,'max_metadata_entries':5000,
             'filtered_fallback_queries':1,'new_arrivals':'monotonic-clock',
@@ -416,7 +416,7 @@ class DiscoveryCoordinator:
                         elif source.get('automatic') and kind=='directory' and value.st_dev not in source.get('local_devices',[info.st_dev]):state='excluded';detail='mount-boundary-unknown-descendants'
                         elif kind=='file' and (getattr(value,'st_flags',0)&0x40000000 or entry.name.endswith('.icloud')):state='remote-only';detail='cloud-placeholder-not-hydrated'
                         elif kind=='file' and protected_store(child):state='protected';detail='encrypted-store-inventory-only'
-                        elif refresh and kind in {'file','directory'}:detail='content-refresh-during-backfill' if kind=='file' else row[9]
+                        elif refresh and kind in {'file','directory'}:detail=('content-version-refresh-during-backfill' if row[9]=='metadata-version-refresh-during-backfill' else 'content-refresh-during-backfill') if kind=='file' else row[9]
                         entries.append((str(child),source['id'],kind,_sig(value),state,_priority(child),generation,value.st_size,None,detail))
                     except OSError:
                         entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
