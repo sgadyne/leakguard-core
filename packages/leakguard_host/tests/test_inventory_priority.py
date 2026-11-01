@@ -425,3 +425,62 @@ def test_new_metadata_version_executes_despite_full_saved_page_and_completed_sib
         assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(backlog[-1]),)).fetchone()[0]=='pending'
         assert child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(backlog[-1]),)).fetchone()[0]==age
     finally:owner.close();store.close()
+
+
+def test_deferred_observed_version_keeps_fifo_execution_under_new_events(tmp_path,monkeypatch):
+    from contextlib import contextmanager
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    from leakguard_core.api import ScanConfig
+    from leakguard_core import backends
+    from leakguard_host.protection import defaults
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-observed-event-fifo')
+    backlog=[tmp_path/f'old-{i:03}.txt' for i in range(100)]
+    events=[tmp_path/f'new-{i:03}.env' for i in range(3)]
+    for path in [*backlog,*events]:path.write_text('ordinary synthetic event fairness control')
+    def row(path):return (str(path),'source','file',_sig(path.stat()),'pending',0,1,path.stat().st_size,None,None)
+    store.inventory_put([row(path) for path in [*backlog,*events]])
+    source={'id':'source','root':str(tmp_path),'kind':'local','exclusions':[]}
+    job={'inventory_generation':1,'inventory_complete':True,'slices':1,'content_batch':1,'content_remainder':[str(path) for path in backlog],'files_scanned':0,'new_findings':0,'reconcile_cursor':256}
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}));original=owner.scanner
+    owner.identity=lambda settings:{'runtime_id':'synthetic-runtime','policy_id':'synthetic-policy'}
+    owner.inventory_page=lambda *a,**k:[]
+    owner._known_availability=lambda *a,**k:[(str(events[0]),'file')]
+    clock=[0.];monkeypatch.setattr('leakguard_host.discovery.time.monotonic',lambda:clock[0])
+    @contextmanager
+    def delayed(view):
+        clock[0]=11.
+        yield None
+    owner.scanner=delayed
+    monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',lambda *a,**k:('synthetic-runtime',True))
+    monkeypatch.setattr(backends,'detect',lambda *a,**k:())
+    try:
+        owner.tick(source,job,defaults(),cancel=lambda:False)
+        assert job['files_scanned']==0 and str(events[0]) in job['content_remainder']
+        # Budget-truncated event admission survives a serialized scheduler
+        # checkpoint; subsequent events cannot repeatedly overtake it.
+        job=__import__('json').loads(__import__('json').dumps(job));owner.scanner=original
+        for step in (1,2):
+            clock[0]=0.;job['slices']=step+1
+            owner._known_availability=lambda *a,**k:[(str(events[step]),'file')]
+            owner.tick(source,job,defaults(),cancel=lambda:False)
+            child=store._partitions.get(store._partitions.bucket(str(events[step-1])))
+            assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(events[step-1]),)).fetchone()[0]=='inspected', 'new events overtook an unexecuted observed version'
+            assert len(job['content_remainder'])<=100
+    finally:owner.close();store.close()
+
+
+def test_later_metadata_pages_do_not_overtake_an_earlier_changed_version(tmp_path):
+    import time
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    first=tmp_path/'z-first';later=tmp_path/'a-later';first.mkdir();later.mkdir()
+    initial=first/'initial.env';initial.write_text('ordinary synthetic first metadata page')
+    for number in range(30):(later/f'{number:02}.env').write_text('ordinary synthetic later metadata page')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-metadata-event-fifo')
+    source={'id':'source','root':str(tmp_path),'kind':'local','exclusions':[]}
+    store.inventory_put([(str(path),'source','directory',_sig(path.stat()),'enumerating',0,1,0,None,None) for path in (first,later)])
+    job={'inventory_generation':1,'slices':1,'metadata_enumerated':0,'unknown_descendants':0}
+    owner=DiscoveryCoordinator(store,None);owner.inventory_page=lambda *a,**k:[];followup=[]
+    try:
+        owner._enumerate(source,job,{'exclusions':[]},lambda:False,time.monotonic()+2,observed=[(str(path),'directory') for path in (first,later)],content_followup=followup)
+        assert len(followup)==25 and followup[0]==str(initial), 'later metadata pages replaced an unexecuted changed version'
+    finally:owner.close();store.close()
