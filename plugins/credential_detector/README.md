@@ -143,3 +143,10 @@ unquoted environment strings such as `password=false`, with precise spans, so
 the combined credentials profile keeps these fields visible. Native-only
 provider candidates containing that substring remain an upstream limitation;
 this candidate makes no whole-machine false-negative-rate claim.
+
+
+As of 0.1.0a4, simple aliases can also be configured without a private wheel:
+`{"aliases": ["corpPassword:password", "corpSession:access-token"]}`.
+The existing alias validation and normalized collision checks apply. See
+[scan profile packs](../../docs/scan-profiles.md) for roles, composition, limits
+and the distinction between alias data and a new protocol grammar.

@@ -17,6 +17,11 @@ def main(argv=None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("capabilities")
     commands.add_parser("roots")
+    profile = commands.add_parser('scan-profile', help='Resolve explicit presets/packs without discovering or installing code')
+    profile.add_argument('action', choices=('catalog', 'preview', 'check', 'export'))
+    profile.add_argument('--document', type=Path)
+    profile.add_argument('--base-config', type=Path)
+    profile.add_argument('--output-directory', type=Path)
     listing = commands.add_parser("browse")
     listing.add_argument("path")
     listing.add_argument("--root")
@@ -52,7 +57,33 @@ def main(argv=None) -> int:
             upload.add_argument("--max-files", type=int, default=100)
     args = parser.parse_args(argv)
     try:
-        if args.command == "capabilities":
+        if args.command == 'scan-profile':
+            from .scan_profiles import catalog, read_document, resolve, preflight
+            if args.action == 'catalog':
+                result = catalog()
+            else:
+                if args.document is None:
+                    raise HostError('scan-profile-invalid')
+                from leakguard_core.settings import read_config
+                plan = resolve(read_document(args.document), base_config=read_config(args.base_config) if args.base_config else None)
+                result = plan.preview()
+                if args.action == 'check':
+                    preflight(plan)
+                    result['runtime_preflight'] = 'passed'
+                elif args.action == 'export':
+                    if args.output_directory is None:
+                        raise HostError('scan-profile-invalid')
+                    import os
+                    args.output_directory.mkdir(mode=0o700)
+                    files = {'config.json': plan.config, 'protection-settings.json': plan.protection,
+                             'scan-profile-document.json': plan.document, 'preview.json': result}
+                    for name, value in files.items():
+                        fd = os.open(args.output_directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        with os.fdopen(fd, 'w') as stream:
+                            json.dump(value, stream, indent=2, sort_keys=True)
+                            stream.write('\n')
+                    result['exported'] = sorted(files)
+        elif args.command == "capabilities":
             result = capabilities()
         elif args.command == "roots":
             result = roots()

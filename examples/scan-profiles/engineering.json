@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "preset": "engineering",
+  "presets": [
+    {
+      "id": "engineering",
+      "version": 1,
+      "extends": "standard",
+      "packs": ["team-credentials"],
+      "inspection": {"max_file_bytes": 20971520, "scan_workers": 2},
+      "jobs": {
+        "reconcile": {"mode": "interval", "interval_seconds": 300, "daily_time": "09:00", "timezone": "UTC"},
+        "changes": "polling",
+        "deep": "off",
+        "access": "off"
+      }
+    }
+  ],
+  "packs": [
+    {
+      "id": "team-credentials",
+      "version": 1,
+      "requires": ["detector-v2"],
+      "plugins": [
+        {
+          "module": "credential_detector.plugin",
+          "options": {"aliases": ["corpPassword:password", "corpSession:access-token"]}
+        }
+      ]
+    }
+  ]
+}

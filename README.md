@@ -29,6 +29,15 @@ pack through DetectorV2 without editing core. Missing required wheels fail
 closed. Unknown plugin state disables result reuse and audit continuation;
 such audits must finish in a single bounded invocation.
 
+## Scan profiles
+
+[Scan profiles and extension packs](docs/scan-profiles.md) compose recognition,
+parsing choices, inspection limits and recurring jobs through the same validator
+in Settings, the host CLI and Python. Start with the standard, sensitive or
+inventory preset; use explicit versioned packs for team aliases and installed
+extensions. Preview before applying. Unsupported event, deep-archive and access
+monitoring capabilities fail explicitly.
+
 ## Plugin guide
 
 Author firm recognizers as a **separate private wheel**, using native Presidio

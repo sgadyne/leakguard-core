@@ -1,12 +1,14 @@
 import React,{useEffect,useState} from 'react';
 import {Alert,Box,Button,FormControl,FormControlLabel,InputLabel,MenuItem,Paper,Select,Stack,Switch,TextField,Typography} from '@mui/material';
 import {request} from './api';
+import ScanProfiles from './ScanProfiles';
 
 export default function ProtectionSettings({status,onRefresh,onError}:any){
+ const [profileRevision,setProfileRevision]=useState(0);
  const [pending,setPending]=useState<any[]>([]);
  const [ports,setPorts]=useState<Record<string,string>>({});
  const [model,setModel]=useState<any>(null),[storage,setStorage]=useState<any>({}),[locations,setLocations]=useState<any[]>([]),[busy,setBusy]=useState(false),[destination,setDestination]=useState(''),[kind,setKind]=useState('credentials'),[message,setMessage]=useState('');
- async function load(){const s=await request<any>('/settings');setModel(s.protection);setPending(s.pending_locations||[]);setStorage(s.storage||{});if(status?.observations?.unlocked)setLocations(await request('/sources'));}
+ async function load(){const s=await request<any>('/settings');setModel(s.protection);setPending(s.pending_locations||[]);setStorage(s.storage||{});setProfileRevision(v=>v+1);if(status?.observations?.unlocked)setLocations(await request('/sources'));}
  useEffect(()=>{void load().catch((e:any)=>onError(e.message))},[status?.observations?.unlocked]);
  useEffect(()=>{let active=true;if(status?.observations?.unlocked)void request<any[]>('/sources').then(rows=>{if(active)setLocations(rows)}).catch((e:any)=>{if(active)onError(e.message)});return()=>{active=false}},[status]);
  async function run(fn:()=>Promise<void>){setBusy(true);setMessage('');try{await fn();onRefresh()}catch(e){onError((e as Error).message)}finally{setBusy(false)}}
@@ -17,7 +19,7 @@ export default function ProtectionSettings({status,onRefresh,onError}:any){
  if(!model)return null;
  const update=(key:string,value:any)=>setModel({...model,[key]:value});
  const schedule=(key:string,value:any)=>update('schedule',{...model.schedule,[key]:value});
- return <><Paper variant="outlined" sx={{p:2,mb:2}}><Typography variant="h3">Automatic protection</Typography><Typography variant="body2" color="text.secondary" sx={{my:1}}>This Mac discovers accessible local files, including hidden configuration and history. Initial inventory and content inspection progress separately. Inaccessible, encrypted, unsupported and cloud-only material remain visible gaps.</Typography>
+ return <><ScanProfiles revision={profileRevision} onApplied={async()=>{await load();onRefresh();}} onError={onError}/><Paper variant="outlined" sx={{p:2,mb:2}}><Typography variant="h3">Automatic protection</Typography><Typography variant="body2" color="text.secondary" sx={{my:1}}>This Mac discovers accessible local files, including hidden configuration and history. Initial inventory and content inspection progress separately. Inaccessible, encrypted, unsupported and cloud-only material remain visible gaps.</Typography>
  <Stack spacing={1.5}>{pending.length>0&&<Alert severity="info">These VM locations will be configured after scan storage is unlocked: {pending.map((x:any)=>(x.label||x.target+":"+x.root)).join(" · ")}</Alert>}<FormControlLabel control={<Switch checked={model.automatic_this_mac} onChange={e=>update('automatic_this_mac',e.target.checked)}/>} label="Automatically cover This Mac"/><FormControlLabel control={<Switch checked={model.paused} onChange={e=>update('paused',e.target.checked)}/>} label="Pause all automatic protection"/>
  <Stack direction="row" spacing={1.5} useFlexGap sx={{flexWrap:"wrap"}}><FormControl sx={{minWidth:170}} size="small"><InputLabel>Run schedule</InputLabel><Select label="Run schedule" value={model.schedule.mode} onChange={e=>schedule('mode',e.target.value)}><MenuItem value="interval">At an interval</MenuItem><MenuItem value="daily">At a daily time</MenuItem></Select></FormControl>{model.schedule.mode==='interval'?<TextField size="small" type="number" label="Interval in minutes" value={model.schedule.interval_seconds/60} onChange={e=>schedule('interval_seconds',Number(e.target.value)*60)}/>:<TextField size="small" type="time" label="Daily local time" value={model.schedule.daily_time} onChange={e=>schedule('daily_time',e.target.value)} slotProps={{inputLabel:{shrink:true}}}/>}<TextField size="small" label="Time zone" value={model.schedule.timezone} onChange={e=>schedule('timezone',e.target.value)}/></Stack>
  <Typography variant="caption" color="text.secondary">After downtime, one missed run catches up. Daily schedules use the saved IANA time zone, the first repeated hour, and the next valid minute if a time is skipped.</Typography>

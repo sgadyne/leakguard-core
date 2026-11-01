@@ -12,6 +12,16 @@ const navigationStatusLabels: Record<string,string> = {
   "platform-unavailable": "Unavailable on this platform",
 };
 const messages: Record<string, string> = {
+  "scan-profile-invalid": "Check the scan profile JSON fields and values.",
+  "scan-profile-component-conflict": "Two packs configure the same component. Combine their options into one pack.",
+  "scan-profile-not-found": "The selected preset or its parent is not defined.",
+  "scan-profile-inheritance-cycle": "Preset inheritance must be acyclic and at most eight levels deep.",
+  "scan-profile-pack-not-found": "A referenced inspection pack is not defined.",
+  "scan-profile-capability-unavailable": "This profile requires a capability that this scanner does not provide.",
+  "scan-profile-policy-limit": "This profile exceeds the limits set by your administrator.",
+  "scan-profile-preview-stale": "Settings changed. Preview the profile again before applying it.",
+  "scan-profile-record-invalid": "The saved profile could not be validated.",
+  "scan-profile-runtime-unavailable": "The configured extensions could not start. Check that their packages and dependencies are installed.",
   "ssh-target-invalid": "Enter an SSH alias or host without command options.",
   "remote-path-invalid": "Enter an absolute VM directory without parent traversal.",
   "ssh-timeout": "The VM did not respond within the connection bound. Local protection continues.",
