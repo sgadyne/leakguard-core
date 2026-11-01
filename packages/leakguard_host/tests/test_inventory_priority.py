@@ -385,3 +385,43 @@ def test_incomplete_result_keeps_source_fenced_retry_on_saved_page(tmp_path,monk
         assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(file),)).fetchone()[0]=='inspected'
         assert not job['content_remainder'] and len(calls)==2
     finally:owner.close();store.close()
+
+
+def test_new_metadata_version_executes_despite_full_saved_page_and_completed_siblings(tmp_path,monkeypatch):
+    from contextlib import contextmanager
+    from leakguard_host import discovery
+    from leakguard_core.api import ScanConfig
+    from leakguard_core import backends
+    from leakguard_host.protection import defaults
+    root=tmp_path/'inputs';root.mkdir();low=root/'node_modules';low.mkdir()
+    completed=[root/f'a-{i:02}.env' for i in range(30)]
+    backlog=[low/f'old-{i:03}.txt' for i in range(100)]
+    for path in [*completed,*backlog]:path.write_text('ordinary synthetic saved-page control')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-full-saved-page')
+    source={'id':'source','root':str(root),'kind':'local','exclusions':[]}
+    def row(path,state):return (str(path),'source','file',discovery._sig(path.stat()),state,discovery._priority(path),1,path.stat().st_size,None,None)
+    store.inventory_put([row(path,'inspected') for path in completed]+[row(path,'pending') for path in backlog])
+    store.inventory_put([(str(root),'source','directory',discovery._sig(root.stat()),'enumerating',20,1,0,None,'metadata-version-refresh-during-backfill')])
+    new=root/'z-new.env';new.write_text('ordinary synthetic genuinely new version')
+    original=discovery.navigation._scoped_scandir
+    @contextmanager
+    def ordered(*args):
+        with original(*args) as iterator:yield iter(sorted(iterator,key=lambda entry:entry.name))
+    monkeypatch.setattr(discovery.navigation,'_scoped_scandir',ordered)
+    monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',lambda *a,**k:('synthetic-runtime',True))
+    monkeypatch.setattr(backends,'detect',lambda *a,**k:())
+    job={'inventory_generation':1,'inventory_complete':False,'slices':1,'content_batch':4,'content_remainder':[str(path) for path in backlog],'files_scanned':0,'new_findings':0,'metadata_enumerated':0,'unknown_descendants':0,'reconcile_cursor':256}
+    owner=discovery.DiscoveryCoordinator(store,ScanConfig.from_mapping({}))
+    owner.inventory_page=lambda *a,**k:[]
+    owner._known_availability=lambda *a,**k:[(str(root),'directory')]
+    child=store._partitions.get(store._partitions.bucket(str(backlog[-1])))
+    age=child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(backlog[-1]),)).fetchone()[0]
+    try:
+        owner.tick(source,job,defaults(),cancel=lambda:False)
+        child=store._partitions.get(store._partitions.bucket(str(new)))
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(new),)).fetchone()[0]=='inspected', 'a discovered new version was hidden behind a saturated saved page'
+        assert len(job['content_remainder'])<=100
+        child=store._partitions.get(store._partitions.bucket(str(backlog[-1])))
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(backlog[-1]),)).fetchone()[0]=='pending'
+        assert child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(backlog[-1]),)).fetchone()[0]==age
+    finally:owner.close();store.close()

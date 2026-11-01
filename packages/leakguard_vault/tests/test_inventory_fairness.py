@@ -888,3 +888,15 @@ def test_interrupted_page_reload_rejects_changed_source_generation_and_state(tmp
         store.inventory_set(paths[0],'protected')
         assert [r[0] for r in store.inventory_selected('one','file','pending',paths,7)]==paths[1:]
     finally:store.close()
+
+
+def test_inventory_publication_reports_only_new_or_changed_metadata_versions():
+    bucket, paths = same_bucket_paths(3)
+    inventory, connection = partitions(bucket)
+    def row(path,signature='same',state='pending',detail=None):return (path,'one','file',signature,state,0,1,1,None,detail)
+    try:
+        assert inventory.inventory_put([row(paths[0],state='inspected'),row(paths[1])])==[(paths[0],'file'),(paths[1],'file')]
+        assert inventory.inventory_put([row(paths[0]),row(paths[1],detail='content-version-refresh-during-backfill')])==[]
+        assert inventory.inventory_put([row(paths[0],'changed'),row(paths[2])])==[(paths[0],'file'),(paths[2],'file')]
+        assert connection.execute('SELECT status FROM inventory WHERE path=?',(paths[0],)).fetchone()[0]=='changed'
+    finally:connection.close()

@@ -368,8 +368,8 @@ class DiscoveryCoordinator:
         return changed_work
 
     def _enumerate(self,source,job,settings,cancel,deadline,*,observed=(),content_followup=None):
-        generation=job['inventory_generation'];seen=0
-        hints=list(dict.fromkeys([*job.get('metadata_remainder',[]),*[path for path,kind in observed if kind=='directory']]))[:100]
+        generation=job['inventory_generation'];seen=0;changed_files=set()
+        hints=list(dict.fromkeys([*[path for path,kind in observed if kind=='directory'],*job.get('metadata_remainder',[])]))[:100]
         job['metadata_remainder']=hints
         while seen<5000 and time.monotonic()<deadline and not cancel():
             hinted=bool(hints) and job['slices']%10!=0
@@ -450,14 +450,22 @@ class DiscoveryCoordinator:
                         entries.append((str(child),source['id'],kind,_sig(value),state,_priority(child),generation,value.st_size,None,detail))
                     except OSError:
                         entries.append((str(child),source['id'],'unknown',None,'inaccessible',100,generation,0,None,'metadata-unreadable'))
-                self.store.inventory_put(entries)
+                versions=self.store.inventory_put(entries) or []
                 if hinted:
                     # Follow only descriptor-observed changes and their bounded
                     # metadata page, using the same ancestry, time and entry
                     # limits. Reserve a hint slot for an interrupted parent.
                     for entry in entries:
                         if entry[2]=='directory' and entry[4]=='enumerating' and len(hints)<99 and entry[0] not in hints:hints.append(entry[0])
-                        elif entry[2]=='file' and entry[4]=='pending' and content_followup is not None and len(content_followup)<25:content_followup.append(entry[0])
+                    if content_followup is not None:
+                        # Publication distinguishes new/changed versions from
+                        # unchanged completed siblings. Reload actual pending
+                        # states before spending the bounded follow-up credit.
+                        changed_files.update(path for path,kind in versions if kind=='file')
+                        candidates=set(content_followup)|changed_files|{entry[0] for entry in entries if entry[2]=='file' and entry[4]=='pending'}
+                        candidates=sorted(candidates,key=lambda path:(path not in changed_files,_priority(Path(path)),path))[:100]
+                        pending=self.store.inventory_selected(source['id'],'file',('pending','changed'),candidates,generation)
+                        content_followup[:]=[entry[0] for entry in pending[:25]]
                 if mounted is not None:
                     exhausted=mounted['complete'];position=mounted['position']
                 stable=mounted['stable'] if mounted is not None else _sig(path.lstat())==signature
@@ -513,13 +521,23 @@ class DiscoveryCoordinator:
         if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2),observed=observed,content_followup=followup)
         scanned=0
         if settings['new_content']=='inspect' and not cancel():
-            # Finish an interrupted selection before replacing it with new
-            # traffic. Persist paths only, and reload their current source and
-            # pending-state fences after every restart; never replay old rows.
+            # Persist paths only, reloading current source/state fences. Actual
+            # incomplete attempts keep retry service; observed versions get a
+            # bounded execution share even when a saved page stays saturated.
+            def retry(row):
+                try:return json.loads(row[9]).get('attempts',0)>0 if row[9] else False
+                except (ValueError,TypeError,AttributeError):return False
+            batch=job.get('content_batch',100)
             rows=[]
             if source['kind']=='local' and job.get('content_remainder'):
                 rows=self.store.inventory_selected(source['id'],'file',('pending','changed'),job['content_remainder'],job['inventory_generation'])
-                if rows and job['slices']%10==0:
+                if rows and job['slices']%10!=0:
+                    fresh=self.store.inventory_selected(source['id'],'file',('pending','changed'),list(dict.fromkeys(followup))[:25],job['inventory_generation'])[:max(1,batch//2)]
+                    retries=[row for row in rows if retry(row)]
+                    retry_paths={row[0] for row in retries}
+                    promoted={row[0] for row in [*retries,*fresh]}
+                    rows=[*retries,*(row for row in fresh if row[0] not in retry_paths),*(row for row in rows if row[0] not in promoted)][:100]
+                elif rows:
                     # A stream of observed arrivals can replenish this tail
                     # indefinitely. Preserve one actual oldest-work credit;
                     # any overflow stays pending with its inventory age intact.
@@ -527,7 +545,6 @@ class DiscoveryCoordinator:
                     selected={row[0] for row in oldest}
                     rows=(*oldest,*(row for row in rows if row[0] not in selected))[:100]
             if not rows:
-                batch=job.get('content_batch',100)
                 # Oldest slots and interrupted pages retain their independent
                 # service. Other slots may spend at most half their existing
                 # batch on newly observed versions before regular admission.
@@ -618,9 +635,9 @@ class DiscoveryCoordinator:
                 # observation. Keep its still-pending versions in the existing
                 # bounded page; reload all fences before executing next slice.
                 deferred=self.store.inventory_selected(source['id'],'file',('pending','changed'),list(dict.fromkeys(followup))[:25],job['inventory_generation'])
-                for row in deferred:
-                    if len(remaining)<100 and row[0] not in remaining:remaining.append(row[0])
-                job['content_remainder']=remaining
+                saved=self.store.inventory_selected(source['id'],'file',('pending','changed'),remaining,job['inventory_generation'])
+                retries=[row[0] for row in saved if retry(row)]
+                job['content_remainder']=list(dict.fromkeys([*retries,*(row[0] for row in deferred),*remaining]))[:100]
         if job.get('inventory_complete') and job.get('reconcile_cursor',0)<256:
             job['reconcile_cursor']=_advance_partitions(job.get('reconcile_cursor',0),lambda index:self.store.reconcile_location(source,job['inventory_generation'],index))
         job['files_scanned']+=scanned

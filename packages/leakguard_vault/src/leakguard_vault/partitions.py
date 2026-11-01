@@ -203,6 +203,7 @@ class EncryptedPartitions:
 
     def inventory_put(self, rows):
         groups = {}
+        versions = []
         for row in rows:
             if len(row) != 10 or len(row[0]) > 4096:
                 raise StateError('state-data-invalid')
@@ -213,8 +214,10 @@ class EncryptedPartitions:
             new_paths=set()
             for row in group:
                 previous=store.conn.execute('SELECT signature FROM inventory WHERE path=?',(row[0],)).fetchone()
-                if previous is None:new_paths.add(row[0])
-                elif previous[0]!=row[3]:changed.append(row[0])
+                if previous is None:
+                    new_paths.add(row[0]);versions.append((row[0],row[2]))
+                elif previous[0]!=row[3]:
+                    changed.append(row[0]);versions.append((row[0],row[2]))
             evidence='e'+bucket[1:]
             if changed and (evidence in self.catalog or evidence in self.cache):
                 child=self.get(evidence)
@@ -239,6 +242,7 @@ class EncryptedPartitions:
                 del journal[journal_start:]
                 journal_size[0] = size_start
                 raise
+        return versions
 
     def inventory_observed(self, path, source_id, generation, kind, signature, size):
         """Requeue only a previously inventoried version within the same source."""
