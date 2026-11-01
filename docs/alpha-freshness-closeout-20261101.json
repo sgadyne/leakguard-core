@@ -104,7 +104,7 @@
     "qualification": "Committed complete results match source/generation/signature of pretrial pending versions, also present in an older encrypted pending snapshot; physical metadata rechecked. Selection route is not inferred. Wait lower bounds start after pretrial observation; no continuously pending age since the older snapshot or globally oldest queue bound is claimed."
   },
   "pilot_readiness": {
-    "assessment": "Suitable for a limited single-user Mac alpha pilot under similar scope, backlog, exclusions and one-minute recurrence. Observed warm small-file completion reached 114 seconds; completed older backlog versions had wait lower bounds up to 476 seconds and the full backlog remains incomplete. Unattended corporate/fleet readiness and any fixed latency guarantee remain unqualified.",
+    "assessment": "Supportable for a supervised single-user Mac alpha pilot under similar scope, backlog, exclusions and one-minute recurrence. Warm small-file completion reached 114 seconds; older completed versions had wait lower bounds up to 476 seconds. One recovered generic failed slice was not reproduced in warm/cold diagnostic repeats and remains an open follow-up. Global coverage, fixed latency guarantees and unattended corporate/fleet readiness remain unqualified.",
     "default_schedule_slo_claimed": false,
     "full_machine_coverage_claimed": false
   },
@@ -151,7 +151,7 @@
   },
   "privacy": {
     "raw_known_real_value_occurrences_required": 0,
-    "final_audit_report": "evidence/freshness10-privacy-audit.json",
+    "final_audit_report": "evidence/freshness10-privacy-audit-final.json",
     "scope": "Final task files, uncompressed ZIP/wheel/TAR entries and all outgoing Git objects since fetched main. Known real values reacquired only in memory; no raw needles persisted or private inputs transferred."
   },
   "prior_failed_evidence_preserved": true,
@@ -165,7 +165,23 @@
     "No globally oldest wait bound or exhaustive coverage claim; pending/inaccessible/unsupported/error states remain explicit.",
     "No fresh Windows, Linux, remote or fleet qualification. Expired remote waiver was not used; remote synthetic cleanup remains deferred.",
     "Separate scanning-layer/preset feature code is not included in this runtime or qualification.",
-    "No push, CI execution, publication or live installation; protected live apps/profile were preserved."
+    "No push, CI execution, publication or live installation; protected live apps/profile were preserved.",
+    "One recovered generic coordinator failure remains unexplained; diagnose before unattended readiness. All controlled transitions passed despite its backoff."
   ],
-  "published": false
+  "published": false,
+  "coordinator_backoff": {
+    "failed_slices": 1,
+    "failure": "scan-failed",
+    "failed_tick_index": 14,
+    "failure_observed_seconds": 108.098,
+    "next_successful_slice_observed_seconds": 123.931,
+    "recovered": true,
+    "qualification_controls_remained_within_criterion": true,
+    "warm_repeat_seconds": 98.562,
+    "warm_repeat_exceptions": 0,
+    "cold_original_hooks_repeat_seconds": 172.251,
+    "cold_repeat_exceptions": 0,
+    "cause": "Unreproduced. Final transaction/backoff handling recovered, but the generic exception cause is still an open follow-up.",
+    "diagnostic_scope": "Exact runtime on whole encrypted profile copies; only exception type, code frame names/lines and collection counts would be exported. No exception messages, private paths or locals values exported."
+  }
 }
