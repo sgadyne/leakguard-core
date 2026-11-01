@@ -280,6 +280,37 @@ class RefreshQueueEvidence(unittest.TestCase):
                                                 limit=10, queue_class='refresh')
         self.assertEqual([row[0] for row in filtered], [paths[0]])
 
+    def test_refresh_parent_does_not_promote_existing_active_backfill(self):
+        bucket, paths = same_bucket_paths(7)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        tag = 'metadata-refresh-during-backfill'
+        details = [None, 'backfill-progress', tag, None, None, None]
+        inventory.inventory_put([
+            (path, 'one', 'directory', 'same', 'enumerating', 10, 1, 0, 'cursor', details[i])
+            for i, path in enumerate(paths[:6])
+        ])
+        inventory.inventory_put([
+            (paths[0], 'one', 'directory', 'same', 'enumerating', 10, 1, 0, None, tag),
+            (paths[1], 'one', 'directory', 'same', 'enumerating', 10, 1, 0, None, tag),
+            (paths[2], 'one', 'directory', 'same', 'enumerating', 10, 1, 0, None, tag),
+            (paths[3], 'one', 'directory', 'changed', 'enumerating', 10, 1, 0, None, tag),
+            (paths[4], 'two', 'directory', 'same', 'enumerating', 10, 1, 0, None, tag),
+            (paths[5], 'one', 'directory', 'same', 'enumerating', 10, 2, 0, None, tag),
+            (paths[6], 'one', 'directory', 'new', 'enumerating', 10, 1, 0, None, tag),
+        ])
+        rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
+        self.assertEqual([(rows[path][4], rows[path][8], rows[path][9]) for path in paths[:3]],
+                         [('enumerating', 'cursor', None), ('enumerating', 'cursor', 'backfill-progress'),
+                          ('enumerating', 'cursor', tag)])
+        self.assertTrue(all(rows[path][9] == tag for path in paths[3:]))
+        self.assertEqual(rows[paths[4]][1], 'two')
+        self.assertIsNone(rows[paths[5]][8])
+        selected, _ = inventory.inventory_page('one', 'directory', 'enumerating',
+                                                limit=10, queue_class='refresh')
+        self.assertCountEqual([row[0] for row in selected], [paths[2], paths[3], paths[5], paths[6]])
+        self.assertTrue(all(len(row) == 10 for row in selected))
+
     def test_refresh_filter_is_exact_and_scoped_by_source_kind_and_state(self):
         bucket, paths = same_bucket_paths(7)
         inventory, connection = partitions(bucket)
