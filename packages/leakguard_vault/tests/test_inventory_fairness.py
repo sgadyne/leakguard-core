@@ -272,13 +272,14 @@ class RefreshQueueEvidence(unittest.TestCase):
         ])
         rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
         self.assertEqual((rows[paths[0]][8], rows[paths[0]][9]), ('cursor', tag))
-        for path in (paths[1], paths[2], paths[3], paths[5], paths[6], paths[7]):
+        self.assertEqual(rows[paths[1]][9], tag)  # Changed known version is refresh work.
+        for path in (paths[2], paths[3], paths[5], paths[6], paths[7]):
             self.assertIsNone(rows[path][9])
         self.assertEqual(rows[paths[4]][9], 'new-detail')
         self.assertIsNone(rows[paths[3]][8])  # New generation cannot inherit cursor.
         filtered, _ = inventory.inventory_page('one', 'directory', 'enumerating',
                                                 limit=10, queue_class='refresh')
-        self.assertEqual([row[0] for row in filtered], [paths[0]])
+        self.assertCountEqual([row[0] for row in filtered], [paths[0], paths[1]])
 
     def test_refresh_parent_does_not_promote_existing_active_backfill(self):
         bucket, paths = same_bucket_paths(7)
@@ -309,6 +310,43 @@ class RefreshQueueEvidence(unittest.TestCase):
         selected, _ = inventory.inventory_page('one', 'directory', 'enumerating',
                                                 limit=10, queue_class='refresh')
         self.assertCountEqual([row[0] for row in selected], [paths[2], paths[3], paths[5], paths[6]])
+        self.assertTrue(all(len(row) == 10 for row in selected))
+
+    def test_known_changed_active_directory_version_is_refresh_work(self):
+        bucket, paths = same_bucket_paths(9)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        tag = 'metadata-refresh-during-backfill'
+        originals = [
+            ('before', None), ('before', tag), (None, None), ('before', None),
+            ('same', None), ('before', None), ('before', None), ('before', None),
+            ('before', None),
+        ]
+        inventory.inventory_put([
+            (path, 'one', 'directory', signature, 'enumerating', 10, 1, 0, 'cursor', detail)
+            for path, (signature, detail) in zip(paths, originals)
+        ])
+        inventory.inventory_put([
+            (paths[0], 'one', 'directory', 'after', 'enumerating', 10, 1, 0, None, None),
+            (paths[1], 'one', 'directory', 'after', 'enumerating', 10, 1, 0, None, None),
+            (paths[2], 'one', 'directory', 'first', 'enumerating', 10, 1, 0, None, None),
+            (paths[3], 'one', 'directory', None, 'enumerating', 10, 1, 0, None, None),
+            (paths[4], 'one', 'directory', 'same', 'enumerating', 10, 1, 0, None, None),
+            (paths[5], 'two', 'directory', 'after', 'enumerating', 10, 1, 0, None, None),
+            (paths[6], 'one', 'directory', 'after', 'enumerating', 10, 2, 0, None, None),
+            (paths[7], 'one', 'directory', 'after', 'excluded', 10, 1, 0, None, 'operator-exclusion'),
+            (paths[8], 'one', 'directory', 'after', 'protected', 10, 1, 0, None, 'protected'),
+        ])
+        rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
+        for path in paths[:2]:
+            self.assertEqual((rows[path][4], rows[path][8], rows[path][9]), ('enumerating', None, tag))
+        for path in paths[2:7]:
+            self.assertIsNone(rows[path][9])
+        self.assertEqual((rows[paths[7]][4], rows[paths[7]][9]), ('excluded', 'operator-exclusion'))
+        self.assertEqual((rows[paths[8]][4], rows[paths[8]][9]), ('protected', 'protected'))
+        selected, _ = inventory.inventory_page('one', 'directory', 'enumerating',
+                                                limit=10, queue_class='refresh')
+        self.assertCountEqual([row[0] for row in selected], paths[:2])
         self.assertTrue(all(len(row) == 10 for row in selected))
 
     def test_refresh_filter_is_exact_and_scoped_by_source_kind_and_state(self):
