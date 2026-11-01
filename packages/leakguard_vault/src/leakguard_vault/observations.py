@@ -398,6 +398,16 @@ class EncryptedScanStore:
             self._ensure_open();self._dirty=True
             return self._partitions.inventory_page(*args, **kwargs)
 
+    def inventory_selected(self,*args):
+        with self._mutex:
+            self._ensure_open()
+            return self._partitions.inventory_selected(*args)
+
+    def inventory_admitted(self,paths):
+        with self._mutex:
+            self._ensure_open();self._dirty=True
+            return self._partitions.inventory_admitted(paths)
+
     def queue_backfill_refresh(self, *args):
         with self._mutex:
             self._ensure_open();self._dirty=True

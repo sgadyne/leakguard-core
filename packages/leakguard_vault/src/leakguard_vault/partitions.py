@@ -255,15 +255,51 @@ class EncryptedPartitions:
         row=self.get(bucket).conn.execute(
             'SELECT * FROM inventory WHERE path=? AND location=? AND generation=? AND kind=?',
             (path,source_id,generation,kind)).fetchone()
-        if row is None or row[3]==signature:
+        invalidated=(row is not None and kind=='file' and row[4]=='pending'
+                     and row[9]=='policy-or-runtime-changed')
+        if row is None or row[3]==signature and not invalidated:
             return False
         status='enumerating' if kind=='directory' else 'pending'
         detail=('metadata-version-refresh-during-backfill' if kind=='directory'
                 else 'content-version-refresh-during-backfill')
-        self.inventory_put([(path,source_id,kind,signature,status,row[5],generation,size,None,detail)])
+        if invalidated and row[3]==signature:
+            # Metadata does not restore content evidence. It only admits a
+            # current-source, previously inspected version for revalidation.
+            self.inventory_set(path,status,detail=detail)
+        else:self.inventory_put([(path,source_id,kind,signature,status,row[5],generation,size,None,detail)])
         return True
 
-    def inventory_page(self, location, kind, status, *, cursor=0, limit=100,prefer_priority=True,queue_class=None):
+    def inventory_selected(self,location,kind,status,paths,generation):
+        """Reload a bounded interrupted page against current inventory fences."""
+        if len(paths)>100:raise StateError('state-data-invalid')
+        states=(status,) if isinstance(status,str) else tuple(status)
+        rows=[]
+        for path in dict.fromkeys(paths):
+            bucket=self.bucket(path)
+            if bucket not in self.catalog and bucket not in self.cache:continue
+            row=self.get(bucket).conn.execute('SELECT * FROM inventory WHERE path=? AND location=? AND kind=?',(path,location,kind)).fetchone()
+            if row is not None and row[4] in states and row[6]==generation:rows.append(row)
+        return rows
+
+    def inventory_admitted(self,paths):
+        """Record bounded work attempts without aging an unexecuted page tail."""
+        if len(paths)>100:raise StateError('state-data-invalid')
+        groups={}
+        for path in dict.fromkeys(paths):groups.setdefault(self.bucket(path),[]).append(path)
+        for bucket,group in groups.items():
+            store=self.get(bucket)
+            journal,journal_size=self.cache[bucket][1:]
+            journal_start,size_start=len(journal),journal_size[0]
+            try:
+                with store.conn:
+                    store.conn.execute('UPDATE inventory_admission_clock SET sequence=sequence+1 WHERE id=1')
+                    sequence=store.conn.execute('SELECT sequence FROM inventory_admission_clock WHERE id=1').fetchone()[0]
+                    store.conn.executemany('INSERT INTO inventory_admissions VALUES(?,?) ON CONFLICT(path) DO UPDATE SET sequence=excluded.sequence',[(path,sequence) for path in group])
+            except BaseException:
+                del journal[journal_start:];journal_size[0]=size_start
+                raise
+
+    def inventory_page(self, location, kind, status, *, cursor=0, limit=100,prefer_priority=True,queue_class=None,admit=True):
         if queue_class is not None and (queue_class != 'refresh' or kind not in {'directory','file'}):
             raise StateError('state-data-invalid')
         refresh_details = ((('metadata-version-refresh-during-backfill',
@@ -309,21 +345,7 @@ class EncryptedPartitions:
                     break
         if selected is not None:
             index,rows=selected
-            store=self.get(f'i{index:02x}')
-            # Admission is scheduling evidence, never inspection evidence.
-            journal, journal_size = self.cache[f'i{index:02x}'][1:]
-            journal_start, size_start = len(journal), journal_size[0]
-            try:
-                with store.conn:
-                    store.conn.execute('UPDATE inventory_admission_clock SET sequence=sequence+1 WHERE id=1')
-                    sequence=store.conn.execute('SELECT sequence FROM inventory_admission_clock WHERE id=1').fetchone()[0]
-                    store.conn.executemany('INSERT INTO inventory_admissions VALUES(?,?) ON CONFLICT(path) DO UPDATE SET sequence=excluded.sequence',[(row[0],sequence) for row in rows])
-            except BaseException:
-                # SQLite traces failed statements before the rollback. They
-                # must not be replayed against a later encrypted checkpoint.
-                del journal[journal_start:]
-                journal_size[0] = size_start
-                raise
+            if admit:self.inventory_admitted([row[0] for row in rows])
             return rows,(index+1)%256
         return [],(cursor+8)%256
 

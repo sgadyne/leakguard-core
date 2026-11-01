@@ -24,11 +24,12 @@ class Clock:
 
 class Inventory:
     def __init__(self, root):
-        self.root=str(root);self.state='enumerating';self.cursor=None;self.paths=set();self.details=[]
+        self.root=str(root);self.state='enumerating';self.cursor=None;self.paths=set();self.details=[];self.admitted=[]
     def inventory_page(self,*args,**kw):
         row=(self.root,'synthetic','directory',None,self.state,0,1,0,self.cursor,None)
         return ([row] if self.state=='enumerating' else []),0
     def physical_visit(self,*args):return True
+    def inventory_admitted(self,paths):self.admitted.extend(paths)
     def inventory_put(self,entries):self.paths.update(x[0] for x in entries)
     def inventory_set(self,path,state,*,cursor=None,detail=None,**kw):
         assert path==self.root

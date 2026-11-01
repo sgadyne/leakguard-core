@@ -126,3 +126,17 @@ def test_known_current_metadata_enqueues_only_fenced_existing_versions(tmp_path,
     assert {args[0] for args in observations[1:]}=={str(tmp_path/'absent'),str(tmp_path/'present')}
     assert all(args[1:3]==('source',123) for args in observations)
     assert job['known_availability_changed']==3 and store.events==[]
+
+
+def test_runtime_invalidated_unknowns_remain_in_metadata_poll(tmp_path,monkeypatch):
+    store=Store(tmp_path);owner=DiscoveryCoordinator(store,None);requests=[]
+    store.query_findings_page=lambda **kw:SimpleNamespace(rows=[
+        {'source':{'path':str(tmp_path/'invalidated.env')},'state':'unknown'},
+        {'source':{'path':str(tmp_path/'resolved.env')},'state':'resolved'}],next_cursor=None)
+    def call(request,**kwargs):
+        requests.append(request)
+        return {'capability':'descriptor-metadata','entries':[metadata_entry(tmp_path,p,'absent') for p in request['paths']]}
+    monkeypatch.setattr(mounted_worker,'call',call)
+    owner._known_availability({'kind':'local','root':str(tmp_path),'id':'source','exclusions':[]},{},{'exclusions':[]},lambda:False)
+    assert requests and requests[0]['paths']==[str(tmp_path/'invalidated.env')]
+    assert store.events==[('invalidated.env','deleted')]

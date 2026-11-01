@@ -836,3 +836,55 @@ def test_changed_content_precedes_periodic_refresh_without_promoting_old_pending
         assert rows[0][0] == periodic
     finally:
         connection.close()
+
+
+def test_unexecuted_page_entries_keep_age_under_sustained_arrivals():
+    bucket, paths = same_bucket_paths(8)
+    inventory, connection = partitions(bucket)
+    def row(path,priority=0):return (path,'one','file','sig','pending',priority,1,1,None,None)
+    try:
+        inventory.inventory_put([row(p) for p in paths[:3]])
+        oldest=paths[1]
+        before=connection.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(oldest,)).fetchone()[0]
+        for arrival in paths[3:]:
+            page,_=inventory.inventory_page('one','file','pending',limit=100,prefer_priority=False,admit=False)
+            executed=page[0][0]
+            inventory.inventory_admitted([executed])
+            inventory.inventory_set(executed,'inspected')
+            inventory.inventory_put([row(arrival)])
+            if executed==oldest:break
+            assert connection.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(oldest,)).fetchone()[0]==before
+        assert executed==oldest, 'page selection aged work that the scan budget never executed'
+    finally:connection.close()
+
+
+def test_same_version_runtime_invalidated_work_reenters_refresh_without_trusting_content(tmp_path):
+    from leakguard_vault import EncryptedScanStore
+    store=EncryptedScanStore.create(tmp_path/'invalidated.lgo','synthetic-invalidated-version')
+    path='/synthetic/invalidated.env';source={'id':'one','root':'/synthetic'}
+    try:
+        store.inventory_put([(path,'one','file','same','inspected',0,1,1,None,'old-evidence')])
+        store.invalidate_location(source,int(store._partitions.bucket(path)[1:],16))
+        assert not store.inventory_observed(path,'other',1,'file','same',1)
+        assert not store.inventory_observed(path,'one',2,'file','same',1)
+        assert store.inventory_observed(path,'one',1,'file','same',1)
+        rows,_=store.inventory_page('one','file','pending',queue_class='refresh')
+        assert rows and rows[0][0]==path and rows[0][4]=='pending'
+        assert store.inventory_counts()=={'pending':1}
+    finally:store.close()
+
+
+def test_interrupted_page_reload_rejects_changed_source_generation_and_state(tmp_path):
+    from leakguard_vault import EncryptedScanStore
+    path=tmp_path/'remainder.lgo';phrase='synthetic-remainder-fences'
+    store=EncryptedScanStore.create(path,phrase)
+    paths=[f'/synthetic/remainder-{number}' for number in range(4)]
+    store.inventory_put([(p,'one','file','sig','pending',200,7,1,None,None) for p in paths])
+    store.checkpoint();store.close();store=EncryptedScanStore.open(path,phrase)
+    try:
+        assert len(store.inventory_selected('one','file','pending',paths,7))==4
+        assert store.inventory_selected('other','file','pending',paths,7)==[]
+        assert store.inventory_selected('one','file','pending',paths,8)==[]
+        store.inventory_set(paths[0],'protected')
+        assert [r[0] for r in store.inventory_selected('one','file','pending',paths,7)]==paths[1:]
+    finally:store.close()

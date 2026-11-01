@@ -162,3 +162,84 @@ def test_priority_traffic_cannot_reset_oldest_work_rotation(tmp_path):
                 elif step%10!=5:assert rows[0][0]==hot
             assert old in fair, 'priority cursor reset starved another hash bucket'
     finally:owner.close();store.close()
+
+
+@__import__('pytest').mark.parametrize('cutoff',['byte-budget','scanner-budget'])
+def test_byte_truncated_fair_page_executes_its_tail_before_new_priority_traffic(tmp_path,monkeypatch,cutoff):
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    from leakguard_core.api import ScanConfig
+    from leakguard_core import backends
+    from leakguard_host.protection import defaults
+    from leakguard_vault.partitions import EncryptedPartitions
+    groups={}
+    for number in range(4096):
+        path=tmp_path/f'input-{number:04}.txt'
+        group=groups.setdefault(EncryptedPartitions.bucket(str(path)),[]);group.append(path)
+        if len(group)==6:paths=sorted(group);break
+    for path in paths:path.write_text('ordinary synthetic budget control')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-execution-fairness')
+    source={'id':'source','root':str(tmp_path),'kind':'local','exclusions':[]}
+    job={'inventory_generation':1,'inventory_complete':True,'slices':0,'content_cursor':0,'files_scanned':0,'new_findings':0,'reconcile_cursor':256}
+    def row(path,priority):
+        # Model metadata admission exhausting 32 MiB after one file; actual
+        # scanner inputs remain small, real, source-bound regular files.
+        return (str(path),'source','file',_sig(path.stat()),'pending',priority,1,20_000_000 if cutoff=='byte-budget' else path.stat().st_size,None,None)
+    store.inventory_put([row(path,200) for path in paths[:3]])
+    child=store._partitions.get(EncryptedPartitions.bucket(str(paths[0])))
+    age=child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(paths[1]),)).fetchone()[0]
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}))
+    monkeypatch.setattr('leakguard_core.scan_policy.runtime_identity',lambda *a,**k:('synthetic-runtime',True))
+    monkeypatch.setattr(backends,'detect',lambda *a,**k:())
+    if cutoff=='scanner-budget':
+        from dataclasses import replace
+        from leakguard_core.api import Scanner
+        from leakguard_core.models import CoverageIssue,ErrorCode
+        original=Scanner.scan_within
+        def partial(self,root,files,**kwargs):
+            report=original(self,root,files[:1],**kwargs)
+            from leakguard_core.scan_policy import evaluate
+            issues=(*report.issues,CoverageIssue(ErrorCode.BUDGET_EXHAUSTED,required=True))
+            coverage,decision=evaluate(report.results,policy=kwargs['policy'],policy_id=report.policy_id,enumeration_complete=False,issues=issues)
+            return replace(report,coverage=coverage,decision=decision,issues=issues)
+        monkeypatch.setattr(Scanner,'scan_within',partial)
+    try:
+        owner.tick(source,job,defaults(),cancel=lambda:False)
+        assert job['files_scanned']==1
+        child=store._partitions.get(EncryptedPartitions.bucket(str(paths[0])))
+        assert child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(paths[1]),)).fetchone()[0]==age
+        for step in (1,2):
+            store.inventory_put([row(paths[step+2],0)])
+            job['slices']=step
+            owner.tick(source,job,defaults(),cancel=lambda:False)
+        child=store._partitions.get(EncryptedPartitions.bucket(str(paths[0])))
+        assert all(child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(path),)).fetchone()[0]=='inspected' for path in paths[:3])
+        assert child.conn.execute('SELECT status FROM inventory WHERE path=?',(str(paths[3]),)).fetchone()[0]=='pending'
+    finally:owner.close();store.close()
+
+
+def test_deadline_before_execution_retains_page_without_aging_unattempted_work(tmp_path,monkeypatch):
+    from contextlib import contextmanager
+    from leakguard_host.discovery import DiscoveryCoordinator,_sig
+    from leakguard_core.api import ScanConfig
+    from leakguard_host.protection import defaults
+    file=tmp_path/'ordinary.txt';file.write_text('ordinary synthetic deadline control')
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-deadline-fairness')
+    store.inventory_put([(str(file),'source','file',_sig(file.stat()),'pending',200,1,file.stat().st_size,None,None)])
+    source={'id':'source','root':str(tmp_path),'kind':'local','exclusions':[]}
+    job={'inventory_generation':1,'inventory_complete':True,'slices':0,'content_cursor':0,'files_scanned':0,'new_findings':0,'reconcile_cursor':256}
+    owner=DiscoveryCoordinator(store,ScanConfig.from_mapping({}));owner.identity=lambda settings:{'runtime_id':'synthetic','policy_id':'synthetic'}
+    clock=[0.];monkeypatch.setattr('leakguard_host.discovery.time.monotonic',lambda:clock[0])
+    @contextmanager
+    def delayed_scanner(view):
+        clock[0]=11.
+        yield None
+    owner.scanner=delayed_scanner
+    try:
+        child=store._partitions.get(store._partitions.bucket(str(file)))
+        age=child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(file),)).fetchone()[0]
+        owner.tick(source,job,defaults(),cancel=lambda:False)
+        assert job['files_scanned']==0 and job['content_remainder']==[str(file)]
+        child=store._partitions.get(store._partitions.bucket(str(file)))
+        assert child.conn.execute('SELECT sequence FROM inventory_admissions WHERE path=?',(str(file),)).fetchone()[0]==age
+        assert store.inventory_counts()=={'pending':1}
+    finally:owner.close();store.close()

@@ -252,18 +252,21 @@ class DiscoveryCoordinator:
             'filtered_fallback_queries':1,'new_arrivals':'monotonic-clock',
             'known_availability_page_rows':25,'known_availability_seconds':2}
         key='inventory_cursor' if kind=='directory' else 'content_cursor'
+        # Local execution acknowledges only the attempted prefix. Other
+        # consumers retain the original immediate-admission API contract.
+        admission={'admit':False} if source.get('kind')=='local' else {}
         if job['slices']%10==5:
             refresh_key='refresh_'+key
             rows,cursor=self.store.inventory_page(source['id'],kind,status,
                 cursor=job.get(refresh_key,0),limit=limit,prefer_priority=False,
-                queue_class='refresh')
+                queue_class='refresh',**admission)
             job[refresh_key]=cursor
             if rows:return rows
         # Priority selections must not reset the oldest-work rotation.
         priority=job['slices']%10 not in {0,5}
         selected_key=key if priority else 'fair_'+key
         rows,cursor=self.store.inventory_page(source['id'],kind,status,
-            cursor=job.get(selected_key,0),limit=limit,prefer_priority=priority)
+            cursor=job.get(selected_key,0),limit=limit,prefer_priority=priority,**admission)
         job[selected_key]=cursor
         return rows
 
@@ -284,7 +287,7 @@ class DiscoveryCoordinator:
         paths=set();root=Path(source['root'])
         for row in page.rows:
             text=(row.get('source') or {}).get('path')
-            if row.get('state')!='active' or not isinstance(text,str):continue
+            if row.get('state') not in {'active','unknown'} or not isinstance(text,str):continue
             path=Path(text)
             if (path==root or '..' in path.parts or not path.is_absolute() or not path.is_relative_to(root)
                     or self._excluded(path,source,settings) or protected_store(path)):continue
@@ -356,6 +359,7 @@ class DiscoveryCoordinator:
                 continue
             job['empty_directory_pages']=0
             row=rows[0];path=Path(row[0]);old_cursor=json.loads(row[8]) if row[8] else None
+            if source['kind']=='local':self.store.inventory_admitted([row[0]])
             refresh=row[9] in {'metadata-refresh-during-backfill','metadata-version-refresh-during-backfill'}
             stream_key=(source['id'],str(path))
             if self._excluded(path,source,settings):
@@ -471,15 +475,23 @@ class DiscoveryCoordinator:
         if not job.get('inventory_complete'):self._enumerate(source,job,settings,cancel,min(deadline,time.monotonic()+2))
         scanned=0
         if settings['new_content']=='inspect' and not cancel():
-            rows=self.inventory_page(source,job,'file',('pending','changed'),limit=job.get('content_batch',100))
+            # Finish an interrupted selection before replacing it with new
+            # traffic. Persist paths only, and reload their current source and
+            # pending-state fences after every restart; never replay old rows.
+            rows=[]
+            if source['kind']=='local' and job.get('content_remainder'):
+                rows=self.store.inventory_selected(source['id'],'file',('pending','changed'),job['content_remainder'],job['inventory_generation'])
+            if not rows:rows=self.inventory_page(source,job,'file',('pending','changed'),limit=job.get('content_batch',100))
+            remaining=[row[0] for row in rows]
+            if source['kind']=='local':job['content_remainder']=remaining[:]
             groups=defaultdict(list);admitted=0
-            for row in rows:
+            for row in rows[:job.get('content_batch',100)]:
                 if self._excluded(Path(row[0]),source,settings):
-                    self.store.inventory_set(row[0],'excluded',detail='operator-exclusion');continue
+                    self.store.inventory_set(row[0],'excluded',detail='operator-exclusion');remaining.remove(row[0]);continue
                 if protected_store(Path(row[0])):
-                    self.store.inventory_set(row[0],'protected',detail='encrypted-store-inventory-only');continue
+                    self.store.inventory_set(row[0],'protected',detail='encrypted-store-inventory-only');remaining.remove(row[0]);continue
                 if row[7]>self.config.to_mapping()['max_file_bytes']:
-                    self.store.inventory_set(row[0],'unsupported',detail='file-size-limit');continue
+                    self.store.inventory_set(row[0],'unsupported',detail='file-size-limit');remaining.remove(row[0]);continue
                 if admitted+row[7]>32*1024*1024:break
                 groups[_bucket(row[0],'e')].append(row);admitted+=row[7]
             for bucket,files in groups.items():
@@ -487,6 +499,8 @@ class DiscoveryCoordinator:
                 with self.store.partition(bucket) as child:
                     view=_Evidence(child,self.store)
                     with self.scanner(view) as scanner:
+                        if source['kind']=='local':
+                            if cancel() or time.monotonic()>=deadline:break
                         limits=ScanLimits(deadline_seconds=8,max_files=100,max_file_bytes=self.config.to_mapping()['max_file_bytes'],max_report_bytes=4_000_000,detector_timeout_seconds=5)
                         if source['kind']=='mounted':
                             from .mounted_worker import call
@@ -508,18 +522,28 @@ class DiscoveryCoordinator:
                         job['last_slice_results']=len(report.results)
                         by_path={r[0]:r for r in files}
                         accepted={r.source.path for r in report.results}
+                        if source['kind']=='local':
+                            # A submitted batch may be cut off inside the
+                            # scanner. Only returned results prove per-file
+                            # execution; its unexecuted tail keeps its age.
+                            self.store.inventory_admitted([row[0] for row in files if row[0] in accepted])
+                            for path in accepted:remaining.remove(path)
+                        budget_cutoff=any(i.code.value in {'budget-exhausted','cancelled','input-limit','detector-output-limit'} for i in report.issues)
                         if not report.results:
                             job['content_batch']=max(1,job.get('content_batch',100)//2)
                         else:job['content_batch']=min(100,job.get('content_batch',100)+10)
                         for row in files:
                             if row[0] in accepted:continue
+                            if source['kind']=='local' and budget_cutoff:continue
                             try:previous=json.loads(row[9]) if row[9] else {}
                             except (ValueError,TypeError):previous={}
                             attempts=previous.get('attempts',0)+1
                             detail=json.dumps({'attempts':attempts,'issues':job['last_slice_issues'],'digest':previous.get('digest')})
                             state='inspection-error' if job.get('content_batch',100)==1 and attempts>=3 else 'pending'
                             self.store.inventory_set(row[0],state,detail=detail)
-                            if state=='inspection-error':view.invalidate_scope(row[0],reason='incomplete-scan')
+                            if state=='inspection-error':
+                                view.invalidate_scope(row[0],reason='incomplete-scan')
+                                if source['kind']=='local':remaining.remove(row[0])
                         for result in report.results:
                             path=result.source.path
                             codes=sorted({i.code.value for i in result.issues})
@@ -532,6 +556,7 @@ class DiscoveryCoordinator:
                             detail=json.dumps({'digest':result.content.digest if result.content else None,'runtime':result.identity.runtime_id,'policy':result.identity.policy_id,'observed_at':result.observed_at.isoformat(),'issues':sorted({i.code.value for i in result.issues}),'omissions':omitted,'attempts':attempts,'previous_failure_codes':previous.get('issues',[]),'retry_same_digest':previous.get('digest')==result.content.digest if previous.get('digest') and result.content else None})
                             self.store.inventory_set(path,state,detail=detail);scanned+=1
                         job['new_findings']+=view.new_findings
+            if source['kind']=='local':job['content_remainder']=remaining
         if job.get('inventory_complete') and job.get('reconcile_cursor',0)<256:
             job['reconcile_cursor']=_advance_partitions(job.get('reconcile_cursor',0),lambda index:self.store.reconcile_location(source,job['inventory_generation'],index))
         job['files_scanned']+=scanned
