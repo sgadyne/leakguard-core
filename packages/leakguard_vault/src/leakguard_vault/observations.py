@@ -382,6 +382,17 @@ class EncryptedScanStore:
             self._dirty = True
             return self._partitions.inventory_put(rows)
 
+    def inventory_observed(self, path, source_id, generation, kind, signature, size):
+        with self._mutex:
+            self._ensure_open()
+            try:
+                changed=self._partitions.inventory_observed(path, source_id, generation, kind, signature, size)
+            except BaseException:
+                self._dirty=True
+                raise
+            if changed:self._dirty=True
+            return changed
+
     def inventory_page(self, *args, **kwargs):
         with self._mutex:
             self._ensure_open();self._dirty=True

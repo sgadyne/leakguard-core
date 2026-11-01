@@ -347,14 +347,14 @@ class RefreshQueueEvidence(unittest.TestCase):
         ])
         rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
         self.assertEqual((rows[paths[0]][8], rows[paths[0]][9]), ('cursor', tag))
-        self.assertEqual(rows[paths[1]][9], tag)  # Changed known version is refresh work.
+        self.assertEqual(rows[paths[1]][9], 'metadata-version-refresh-during-backfill')
         for path in (paths[2], paths[3], paths[5], paths[6], paths[7]):
             self.assertIsNone(rows[path][9])
         self.assertEqual(rows[paths[4]][9], 'new-detail')
         self.assertIsNone(rows[paths[3]][8])  # New generation cannot inherit cursor.
         filtered, _ = inventory.inventory_page('one', 'directory', 'enumerating',
                                                 limit=10, queue_class='refresh')
-        self.assertCountEqual([row[0] for row in filtered], [paths[0], paths[1]])
+        self.assertEqual([row[0] for row in filtered], [paths[1]])
 
     def test_refresh_parent_does_not_promote_existing_active_backfill(self):
         bucket, paths = same_bucket_paths(7)
@@ -379,12 +379,13 @@ class RefreshQueueEvidence(unittest.TestCase):
         self.assertEqual([(rows[path][4], rows[path][8], rows[path][9]) for path in paths[:3]],
                          [('enumerating', 'cursor', None), ('enumerating', 'cursor', 'backfill-progress'),
                           ('enumerating', 'cursor', tag)])
-        self.assertTrue(all(rows[path][9] == tag for path in paths[3:]))
+        self.assertEqual(rows[paths[3]][9], 'metadata-version-refresh-during-backfill')
+        self.assertTrue(all(rows[path][9] == tag for path in paths[4:]))
         self.assertEqual(rows[paths[4]][1], 'two')
         self.assertIsNone(rows[paths[5]][8])
         selected, _ = inventory.inventory_page('one', 'directory', 'enumerating',
                                                 limit=10, queue_class='refresh')
-        self.assertCountEqual([row[0] for row in selected], [paths[2], paths[3], paths[5], paths[6]])
+        self.assertEqual([row[0] for row in selected], [paths[3]])
         self.assertTrue(all(len(row) == 10 for row in selected))
 
     def test_known_changed_active_directory_version_is_refresh_work(self):
@@ -414,7 +415,8 @@ class RefreshQueueEvidence(unittest.TestCase):
         ])
         rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
         for path in paths[:2]:
-            self.assertEqual((rows[path][4], rows[path][8], rows[path][9]), ('enumerating', None, tag))
+            self.assertEqual((rows[path][4], rows[path][8], rows[path][9]),
+                             ('enumerating', None, 'metadata-version-refresh-during-backfill'))
         for path in paths[2:7]:
             self.assertIsNone(rows[path][9])
         self.assertEqual((rows[paths[7]][4], rows[paths[7]][9]), ('excluded', 'operator-exclusion'))
@@ -423,6 +425,106 @@ class RefreshQueueEvidence(unittest.TestCase):
                                                 limit=10, queue_class='refresh')
         self.assertCountEqual([row[0] for row in selected], paths[:2])
         self.assertTrue(all(len(row) == 10 for row in selected))
+
+    def test_observed_only_updates_existing_exact_source_generation_and_kind(self):
+        from leakguard_core.scan_store import StateError
+        bucket, paths = same_bucket_paths(3)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        events = []
+        evidence = 'e' + bucket[1:]
+        inventory.cache[evidence] = (SimpleNamespace(record_event=lambda path, kind: events.append((path, kind))), [], [0])
+        original = [(paths[0], 'one', 'file', 'before', 'inspected', 17, 7, 10, None, 'old-result'),
+                    (paths[1], 'one', 'directory', 'before', 'enumerated', 23, 7, 10, None, 'metadata-only')]
+        inventory.inventory_put(original)
+        clock = connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0]
+        self.assertFalse(inventory.inventory_observed(paths[0], 'one', 7, 'file', 'before', 10))
+        for path, source, generation, kind in ((paths[2], 'one', 7, 'file'),
+                                               (paths[0], 'two', 7, 'file'),
+                                               (paths[0], 'one', 8, 'file'),
+                                               (paths[0], 'one', 7, 'directory')):
+            self.assertFalse(inventory.inventory_observed(path, source, generation, kind, 'after', 20))
+        self.assertEqual(events, [])
+        self.assertEqual(connection.execute('SELECT count(*) FROM inventory').fetchone()[0], 2)
+        self.assertEqual(connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0], clock)
+        self.assertTrue(inventory.inventory_observed(paths[0], 'one', 7, 'file', 'after', 20))
+        self.assertTrue(inventory.inventory_observed(paths[1], 'one', 7, 'directory', 'after', 20))
+        rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
+        self.assertEqual((rows[paths[0]][3], rows[paths[0]][4], rows[paths[0]][5], rows[paths[0]][7], rows[paths[0]][9]),
+                         ('after', 'changed', 17, 20, 'content-refresh-during-backfill'))
+        self.assertEqual((rows[paths[1]][3], rows[paths[1]][4], rows[paths[1]][5], rows[paths[1]][7], rows[paths[1]][9]),
+                         ('after', 'enumerating', 23, 20, 'metadata-version-refresh-during-backfill'))
+        self.assertCountEqual(events, [(paths[0], 'changed'), (paths[1], 'changed')])
+        self.assertEqual(connection.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0], clock)
+        for signature, size in ((None, 1), ('after', -1), ('after', True)):
+            with self.assertRaises(StateError):
+                inventory.inventory_observed(paths[0], 'one', 7, 'file', signature, size)
+
+    def test_version_refresh_outranks_periodic_across_bounded_bucket_set(self):
+        from leakguard_vault import _envelope
+        paths_by_bucket = {}
+        for number in range(4096):
+            path = f'/synthetic/version-priority-{number}'
+            paths_by_bucket.setdefault(EncryptedPartitions.bucket(path), path)
+            if len(paths_by_bucket) == 9:
+                break
+        buckets = sorted(paths_by_bucket)
+        inventory = EncryptedPartitions.__new__(EncryptedPartitions)
+        label = _envelope.canonical(['one', 'directory', 'enumerating']).decode()
+        inventory.catalog = {bucket: {'counts': {label: 1}, 'priorities': {label: 0}} for bucket in buckets}
+        inventory.cache = OrderedDict()
+        stores = {}
+        for index, bucket in enumerate(buckets):
+            connection = sqlite3.connect(':memory:')
+            self.addCleanup(connection.close)
+            connection.executescript(_SCHEMA)
+            detail = ('metadata-version-refresh-during-backfill' if index in (7, 8)
+                      else 'metadata-refresh-during-backfill')
+            connection.execute('INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (paths_by_bucket[bucket], 'one', 'directory', bucket, 'enumerating', 0, 1, 0, None, detail))
+            connection.commit()
+            stores[bucket] = SimpleNamespace(conn=connection)
+        inventory.get = stores.__getitem__
+        rows, cursor = inventory.inventory_page('one', 'directory', 'enumerating', cursor=0, limit=5,
+                                                 prefer_priority=False, queue_class='refresh')
+        self.assertEqual([row[0] for row in rows], [paths_by_bucket[buckets[7]]])
+        self.assertEqual(cursor, (int(buckets[7][1:], 16) + 1) % 256)
+        # The ninth bucket is outside the first bounded candidate set.
+        self.assertNotEqual(rows[0][0], paths_by_bucket[buckets[8]])
+        # An urgent row outside the eight-bucket set must not enlarge the cap.
+        changed = stores[buckets[7]].conn
+        changed.execute('UPDATE inventory SET detail=?', ('metadata-refresh-during-backfill',))
+        changed.commit()
+        fallback, _ = inventory.inventory_page('one', 'directory', 'enumerating', cursor=0, limit=1,
+                                                prefer_priority=False, queue_class='refresh')
+        self.assertEqual(fallback[0][0], paths_by_bucket[buckets[0]])
+
+    def test_version_tag_precedes_periodic_in_the_same_bucket(self):
+        bucket, paths = same_bucket_paths(3)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        periodic = 'metadata-refresh-during-backfill'
+        version = 'metadata-version-refresh-during-backfill'
+        inventory.inventory_put([(paths[0], 'one', 'directory', 'a', 'enumerating', 0, 1, 0, None, periodic),
+                                 (paths[1], 'one', 'directory', 'b', 'enumerating', 0, 1, 0, None, version),
+                                 (paths[2], 'one', 'directory', 'c', 'enumerating', 0, 1, 0, None, periodic)])
+        selected, _ = inventory.inventory_page('one', 'directory', 'enumerating', limit=3,
+                                                prefer_priority=False, queue_class='refresh')
+        self.assertEqual([row[0] for row in selected], [paths[1]])
+        self.assertTrue(all(len(row) == 10 for row in selected))
+
+    def test_version_tag_survives_unchanged_parent_rediscovery(self):
+        bucket, paths = same_bucket_paths(2)
+        inventory, connection = partitions(bucket)
+        self.addCleanup(connection.close)
+        version = 'metadata-version-refresh-during-backfill'
+        inventory.inventory_put([(paths[0], 'one', 'directory', 'same', 'enumerating', 0, 1, 0, 'cursor', version),
+                                 (paths[1], 'one', 'directory', 'same', 'enumerating', 0, 1, 0, 'cursor', None)])
+        inventory.inventory_put([(paths[0], 'one', 'directory', 'same', 'enumerating', 0, 1, 0, None, None),
+                                 (paths[1], 'one', 'directory', 'same', 'enumerating', 0, 1, 0, None, version)])
+        rows = {row[0]: row for row in connection.execute('SELECT * FROM inventory')}
+        self.assertEqual((rows[paths[0]][8], rows[paths[0]][9]), ('cursor', version))
+        self.assertEqual((rows[paths[1]][8], rows[paths[1]][9]), ('cursor', None))
 
     def test_refresh_filter_is_exact_and_scoped_by_source_kind_and_state(self):
         bucket, paths = same_bucket_paths(7)
@@ -584,5 +686,45 @@ def test_failed_arrival_journal_replays_without_row_or_clock_change(tmp_path):
         assert child.conn.execute('SELECT sequence FROM inventory_admission_clock').fetchone()[0] == before
         assert child.conn.execute('SELECT path FROM inventory').fetchall() == [(old,)]
         assert child.conn.execute('SELECT path,sequence FROM inventory_admissions').fetchall() == [(old, before)]
+    finally:
+        store.close()
+
+
+def test_observed_file_change_requeues_and_marks_existing_finding_unknown(tmp_path):
+    import json
+    from leakguard_vault import EncryptedScanStore
+    path = tmp_path / 'observed.lgo'
+    phrase = 'synthetic-observed-version'
+    bucket, (file_path,) = same_bucket_paths(1)
+    evidence = 'e' + bucket[1:]
+    store = EncryptedScanStore.create(path, phrase)
+    try:
+        store.inventory_put([(file_path, 'one', 'file', 'before', 'inspected', 7, 1, 12, None, 'complete')])
+        with store.partition(evidence) as child:
+            payload = json.dumps({'state': 'active'})
+            with child.conn:
+                child.conn.execute('INSERT INTO finding_state VALUES(?,?,?,?,?,?)',
+                                   ('key', 'finding', 'active', 'literal-password', file_path, payload))
+                child.conn.execute('INSERT INTO finding_current VALUES(?,?,?)', ('key', 'finding', payload))
+        store.checkpoint()
+        assert not store.inventory_observed(file_path, 'other', 1, 'file', 'after', 14)
+        with store.partition(evidence) as child:
+            assert child.conn.execute('SELECT state FROM finding_state').fetchone()[0] == 'active'
+        assert store.inventory_observed(file_path, 'one', 1, 'file', 'after', 14)
+        with store.partition(evidence) as child:
+            assert child.conn.execute('SELECT state FROM finding_state').fetchone()[0] == 'unknown'
+        rows, _ = store.inventory_page('one', 'file', ('pending', 'changed'),
+                                       limit=1, queue_class='refresh')
+        assert len(rows) == 1 and len(rows[0]) == 10 and rows[0][0] == file_path and rows[0][4] == 'changed'
+        store.checkpoint()
+    finally:
+        store.close()
+    store = EncryptedScanStore.open(path, phrase)
+    try:
+        with store.partition(evidence) as child:
+            assert child.conn.execute('SELECT state FROM finding_state').fetchone()[0] == 'unknown'
+        rows, _ = store.inventory_page('one', 'file', ('pending', 'changed'),
+                                       limit=1, queue_class='refresh')
+        assert len(rows) == 1 and rows[0][0] == file_path
     finally:
         store.close()

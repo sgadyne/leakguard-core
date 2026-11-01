@@ -226,7 +226,7 @@ class EncryptedPartitions:
             journal_start, size_start = len(journal), journal_size[0]
             try:
                 with store.conn:
-                    store.conn.executemany('''INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET location=excluded.location,kind=excluded.kind,signature=excluded.signature,status=CASE WHEN inventory.signature=excluded.signature AND inventory.kind='directory' AND inventory.generation=excluded.generation AND inventory.status IN ('enumerated','alias','inaccessible','excluded') THEN inventory.status WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.status WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='file' AND excluded.kind='file' AND inventory.status IN ('pending','changed') AND excluded.status='pending' AND excluded.detail='content-refresh-during-backfill' THEN inventory.status WHEN inventory.signature IS NOT excluded.signature AND excluded.status='pending' THEN 'changed' ELSE excluded.status END,priority=excluded.priority,generation=excluded.generation,size=excluded.size,cursor=CASE WHEN inventory.kind='directory' AND inventory.status='enumerating' AND excluded.status='enumerating' AND inventory.signature=excluded.signature AND inventory.generation=excluded.generation AND excluded.cursor IS NULL THEN inventory.cursor ELSE excluded.cursor END,detail=CASE WHEN inventory.signature IS NOT NULL AND excluded.signature IS NOT NULL AND inventory.signature<>excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status='enumerating' AND excluded.status='enumerating' THEN 'metadata-refresh-during-backfill' WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status='enumerating' AND excluded.status='enumerating' AND excluded.detail='metadata-refresh-during-backfill' THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status='enumerating' AND excluded.status='enumerating' AND inventory.detail='metadata-refresh-during-backfill' AND excluded.detail IS NULL THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='file' AND excluded.kind='file' AND inventory.status IN ('pending','changed') AND excluded.status='pending' AND excluded.detail='content-refresh-during-backfill' THEN inventory.detail ELSE excluded.detail END''', group)
+                    store.conn.executemany('''INSERT INTO inventory VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET location=excluded.location,kind=excluded.kind,signature=excluded.signature,status=CASE WHEN inventory.signature=excluded.signature AND inventory.kind='directory' AND inventory.generation=excluded.generation AND inventory.status IN ('enumerated','alias','inaccessible','excluded') THEN inventory.status WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.status WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='file' AND excluded.kind='file' AND inventory.status IN ('pending','changed') AND excluded.status='pending' AND excluded.detail='content-refresh-during-backfill' THEN inventory.status WHEN inventory.signature IS NOT excluded.signature AND excluded.status='pending' THEN 'changed' ELSE excluded.status END,priority=excluded.priority,generation=excluded.generation,size=excluded.size,cursor=CASE WHEN inventory.kind='directory' AND inventory.status='enumerating' AND excluded.status='enumerating' AND inventory.signature=excluded.signature AND inventory.generation=excluded.generation AND excluded.cursor IS NULL THEN inventory.cursor ELSE excluded.cursor END,detail=CASE WHEN inventory.signature IS NOT NULL AND excluded.signature IS NOT NULL AND inventory.signature<>excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status='enumerating' AND excluded.status='enumerating' THEN 'metadata-version-refresh-during-backfill' WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status='enumerating' AND excluded.status='enumerating' AND excluded.detail IN ('metadata-refresh-during-backfill','metadata-version-refresh-during-backfill') THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='directory' AND excluded.kind='directory' AND inventory.generation=excluded.generation AND inventory.status='enumerating' AND excluded.status='enumerating' AND inventory.detail IN ('metadata-refresh-during-backfill','metadata-version-refresh-during-backfill') AND excluded.detail IS NULL THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.kind='file' AND inventory.status IN ('inspected','inspected-with-omissions','unsupported','protected','remote-only','excluded') AND excluded.status='pending' THEN inventory.detail WHEN inventory.signature=excluded.signature AND inventory.location=excluded.location AND inventory.kind='file' AND excluded.kind='file' AND inventory.status IN ('pending','changed') AND excluded.status='pending' AND excluded.detail='content-refresh-during-backfill' THEN inventory.detail ELSE excluded.detail END''', group)
                     # New arrivals join behind already-admitted work. Legacy rows
                     # with no admission remain sequence zero until first admitted.
                     # Insertions and their stamps commit or roll back together.
@@ -240,12 +240,36 @@ class EncryptedPartitions:
                 journal_size[0] = size_start
                 raise
 
+    def inventory_observed(self, path, source_id, generation, kind, signature, size):
+        """Requeue only a previously inventoried version within the same source."""
+        if (type(path) is not str or not path or len(path)>4096
+                or type(source_id) is not str or not source_id
+                or type(generation) is not int or generation<0
+                or type(kind) is not str or kind not in {'directory','file'}
+                or type(signature) is not str or not signature
+                or type(size) is not int or size<0):
+            raise StateError('state-data-invalid')
+        bucket=self.bucket(path)
+        if bucket not in self.catalog and bucket not in self.cache:
+            return False
+        row=self.get(bucket).conn.execute(
+            'SELECT * FROM inventory WHERE path=? AND location=? AND generation=? AND kind=?',
+            (path,source_id,generation,kind)).fetchone()
+        if row is None or row[3]==signature:
+            return False
+        status='enumerating' if kind=='directory' else 'pending'
+        detail=('metadata-version-refresh-during-backfill' if kind=='directory'
+                else 'content-refresh-during-backfill')
+        self.inventory_put([(path,source_id,kind,signature,status,row[5],generation,size,None,detail)])
+        return True
+
     def inventory_page(self, location, kind, status, *, cursor=0, limit=100,prefer_priority=True,queue_class=None):
         if queue_class is not None and (queue_class != 'refresh' or kind not in {'directory','file'}):
             raise StateError('state-data-invalid')
-        refresh_detail = ({'directory':'metadata-refresh-during-backfill',
-                           'file':'content-refresh-during-backfill'}[kind]
-                          if queue_class == 'refresh' else None)
+        refresh_details = ((('metadata-version-refresh-during-backfill',
+                              'metadata-refresh-during-backfill') if kind=='directory'
+                             else ('content-refresh-during-backfill',))
+                            if queue_class == 'refresh' else ())
         states=(status,) if isinstance(status,str) else tuple(status)
         placeholders=','.join('?' for _ in states)
         candidates=[]
@@ -259,21 +283,39 @@ class EncryptedPartitions:
                 priority=min(priorities) if priorities else None
             else:continue
             if priority is not None:candidates.append((priority if prefer_priority else 0,(index-cursor)%256,index))
+        selected=None
         for _,_,index in sorted(candidates)[:8]:
             store=self.get(f'i{index:02x}')
             order='inventory.priority,inventory.path' if prefer_priority else 'coalesce(admission.sequence,0),inventory.path'
-            detail_filter = ' AND inventory.detail=?' if refresh_detail is not None else ''
-            parameters = (location,kind,*states,*((refresh_detail,) if refresh_detail is not None else ()),limit)
+            detail_filter = ' AND inventory.detail IN ('+','.join('?' for _ in refresh_details)+')' if refresh_details else ''
+            if len(refresh_details)==2:
+                # A known version change wins over periodic refresh across the
+                # same bounded set of eight buckets; preserve fairness within it.
+                order='CASE WHEN inventory.detail=? THEN 0 ELSE 1 END,'+order
+            parameters = (location,kind,*states,*refresh_details,
+                          *((refresh_details[0],) if len(refresh_details)==2 else ()),limit)
             rows=store.conn.execute('SELECT inventory.* FROM inventory LEFT JOIN inventory_admissions AS admission ON admission.path=inventory.path WHERE inventory.location=? AND inventory.kind=? AND inventory.status IN ('+placeholders+')'+detail_filter+' ORDER BY '+order+' LIMIT ?',parameters).fetchall()
             if rows:
-                # Admission is scheduling evidence, never inspection evidence.
-                # Record priority selections too, so a repeatedly active row
-                # cannot monopolize the reserved fair slice in its hash bucket.
-                with store.conn:
-                    store.conn.execute('UPDATE inventory_admission_clock SET sequence=sequence+1 WHERE id=1')
-                    sequence=store.conn.execute('SELECT sequence FROM inventory_admission_clock WHERE id=1').fetchone()[0]
-                    store.conn.executemany('INSERT INTO inventory_admissions VALUES(?,?) ON CONFLICT(path) DO UPDATE SET sequence=excluded.sequence',[(row[0],sequence) for row in rows])
-                return rows,(index+1)%256
+                # A mixed page cannot let periodic rows consume capacity while
+                # version-change candidates remain in the bounded set.
+                if len(refresh_details)==2:
+                    urgent=[row for row in rows if row[9]==refresh_details[0]]
+                    if urgent:
+                        selected=(index,urgent)
+                        break
+                    if selected is None:selected=(index,rows)
+                else:
+                    selected=(index,rows)
+                    break
+        if selected is not None:
+            index,rows=selected
+            store=self.get(f'i{index:02x}')
+            # Admission is scheduling evidence, never inspection evidence.
+            with store.conn:
+                store.conn.execute('UPDATE inventory_admission_clock SET sequence=sequence+1 WHERE id=1')
+                sequence=store.conn.execute('SELECT sequence FROM inventory_admission_clock WHERE id=1').fetchone()[0]
+                store.conn.executemany('INSERT INTO inventory_admissions VALUES(?,?) ON CONFLICT(path) DO UPDATE SET sequence=excluded.sequence',[(row[0],sequence) for row in rows])
+            return rows,(index+1)%256
         return [],(cursor+8)%256
 
     def inventory_set(self, path, status, *, cursor=None, detail=None,signature=None):
