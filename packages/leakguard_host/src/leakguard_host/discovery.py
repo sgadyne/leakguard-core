@@ -259,9 +259,12 @@ class DiscoveryCoordinator:
                 queue_class='refresh')
             job[refresh_key]=cursor
             if rows:return rows
+        # Priority selections must not reset the oldest-work rotation.
+        priority=job['slices']%10 not in {0,5}
+        selected_key=key if priority else 'fair_'+key
         rows,cursor=self.store.inventory_page(source['id'],kind,status,
-            cursor=job[key],limit=limit,prefer_priority=job['slices']%10 not in {0,5})
-        job[key]=cursor
+            cursor=job.get(selected_key,0),limit=limit,prefer_priority=priority)
+        job[selected_key]=cursor
         return rows
 
     def _known_availability(self,source,job,settings,cancel):
@@ -337,8 +340,8 @@ class DiscoveryCoordinator:
             if cancel():break
             if item['status']=='present':continue
             with self.store.partition(_bucket(item['path'],'e')) as child:
-                child.set_deadline(None)
-                child.record_event(item['path'],'deleted' if item['status']=='absent' else 'changed')
+                view=_Evidence(child,self.store)
+                view.record_event(item['path'],'deleted' if item['status']=='absent' else 'changed')
             job['known_availability_unknown']=job.get('known_availability_unknown',0)+1
 
     def _enumerate(self,source,job,settings,cancel,deadline):

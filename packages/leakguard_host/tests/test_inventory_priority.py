@@ -42,8 +42,8 @@ def test_refresh_slot_falls_back_without_skipping_regular_cursor():
     assert owner.inventory_page({'id':'source'},job,'directory','enumerating',limit=1)==[('backlog',)]
     assert len(store.calls)==2
     assert store.calls[0][1]['cursor']==0 and store.calls[0][1]['queue_class']=='refresh'
-    assert store.calls[1][1]['cursor']==9 and store.calls[1][1]['prefer_priority'] is False
-    assert job['refresh_inventory_cursor']==8 and job['inventory_cursor']==17
+    assert store.calls[1][1]['cursor']==0 and store.calls[1][1]['prefer_priority'] is False
+    assert job['refresh_inventory_cursor']==8 and job['fair_inventory_cursor']==17 and job['inventory_cursor']==9
     assert job['navigation_profile']['version']=='bounded-refresh-v3'
     job['slices']=6;store.calls.clear()
     owner.inventory_page({'id':'source'},job,'file',('pending','changed'),limit=25)
@@ -133,4 +133,30 @@ def test_unstable_remote_refresh_retains_slot_and_tags_nested_directory(tmp_path
             with store.partition(store._partitions.bucket(path,'i')) as child:
                 row=child.conn.execute('SELECT * FROM inventory WHERE path=?',(path,)).fetchone()
             assert row[4]=='enumerating' and row[8] is None and row[9]=='metadata-refresh-during-backfill'
+    finally:owner.close();store.close()
+
+
+def test_priority_traffic_cannot_reset_oldest_work_rotation(tmp_path):
+    from leakguard_host.discovery import DiscoveryCoordinator
+    # Keep a priority row permanently active, as with a wide directory or a
+    # continuing high-priority workload. Ordinary work lives in a later bucket.
+    groups={}
+    from leakguard_vault.partitions import EncryptedPartitions
+    for number in range(1000):
+        path=str(tmp_path/f'item-{number}')
+        groups.setdefault(EncryptedPartitions.bucket(path),path)
+    early,middle,late=sorted(groups)[10],sorted(groups)[64],sorted(groups)[-10]
+    hot,blocker,old=groups[early],groups[middle],groups[late]
+    store=EncryptedScanStore.create(tmp_path/'observations.lgo','synthetic-independent-fair-cursor')
+    owner=DiscoveryCoordinator(store,None);source={'id':'source'}
+    try:
+        for kind,state in [('directory','enumerating'),('file','pending')]:
+            store.inventory_put([(hot,'source',kind,'hot',state,0,1,1,None,None),(blocker,'source',kind,'blocker',state,100,1,1,None,None),(old,'source',kind,'old',state,200,1,1,None,None)])
+            job={'slices':0,'inventory_cursor':0,'content_cursor':0};fair=[]
+            for step in range(21):
+                job['slices']=step
+                rows=owner.inventory_page(source,job,kind,state,limit=1)
+                if step%10==0:fair.extend(r[0] for r in rows)
+                elif step%10!=5:assert rows[0][0]==hot
+            assert old in fair, 'priority cursor reset starved another hash bucket'
     finally:owner.close();store.close()

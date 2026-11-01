@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-import os
+import os,threading
 import pytest
 from leakguard_host.discovery import DiscoveryCoordinator
 from leakguard_host import mounted_worker
@@ -42,7 +42,7 @@ def test_availability_worker_honors_root_identity_and_reaps(tmp_path):
 
 class Store:
     def __init__(self,root):
-        self.root=root;self.events=[];self.deadlines=[]
+        self.root=root;self.events=[];self.deadlines=[];self._mutex=threading.RLock()
     def query_findings_page(self,**kwargs):
         self.query=kwargs
         rows=[{'source':{'path':str(p)},'state':'active'} for p in (self.root/'present',self.root/'absent',self.root/'absent',self.root.parent/'outside')]
@@ -51,7 +51,9 @@ class Store:
     @contextmanager
     def partition(self,bucket):yield self
     def set_deadline(self,value):self.deadlines.append(value)
-    def record_event(self,path,event):self.events.append((Path(path).name,event))
+    def record_event(self,path,event):
+        assert self._mutex._is_owned(), 'publication bypassed the profile owner mutex'
+        self.events.append((Path(path).name,event))
 
 
 def metadata_entry(root,path,status):
