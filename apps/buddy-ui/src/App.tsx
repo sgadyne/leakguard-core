@@ -102,7 +102,6 @@ export default function App() {
     const generation=++refreshGeneration.current;
     const data = await request<any>("/status");
     if(generation!==refreshGeneration.current)return;
-    setStatus(data); setConnected(true);
     const observation = data.observations || {};
     if (observation.unlocked) {
       const [ss, jj] = await Promise.all([request<any>("/sources"), request<any>("/jobs")]);
@@ -110,6 +109,7 @@ export default function App() {
       setSources(Array.isArray(ss) ? ss : ss.sources || []);
       setJobs(Array.isArray(jj) ? jj : jj.jobs || []);
     } else { setSources([]); setJobs([]); setSelectedSource(""); }
+    setStatus(data);setConnected(true);
   }, []);
   const refreshAll = useCallback(async () => {
     try { await refreshStatus(); setError(""); }
