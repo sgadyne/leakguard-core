@@ -18,6 +18,7 @@ PACKAGES = {
     "jose_recognizers": "plugins/jose_recognizers/src/jose_recognizers",
 }
 TESTS = (
+    "tests/test_desktop_scan_completion.py",
     "tests/test_inspection_diagnostics.py",
     "tests/test_measure_pipeline_cost.py",
     "tests/test_overnight_recognition.py",

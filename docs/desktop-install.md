@@ -35,17 +35,28 @@ its Git guard interpreter path remains stable.
 
 Create encrypted scan storage to add sources and scan. The credential vault has
 its own passphrase and can be created separately. Existing encrypted stores are
-offered for unlock. Existing legacy state is neither copied nor migrated;
-credential backup restore is an explicit workflow.
+offered for unlock. An unrelated legacy installation is not imported automatically;
+credential backup restore remains an explicit workflow. Updates of this desktop
+workspace use the separate, explicit runtime migration described below.
 
 Closing the main window hides it while the owned backend continues. Reopen from
 the menu bar/tray. Quit requests safe shutdown. A pending scanner shutdown stays
 visible and retains its store ownership until it can finish.
 
-Preparation failure preserves profile state. A different runtime identity is
-reported as `runtime-migration-required`; v0 does not silently replace a runtime
-or copy a plugin registry into a new venv. Keep the existing profile and receipt
-for diagnosis. Do not delete encrypted stores or an active runtime as a repair.
+Preparation failure preserves profile state. A different runtime identity first
+reports runtime-migration-required. The desktop offers **Back up and upgrade**
+or **Quit**; migration requires that explicit choice. The preparer holds profile
+ownership, creates and verifies a profile backup, installs the new offline runtime
+under its own identity, and retains the old runtime and backup. A failed migration
+restores the verified profile backup; interrupted migration has an explicit
+recovery/rollback path. Unchanged identity reuses its private runtime and plugins.
+Plugin availability still follows the installed runtime and conformance checks;
+migration does not implicitly enable a plugin.
+
+The native Mac update qualified on November 2 preserved the existing encrypted
+profile and verified its backup. Do not delete stores or an active runtime as a
+repair. See [the exact-build qualification](standalone-qualification-20261102.md)
+for the tested identities and remaining native checks.
 
 For isolated acceptance, launch with an absolute, canonical, new profile path:
 
@@ -68,7 +79,7 @@ files entering the new Buddy 0.1.0a2 wheel.
 ```sh
 python3 deploy/desktop/build.py \
   --target macos-arm64 \
-  --runtime-input /prepared/cpython-3.13.13-macos-aarch64-none \
+  --runtime-input /prepared/cpython-3.11.16-macos-aarch64-none \
   --backend-input /prepared/macos-arm64/LeakGuard \
   --provenance /prepared/runtime-downloads.json \
   --output /new/empty/output
@@ -82,9 +93,14 @@ Electron 45.0.0. Build-time npm downloads are distinct from offline first launch
 
 The output includes `artifact-receipt.json`, the resource
 `desktop-manifest.json`, input provenance and (for a packaged artifact)
-`artifact-files.json` and the application ZIP. The original alpha wheelhouse and
-historical manifests are read-only inputs. All wheels except Buddy retain their
-original bytes. The new Buddy wheel has newly generated metadata and RECORD.
+`artifact-files.json` and the application ZIP. The backend input must be rebuilt from the exact clean integrated source commit
+and target Python minor (currently 3.11, with bundled CPython 3.11.16). It must
+contain the fresh core, host, vault, Buddy, credential detector, Presidio adapter
+and JOSE product wheels. Replacing only Buddy in an older product wheelhouse is
+not supported. The desktop builder checks the backend source identity and
+required package closure, verifies the Buddy source/static bytes, then copies
+the manifested wheelhouse without modifying its wheel bytes. Dependency inputs
+and provenance remain separately recorded.
 Runtime archive URLs may be recorded without upstream archive hashes where
 those hashes were not independently obtained; tree hashes identify the actual
 prepared input bytes.

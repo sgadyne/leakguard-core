@@ -433,13 +433,100 @@ def _jobs(value) -> list[dict]:
     return value
 
 
+def _disable_automatic_discovery(client: BuddyClient) -> None:
+    """Set only the native check's fresh profile, before opening its scan store."""
+    status, settings, _ = client.request("GET", "/api/settings")
+    _expect_status(status, 200, "synthetic-settings-query-failed")
+    protection = _dict(_dict(settings, "settings-response-invalid").get("protection"),
+                       "protection-response-invalid")
+    status, _, _ = client.request("POST", "/api/settings", {
+        "protection": {**protection, "automatic_this_mac": False},
+    })
+    _expect_status(status, 200, "synthetic-settings-save-failed")
+    status, saved, _ = client.request("GET", "/api/settings")
+    _expect_status(status, 200, "synthetic-settings-query-failed")
+    if _dict(_dict(saved, "settings-response-invalid").get("protection"),
+             "protection-response-invalid").get("automatic_this_mac") is not False:
+        raise JourneyFailure("synthetic-scope-not-isolated")
+
+
+def _synthetic_file_digest(fixture: Path) -> str:
+    """Only the native harness's new, single-file synthetic source is eligible."""
+    if (not isinstance(fixture, Path)
+            or not fixture.is_absolute() or fixture.resolve() != fixture
+            or fixture.is_symlink() or not fixture.is_file()
+            or set(fixture.parent.iterdir()) != {fixture}
+            or not 0 < fixture.stat().st_size <= 1_000_000):
+        raise JourneyFailure("synthetic-scope-invalid")
+    return hashlib.sha256(fixture.read_bytes()).hexdigest()
+
+
+def _managed_fixture_completion(job: dict, source: dict, *, source_id: str,
+                                job_id: str, fixture: Path, digest: str) -> dict:
+    """Prove this explicit synthetic file completed, never whole-machine coverage.
+
+    Inventory counts are sparse: absent states mean zero, while the expected
+    inspected file and enumerated root must both have explicit exact counts.
+    Findings below must additionally bind the expected rule to this source/file.
+    """
+    known = {"inspected", "enumerated", "pending", "changed", "enumerating",
+             "inspection-error", "inaccessible", "unsupported", "inspected-with-omissions",
+             "excluded", "alias", "protected", "remote-only", "not-seen"}
+    counts = job.get("inventory_counts")
+    if (job.get("id") != job_id or job.get("source_id") != source_id
+            or job.get("state") != "completed" or job.get("coverage") not in {"complete", "incomplete"}
+            or source.get("id") != source_id or source.get("root") != str(fixture.parent)
+            or source.get("kind") != "local" or source.get("managed_inventory") is not True
+            or source.get("enabled") is not True
+            or job.get("inventory_complete") is not True
+            or type(job.get("inventory_generation")) is not int or job["inventory_generation"] <= 0
+            or type(job.get("files_scanned")) is not int or job["files_scanned"] < 1
+            or any(type(job.get(key)) is not int or job[key] != 0
+                   for key in ("pending_files", "pending_directories", "omission_count"))
+            or "last_error" not in job or job["last_error"] is not None
+            or type(counts) is not dict or not set(counts) <= known
+            or any(type(value) is not int or value < 0 for value in counts.values())
+            or counts.get("inspected") != 1 or counts.get("enumerated") != 1
+            or sum(counts.values()) != 2
+            or _synthetic_file_digest(fixture) != digest):
+        raise JourneyFailure("managed-synthetic-scan-incomplete")
+    return {"verified": True, "expected_files": 1, "inspected_files": 1,
+            "enumerated_directories": 1, "content_sha256": digest,
+            "coverage_label": job["coverage"], "claim": "explicit-synthetic-file-only"}
+
+
+def _finding_pages(client: BuddyClient, query: dict, *, code: str) -> list[dict]:
+    """Follow exact returned cursors, including empty sparse pages; finite bound."""
+    rows, seen, cursor = [], set(), None
+    for _ in range(64):
+        parameters = {**query, **({"cursor": cursor} if cursor is not None else {})}
+        status, value, _ = client.request("GET", "/api/findings?" + urlencode(parameters))
+        _expect_status(status, 200, code)
+        value = _dict(value, "findings-response-invalid")
+        page = value.get("findings")
+        if type(page) is not list or any(type(row) is not dict for row in page):
+            raise JourneyFailure("findings-response-invalid")
+        rows.extend(page)
+        cursor = value.get("next_cursor")
+        if cursor is None:
+            return rows
+        if type(cursor) is not str or not cursor or len(cursor) > 4096 or cursor in seen:
+            raise JourneyFailure("findings-cursor-invalid")
+        seen.add(cursor)
+    raise JourneyFailure("findings-page-bound")
+
+
 def _run_scan(client: BuddyClient, source_id: str, expected_rule: str,
-              timeout: float, checks: dict, details: dict) -> tuple[str, dict]:
+              timeout: float, checks: dict, details: dict, *,
+              managed_fixture: Path | None = None) -> tuple[str, dict]:
+    # Ordinary CLI journeys retain strict complete coverage. Only the native
+    # harness opts in with the one explicit file it just created.
+    digest = _synthetic_file_digest(managed_fixture) if managed_fixture is not None else None
     status, submitted, _ = client.request("POST", "/api/scans", {"source_id": source_id})
     _expect_status(status, 202, "scan-submit-failed")
     submitted = _dict(submitted, "scan-submit-invalid")
     job_id = submitted.get("id")
-    if type(job_id) is not str:
+    if type(job_id) is not str or not job_id:
         raise JourneyFailure("scan-job-id-missing")
     deadline = time.monotonic() + timeout
     observed = None
@@ -452,21 +539,42 @@ def _run_scan(client: BuddyClient, source_id: str, expected_rule: str,
         if observed.get("state") in {"completed", "failed", "backoff", "cancelled", "paused"}:
             break
         time.sleep(0.1)
-    if observed is None or observed.get("state") != "completed" or observed.get("coverage") != "complete":
+    if (observed is None or observed.get("source_id") != source_id
+            or observed.get("state") != "completed"):
         raise JourneyFailure("scan-incomplete")
-    details["files_scanned"] = int(observed.get("files_scanned") or 0)
-    checks["bounded_scan_completed"] = details["files_scanned"] >= 1
-    status, findings, _ = client.request(
-        "GET", "/api/findings?" + urlencode({"state": "current", "rule": expected_rule, "limit": "20"}),
-    )
-    _expect_status(status, 200, "findings-query-failed")
-    findings = _dict(findings, "findings-response-invalid")
-    rows = findings.get("findings")
-    if type(rows) is not list or not rows or any(type(row) is not dict for row in rows):
+    if managed_fixture is not None:
+        status, sources, _ = client.request("GET", "/api/sources")
+        _expect_status(status, 200, "sources-query-failed")
+        matches = [row for row in _jobs(sources) if row.get("id") == source_id]
+        if len(matches) != 1:
+            raise JourneyFailure("synthetic-source-missing")
+        details["managed_scope_completion"] = _managed_fixture_completion(
+            observed, matches[0], source_id=source_id, job_id=job_id,
+            fixture=managed_fixture, digest=digest)
+    elif observed.get("coverage") != "complete":
+        raise JourneyFailure("scan-incomplete")
+    scanned = observed.get("files_scanned")
+    if type(scanned) is not int or scanned < 1:
+        raise JourneyFailure("scan-content-completion-missing")
+    details["files_scanned"] = scanned
+    checks["bounded_scan_completed"] = True
+    query = {"state": "current", "rule": expected_rule, "limit": "20"}
+    if managed_fixture is not None:
+        query["source"] = str(managed_fixture)
+    rows = _finding_pages(client, query, code="findings-query-failed")
+    candidates = [item for item in rows if item.get("rule") == expected_rule
+                  and type(item.get("id")) is str]
+    if managed_fixture is not None:
+        candidates = [item for item in candidates if item.get("source_id") == source_id
+                      and type(item.get("source")) is dict
+                      and item["source"].get("path") == str(managed_fixture)
+                      and item.get("state") == "active"
+                      and type(item.get("last_verified")) is str and item["last_verified"]]
+        if _synthetic_file_digest(managed_fixture) != digest:
+            raise JourneyFailure("synthetic-source-changed")
+    if not candidates:
         raise JourneyFailure("expected-finding-missing")
-    row = next((item for item in rows if item.get("rule") == expected_rule), None)
-    if row is None or type(row.get("id")) is not str:
-        raise JourneyFailure("expected-rule-missing")
+    row = candidates[0]
     finding_id = row["id"]
     details["finding_id"] = finding_id
     details["finding_rule"] = row.get("rule")
@@ -475,16 +583,10 @@ def _run_scan(client: BuddyClient, source_id: str, expected_rule: str,
         "POST", f"/api/findings/{quote(finding_id, safe='')}/annotation", {"state": "reviewed"},
     )
     _expect_status(status, 200, "finding-annotation-failed")
-    status, filtered, _ = client.request(
-        "GET", "/api/findings?" + urlencode({"state": "current", "rule": expected_rule,
-                                              "annotation": "reviewed", "limit": "20"}),
-    )
-    _expect_status(status, 200, "finding-filter-failed")
-    filtered = _dict(filtered, "finding-filter-invalid")
+    filtered = _finding_pages(client, {**query, "annotation": "reviewed"}, code="finding-filter-failed")
     checks["finding_filter_and_annotation"] = any(
-        type(item) is dict and item.get("id") == finding_id
-        and (item.get("annotation") or {}).get("state") == "reviewed"
-        for item in filtered.get("findings", [])
+        item.get("id") == finding_id and (item.get("annotation") or {}).get("state") == "reviewed"
+        for item in filtered
     )
     if not checks["finding_filter_and_annotation"]:
         raise JourneyFailure("finding-annotation-not-visible")

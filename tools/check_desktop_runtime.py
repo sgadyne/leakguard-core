@@ -180,6 +180,8 @@ def main():
         duplicate.process.stdin.close()
         duplicate.process.wait(timeout=10)
         checks["backend_ownership_while_stores_locked"] = True
+        journey._disable_automatic_discovery(client)
+        checks["automatic_discovery_disabled_before_scan_store"] = True
         observation_phrase = "Desktop synthetic observation passphrase " + uuid.uuid4().hex
         vault_phrase = "Desktop synthetic credential passphrase " + uuid.uuid4().hex
         backup_phrase = "Desktop synthetic backup passphrase " + uuid.uuid4().hex
@@ -195,7 +197,7 @@ def main():
         fixture.write_text(fixture_text + "\n")
         status, added, _ = client.request("POST", "/api/sources", {"root": str(source), "label": "Synthetic desktop acceptance"})
         require(status == 201, "source-create-failed")
-        journey._run_scan(client, added["id"], expected_rule, 90, checks, details)
+        journey._run_scan(client, added["id"], expected_rule, 90, checks, details, managed_fixture=fixture)
         status, saved, _ = client.request("POST", "/api/vault/entries", {"title": "Synthetic desktop credential", "secret": secret})
         require(status == 201 and "secret" not in saved, "credential-save-failed")
         entry = quote(saved["id"], safe="")
