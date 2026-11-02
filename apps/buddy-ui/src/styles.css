@@ -3,7 +3,7 @@
 html, body, #root { min-width: 0; min-height: 100%; margin: 0; }
 body { min-height: 100vh; }
 button, input, textarea, select { font: inherit; }
-:focus-visible { outline: 3px solid var(--buddy-focus); outline-offset: 3px; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--buddy-focus); outline-offset: 3px; }
 .path-text { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; word-break: break-word; }
 .table-viewport { min-height: 300px; height: min(56vh, 560px); width: 100%; min-width: 0; }
 .workbench-table { width: 100%; border-collapse: collapse; font-size: 14px; }
